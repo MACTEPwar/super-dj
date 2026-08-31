@@ -49,9 +49,18 @@ src/
                            rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
                            overlayText.ts (drawtext escaping), types.ts (Spawner, ChildProcessLike)
   stream/streamController.ts   session state machine, wires feeder + pusher + queue
+  auth/                    authService.ts, authRoutes.ts, authMiddleware.ts (requireAuth),
+                           userRepository.ts / sessionRepository.ts (Prisma), sessionCookie.ts,
+                           passwordHash.ts (bcrypt hash/verify)
+prisma/                    schema.prisma (User, Session) + migrations/
 test/                      mirrors src/; unit tests only
 assets/                    default cover + background images
 ```
+
+**Persistence/auth:** PostgreSQL via Prisma. `main.ts` calls `prisma.$connect()` at boot (fail
+fast) and `$disconnect()` on shutdown. Sessions are opaque UUIDs stored in the `Session` table and
+carried in an httpOnly cookie. Schema changes need a migration (`npx prisma migrate dev`) —
+`prisma/migrations/` is committed and must stay in sync with `schema.prisma`.
 
 **Testing strategy:** everything touching ffmpeg is injected as a `Spawner` /
 `ChildProcessLike` fake — unit tests never spawn real ffmpeg (`test/server.test.ts` spawns a plain
@@ -62,6 +71,7 @@ introducing a new mocking style.
 
 `POST /stream/{start,stop,pause,resume,next,previous,play}`, `GET /stream/status`,
 `GET /library`, `POST /library/rescan`, `GET /openapi.json`, `GET /docs` (Swagger UI).
+`POST /auth/{register,login,logout}`, `GET /auth/me`.
 
 ## Development commands
 
@@ -75,9 +85,9 @@ docker compose up --build
 
 ## Configuration
 
-Required env vars: `RTMP_URL`, `STREAM_KEY` (never commit these).
+Required env vars: `RTMP_URL`, `STREAM_KEY`, `DATABASE_URL` (never commit these).
 Optional: `PORT` (3000), `AUDIO_DIR` (`/data/audio`), `FIFO_PATH` (`/tmp/super-dj-stream.fifo`),
-`DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`.
+`DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`, `SESSION_TTL_DAYS` (30).
 
 ## Known follow-ups (deliberately deferred)
 
