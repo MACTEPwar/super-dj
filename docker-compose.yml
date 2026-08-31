@@ -1,0 +1,11 @@
+services:
+  super-dj:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      RTMP_URL: ${RTMP_URL}
+      STREAM_KEY: ${STREAM_KEY}
+      AUDIO_DIR: /data/audio
+    volumes:
+      - ./music:/data/audio:ro
