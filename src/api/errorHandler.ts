@@ -14,5 +14,6 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(err.status).json({ error: err.message });
     return;
   }
+  console.error('unexpected error handling request', err);
   res.status(500).json({ error: 'internal server error' });
 }

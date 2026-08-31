@@ -1,6 +1,6 @@
 import { PassThrough } from 'stream';
 import request from 'supertest';
-import { buildServer } from '../src/server';
+import { buildServer, createSpawner } from '../src/server';
 import { AppConfig } from '../src/config/env';
 import { Spawner, ChildProcessLike } from '../src/ffmpeg/types';
 
@@ -38,5 +38,22 @@ describe('buildServer', () => {
     const res = await request(app).post('/stream/start');
 
     expect(res.status).toBe(409);
+  });
+});
+
+describe('createSpawner', () => {
+  it('drains the spawned child stderr and forwards it to process.stderr', async () => {
+    const writeSpy = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const child = createSpawner()(process.execPath, ['-e', 'console.error("ffmpeg-banner")']);
+      await new Promise<void>((resolve) => {
+        // Wait for stderr EOF, not exit: exit can fire before stdio is flushed.
+        child.stderr?.on('end', () => resolve());
+      });
+      const written = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(written).toContain('ffmpeg-banner');
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 });
