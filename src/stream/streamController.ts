@@ -1,4 +1,3 @@
-import { Library } from '../playlist/library';
 import { PlaylistQueue } from '../playlist/queue';
 import { Track } from '../playlist/types';
 import { SegmentFeeder } from '../ffmpeg/segmentFeeder';
@@ -7,8 +6,13 @@ import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 
+export interface LibraryLike {
+  list(): Track[];
+  findByName(name: string): Track | undefined;
+}
+
 export interface StreamControllerDeps {
-  library: Library;
+  library: LibraryLike;
   queue: PlaylistQueue;
   fifoPath: string;
   createFifo: (path: string) => void;
