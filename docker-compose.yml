@@ -7,5 +7,19 @@ services:
       RTMP_URL: ${RTMP_URL}
       STREAM_KEY: ${STREAM_KEY}
       AUDIO_DIR: /data/audio
+      DATABASE_URL: postgresql://superdj:superdj@postgres:5432/superdj
     volumes:
       - ./music:/data/audio:ro
+    depends_on:
+      - postgres
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: superdj
+      POSTGRES_PASSWORD: superdj
+      POSTGRES_DB: superdj
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
