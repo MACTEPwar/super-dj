@@ -22,6 +22,8 @@ const config: AppConfig = {
   defaultCoverPath: '/assets/default-cover.png',
   backgroundImagePath: '/assets/background.png',
   fifoPath: '/tmp/test.fifo',
+  databaseUrl: 'postgresql://u:p@localhost:5432/db',
+  sessionTtlDays: 30,
 };
 
 describe('buildServer', () => {

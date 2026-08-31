@@ -1,15 +1,23 @@
 import { loadConfig } from '../../src/config/env';
 
 describe('loadConfig', () => {
-  const base = { RTMP_URL: 'rtmp://example.com/live', STREAM_KEY: 'key123' } as NodeJS.ProcessEnv;
+  const base = {
+    RTMP_URL: 'rtmp://example.com/live',
+    STREAM_KEY: 'key123',
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+  } as NodeJS.ProcessEnv;
 
   it('throws when RTMP_URL is missing', () => {
-    expect(() => loadConfig({ STREAM_KEY: 'key123' } as NodeJS.ProcessEnv))
+    expect(() => loadConfig({
+      STREAM_KEY: 'key123', DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    } as NodeJS.ProcessEnv))
       .toThrow('RTMP_URL environment variable is required');
   });
 
   it('throws when STREAM_KEY is missing', () => {
-    expect(() => loadConfig({ RTMP_URL: 'rtmp://example.com/live' } as NodeJS.ProcessEnv))
+    expect(() => loadConfig({
+      RTMP_URL: 'rtmp://example.com/live', DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    } as NodeJS.ProcessEnv))
       .toThrow('STREAM_KEY environment variable is required');
   });
 
@@ -29,5 +37,26 @@ describe('loadConfig', () => {
     expect(config.audioDir).toBe('/music');
     expect(config.fifoPath).toBe('/tmp/x.fifo');
     expect(config.backgroundImagePath).toBe('/assets/bg.png');
+  });
+});
+
+describe('loadConfig — database', () => {
+  const base = { RTMP_URL: 'rtmp://example.com/live', STREAM_KEY: 'key123' } as NodeJS.ProcessEnv;
+
+  it('throws when DATABASE_URL is missing', () => {
+    expect(() => loadConfig(base)).toThrow('DATABASE_URL environment variable is required');
+  });
+
+  it('applies a default sessionTtlDays of 30', () => {
+    const config = loadConfig({ ...base, DATABASE_URL: 'postgresql://u:p@localhost:5432/db' } as NodeJS.ProcessEnv);
+    expect(config.databaseUrl).toBe('postgresql://u:p@localhost:5432/db');
+    expect(config.sessionTtlDays).toBe(30);
+  });
+
+  it('honors an overridden SESSION_TTL_DAYS', () => {
+    const config = loadConfig({
+      ...base, DATABASE_URL: 'postgresql://u:p@localhost:5432/db', SESSION_TTL_DAYS: '7',
+    } as NodeJS.ProcessEnv);
+    expect(config.sessionTtlDays).toBe(7);
   });
 });

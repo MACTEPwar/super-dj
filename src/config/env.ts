@@ -8,17 +8,23 @@ export interface AppConfig {
   defaultCoverPath: string;
   backgroundImagePath: string;
   fifoPath: string;
+  databaseUrl: string;
+  sessionTtlDays: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const rtmpUrl = env.RTMP_URL;
   const streamKey = env.STREAM_KEY;
+  const databaseUrl = env.DATABASE_URL;
 
   if (!rtmpUrl) {
     throw new Error('RTMP_URL environment variable is required');
   }
   if (!streamKey) {
     throw new Error('STREAM_KEY environment variable is required');
+  }
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL environment variable is required');
   }
 
   return {
@@ -29,5 +35,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     defaultCoverPath: env.DEFAULT_COVER_PATH ?? path.join(process.cwd(), 'assets', 'default-cover.png'),
     backgroundImagePath: env.BACKGROUND_IMAGE_PATH ?? path.join(process.cwd(), 'assets', 'background.png'),
     fifoPath: env.FIFO_PATH ?? '/tmp/super-dj-stream.fifo',
+    databaseUrl,
+    sessionTtlDays: env.SESSION_TTL_DAYS ? parseInt(env.SESSION_TTL_DAYS, 10) : 30,
   };
 }
