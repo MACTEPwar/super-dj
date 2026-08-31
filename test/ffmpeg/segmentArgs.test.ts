@@ -26,7 +26,23 @@ describe('buildTrackSegmentArgs', () => {
     expect(filterComplex).toContain('%{pts\\:hms} / 1\\:05');
     expect(filterComplex).toContain('▶ Song A\n  Song B');
 
-    expect(args).toEqual(expect.arrayContaining(['-map', '[outv]', '-map', '2:a', '-shortest', '-f', 'mpegts', 'pipe:1']));
+    // Assert the encoder tail exactly so a missing pin cannot slip through.
+    expect(args.slice(filterComplexIndex + 2)).toEqual([
+      '-map', '[outv]',
+      '-map', '2:a',
+      '-c:v', 'libx264',
+      '-tune', 'stillimage',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ar', '44100',
+      '-ac', '2',
+      '-pix_fmt', 'yuv420p',
+      '-r', '30',
+      '-g', '60',
+      '-shortest',
+      '-f', 'mpegts',
+      'pipe:1',
+    ]);
   });
 
   it('adds a -ss seek before the audio input when resuming mid-track', () => {
@@ -50,8 +66,11 @@ describe('buildPauseSegmentArgs', () => {
       '-c:v', 'libx264',
       '-tune', 'stillimage',
       '-c:a', 'aac',
+      '-ar', '44100',
+      '-ac', '2',
       '-pix_fmt', 'yuv420p',
       '-r', '30',
+      '-g', '60',
       '-vf', 'scale=1280:720',
       '-f', 'mpegts',
       'pipe:1',
