@@ -78,4 +78,14 @@ describe('SegmentFeeder', () => {
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
+
+  it('close() ends the fifo write stream', () => {
+    const writeStream = new PassThrough();
+    const endSpy = jest.spyOn(writeStream, 'end');
+    const feeder = buildFeeder({ createWriteStream: () => writeStream });
+
+    feeder.close();
+
+    expect(endSpy).toHaveBeenCalled();
+  });
 });

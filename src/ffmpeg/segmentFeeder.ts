@@ -53,6 +53,11 @@ export class SegmentFeeder {
     }
   }
 
+  /** Closes the FIFO write stream. Call once the feeder is being discarded. */
+  close(): void {
+    this.fifoWriteStream.end();
+  }
+
   private spawnAndPipe(args: string[]): ChildProcessLike {
     this.stopCurrent();
     const child = this.options.spawner('ffmpeg', args);

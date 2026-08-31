@@ -5,6 +5,29 @@ import { Track } from '../../src/playlist/types';
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
 const overlayFor = (t: Track) => ({ title: t.name, playlistLines: [`▶ ${t.name}`], durationSeconds: 100 });
 
+type FakeChild = {
+  pid: number;
+  stdout: null;
+  stderr: null;
+  kill: jest.Mock;
+  once: jest.Mock;
+  emitExit: (code?: number | null) => void;
+};
+
+function fakeChild(): FakeChild {
+  let exitListener: ((code: number | null) => void) | null = null;
+  return {
+    pid: 1,
+    stdout: null,
+    stderr: null,
+    kill: jest.fn(),
+    once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
+      if (event === 'exit') exitListener = listener as (code: number | null) => void;
+    }),
+    emitExit: (code = 0) => exitListener && exitListener(code),
+  };
+}
+
 function buildDeps() {
   const tracks = [track('a'), track('b')];
   const library = {
@@ -18,7 +41,17 @@ function buildDeps() {
     insertNext: jest.fn(),
     peekNext: jest.fn().mockReturnValue(tracks[1]),
   };
-  const feeder = { feedTrack: jest.fn(), feedPause: jest.fn(), stopCurrent: jest.fn() };
+  const children: FakeChild[] = [];
+  const feeder = {
+    feedTrack: jest.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    }),
+    feedPause: jest.fn(() => fakeChild()),
+    stopCurrent: jest.fn(),
+    close: jest.fn(),
+  };
   const pusher = { start: jest.fn(), stop: jest.fn() };
   const deps: any = {
     library, queue, fifoPath: '/tmp/fifo',
@@ -27,7 +60,7 @@ function buildDeps() {
     createRtmpPusher: jest.fn().mockReturnValue(pusher),
     buildOverlay: jest.fn(overlayFor),
   };
-  return { deps, library, queue, feeder, pusher };
+  return { deps, library, queue, feeder, pusher, children };
 }
 
 describe('StreamController', () => {
@@ -131,8 +164,93 @@ describe('StreamController', () => {
     controller.stop();
 
     expect(feeder.stopCurrent).toHaveBeenCalled();
+    expect(feeder.close).toHaveBeenCalled();
     expect(pusher.stop).toHaveBeenCalled();
     expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/fifo');
     expect(controller.status().state).toBe('idle');
+  });
+
+  it('start() removes any stale fifo before creating it', () => {
+    const { deps } = buildDeps();
+    const controller = new StreamController(deps);
+
+    controller.start();
+
+    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/fifo');
+    expect(deps.removeFifo.mock.invocationCallOrder[0])
+      .toBeLessThan(deps.createFifo.mock.invocationCallOrder[0]);
+  });
+
+  it('auto-advances to the next track when the current segment exits naturally', () => {
+    const { deps, queue, feeder, children } = buildDeps();
+    const controller = new StreamController(deps);
+    controller.start();
+
+    expect(children).toHaveLength(1);
+    children[0].emitExit(0);
+
+    expect(queue.next).toHaveBeenCalled();
+    expect(feeder.feedTrack).toHaveBeenLastCalledWith(
+      { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
+      overlayFor(track('b')),
+    );
+    expect(controller.status().state).toBe('streaming');
+  });
+
+  it('does not double-advance when a superseded segment exits late after next()', () => {
+    const { deps, queue, feeder, children } = buildDeps();
+    const controller = new StreamController(deps);
+    controller.start();
+
+    controller.next();
+    expect(queue.next).toHaveBeenCalledTimes(1);
+    expect(feeder.feedTrack).toHaveBeenCalledTimes(2);
+
+    // The killed first segment's ffmpeg exits asynchronously afterwards.
+    children[0].emitExit(null);
+
+    expect(queue.next).toHaveBeenCalledTimes(1);
+    expect(feeder.feedTrack).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not advance when a segment exits after stop()', () => {
+    const { deps, queue, feeder, children } = buildDeps();
+    const controller = new StreamController(deps);
+    controller.start();
+
+    controller.stop();
+    children[0].emitExit(null);
+
+    expect(queue.next).not.toHaveBeenCalled();
+    expect(feeder.feedTrack).toHaveBeenCalledTimes(1);
+    expect(controller.status().state).toBe('idle');
+  });
+
+  it('start() recovers from the error state instead of rejecting with 409', () => {
+    const { deps, pusher } = buildDeps();
+    const controller = new StreamController(deps);
+    controller.start();
+
+    // Simulate the pusher dying unexpectedly.
+    const onExit = pusher.start.mock.calls[0][0] as (code: number | null) => void;
+    onExit(1);
+    expect(controller.status().state).toBe('error');
+
+    controller.start();
+
+    expect(controller.status().state).toBe('streaming');
+  });
+
+  it('supports a full start() -> stop() -> start() cycle without getting stuck in error', () => {
+    const { deps, pusher } = buildDeps();
+    const controller = new StreamController(deps);
+
+    controller.start();
+    controller.stop();
+    // RtmpPusher swallows the post-stop exit, so no onExit fires here.
+    controller.start();
+
+    expect(controller.status().state).toBe('streaming');
+    expect(pusher.start).toHaveBeenCalledTimes(2);
   });
 });

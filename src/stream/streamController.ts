@@ -24,30 +24,47 @@ export class StreamController {
   private pusher: RtmpPusher | null = null;
   private trackStartedAt: number | null = null;
   private pausedElapsedSeconds = 0;
+  private segmentGeneration = 0;
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
   start(): void {
-    if (this.state !== 'idle') throw new ApiError(409, 'stream is already active');
+    if (this.state === 'streaming' || this.state === 'paused') {
+      throw new ApiError(409, 'stream is already active');
+    }
     if (this.deps.library.list().length === 0) throw new ApiError(409, 'library is empty');
+
+    // Best-effort cleanup of anything left behind by a crashed session or an
+    // unclean shutdown; removeFifo is idempotent (it swallows ENOENT), so this
+    // also makes createFifo safe when a stale FIFO survived on disk.
+    this.segmentGeneration += 1;
+    this.feeder?.stopCurrent();
+    this.feeder?.close();
+    this.pusher?.stop();
+    this.feeder = null;
+    this.pusher = null;
+    this.deps.removeFifo(this.deps.fifoPath);
 
     this.deps.createFifo(this.deps.fifoPath);
     this.pusher = this.deps.createRtmpPusher();
     this.pusher.start(() => { this.state = 'error'; });
     this.feeder = this.deps.createSegmentFeeder();
     this.pausedElapsedSeconds = 0;
+    this.trackStartedAt = null;
+
+    this.state = 'streaming';
 
     const track = this.deps.queue.current();
     if (track) {
-      this.feeder.feedTrack(track, this.deps.buildOverlay(track));
-      this.trackStartedAt = Date.now();
+      this.feedCurrentTrack(track);
     }
-    this.state = 'streaming';
   }
 
   stop(): void {
     if (this.state === 'idle') throw new ApiError(409, 'stream is not active');
+    this.segmentGeneration += 1;
     this.feeder?.stopCurrent();
+    this.feeder?.close();
     this.pusher?.stop();
     this.deps.removeFifo(this.deps.fifoPath);
     this.feeder = null;
@@ -63,18 +80,18 @@ export class StreamController {
       this.pausedElapsedSeconds += (Date.now() - this.trackStartedAt) / 1000;
       this.trackStartedAt = null;
     }
-    this.feeder!.feedPause();
+    this.segmentGeneration += 1;
     this.state = 'paused';
+    this.feeder!.feedPause();
   }
 
   resume(): void {
     if (this.state !== 'paused') throw new ApiError(409, 'stream is not paused');
+    this.state = 'streaming';
     const track = this.deps.queue.current();
     if (track) {
-      this.feeder!.feedTrack(track, this.deps.buildOverlay(track), this.pausedElapsedSeconds);
-      this.trackStartedAt = Date.now();
+      this.feedCurrentTrack(track, this.pausedElapsedSeconds);
     }
-    this.state = 'streaming';
   }
 
   next(): void {
@@ -83,8 +100,7 @@ export class StreamController {
     if (!track) throw new ApiError(409, 'no tracks in queue');
     this.pausedElapsedSeconds = 0;
     if (this.state === 'streaming') {
-      this.feeder!.feedTrack(track, this.deps.buildOverlay(track));
-      this.trackStartedAt = Date.now();
+      this.feedCurrentTrack(track);
     }
   }
 
@@ -93,8 +109,35 @@ export class StreamController {
     const track = this.deps.queue.previous();
     this.pausedElapsedSeconds = 0;
     if (track && this.state === 'streaming') {
-      this.feeder!.feedTrack(track, this.deps.buildOverlay(track));
-      this.trackStartedAt = Date.now();
+      this.feedCurrentTrack(track);
+    }
+  }
+
+  /**
+   * Feeds a track segment and arms an auto-advance listener on the producer
+   * process. The generation counter distinguishes "this segment ended naturally"
+   * (advance to the next track) from "this segment was superseded/torn down by
+   * next/previous/pause/stop/start" (do nothing).
+   */
+  private feedCurrentTrack(track: Track, startOffsetSeconds = 0): void {
+    const generation = ++this.segmentGeneration;
+    const overlay = this.deps.buildOverlay(track);
+    const child = startOffsetSeconds
+      ? this.feeder!.feedTrack(track, overlay, startOffsetSeconds)
+      : this.feeder!.feedTrack(track, overlay);
+    this.trackStartedAt = Date.now();
+    child?.once('exit', () => {
+      if (generation !== this.segmentGeneration) return;
+      if (this.state !== 'streaming') return;
+      this.advanceToNextTrack();
+    });
+  }
+
+  private advanceToNextTrack(): void {
+    const track = this.deps.queue.next();
+    this.pausedElapsedSeconds = 0;
+    if (track) {
+      this.feedCurrentTrack(track);
     }
   }
 
