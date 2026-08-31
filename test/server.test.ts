@@ -24,6 +24,9 @@ const config: AppConfig = {
   fifoPath: '/tmp/test.fifo',
   databaseUrl: 'postgresql://u:p@localhost:5432/db',
   sessionTtlDays: 30,
+  uploadsDir: '/uploads',
+  streamKeyEncryptionKey: 'a'.repeat(64),
+  fifoDir: '/tmp',
 };
 
 describe('buildServer', () => {
