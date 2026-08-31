@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { PrismaClient } from '@prisma/client';
 import { AppConfig } from './config/env';
 import { Library } from './playlist/library';
 import { PlaylistQueue } from './playlist/queue';
@@ -11,6 +12,9 @@ import { createFifo, removeFifo } from './ffmpeg/fifo';
 import { getAudioDurationSeconds } from './ffmpeg/duration';
 import { buildPlaylistWindowLines } from './ffmpeg/overlayText';
 import { Spawner, ChildProcessLike } from './ffmpeg/types';
+import { UserRepository } from './auth/userRepository';
+import { SessionRepository } from './auth/sessionRepository';
+import { AuthService } from './auth/authService';
 import { createApp } from './api/app';
 
 const VIDEO_WIDTH = 1280;
@@ -40,6 +44,11 @@ export function createSpawner(): Spawner {
 export function buildServer(config: AppConfig, spawner: Spawner = createSpawner()) {
   const library = new Library(config.audioDir, config.defaultCoverPath);
   const queue = new PlaylistQueue([]);
+
+  const prisma = new PrismaClient({ datasources: { db: { url: config.databaseUrl } } });
+  const userRepository = new UserRepository(prisma);
+  const sessionRepository = new SessionRepository(prisma);
+  const authService = new AuthService({ userRepository, sessionRepository, sessionTtlDays: config.sessionTtlDays });
 
   const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
     const allTracks = library.list();
@@ -75,7 +84,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     }),
   });
 
-  const app = createApp({ streamController, library, queue });
+  const app = createApp({ streamController, library, queue, authService });
 
-  return { app, library, queue, streamController };
+  return { app, library, queue, streamController, prisma };
 }

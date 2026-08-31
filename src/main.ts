@@ -3,8 +3,9 @@ import { buildServer } from './server';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { app, library, queue, streamController } = buildServer(config);
+  const { app, library, queue, streamController, prisma } = buildServer(config);
 
+  await prisma.$connect();
   await library.scan();
   queue.setTracks(library.list());
 
@@ -13,7 +14,7 @@ async function main(): Promise<void> {
   });
 
   let shuttingDown = false;
-  const shutdown = (signal: string): void => {
+  const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`received ${signal}, shutting down`);
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error('error stopping stream during shutdown', err);
     }
+    await prisma.$disconnect();
     server.close(() => process.exit(0));
   };
 

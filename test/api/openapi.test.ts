@@ -5,7 +5,8 @@ function buildApp() {
   const streamController: any = { status: jest.fn().mockReturnValue({ state: 'idle' }) };
   const library: any = { list: jest.fn().mockReturnValue([]) };
   const queue: any = { setTracks: jest.fn() };
-  return createApp({ streamController, library, queue });
+  const authService: any = { register: jest.fn(), login: jest.fn(), logout: jest.fn(), getCurrentUser: jest.fn() };
+  return createApp({ streamController, library, queue, authService });
 }
 
 describe('API docs', () => {
