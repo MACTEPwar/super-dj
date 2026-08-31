@@ -1,0 +1,33 @@
+import { posix as path } from 'path';
+
+export interface AppConfig {
+  port: number;
+  rtmpUrl: string;
+  streamKey: string;
+  audioDir: string;
+  defaultCoverPath: string;
+  backgroundImagePath: string;
+  fifoPath: string;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const rtmpUrl = env.RTMP_URL;
+  const streamKey = env.STREAM_KEY;
+
+  if (!rtmpUrl) {
+    throw new Error('RTMP_URL environment variable is required');
+  }
+  if (!streamKey) {
+    throw new Error('STREAM_KEY environment variable is required');
+  }
+
+  return {
+    port: env.PORT ? parseInt(env.PORT, 10) : 3000,
+    rtmpUrl,
+    streamKey,
+    audioDir: env.AUDIO_DIR ?? '/data/audio',
+    defaultCoverPath: env.DEFAULT_COVER_PATH ?? path.join(process.cwd(), 'assets', 'default-cover.png'),
+    backgroundImagePath: env.BACKGROUND_IMAGE_PATH ?? path.join(process.cwd(), 'assets', 'background.png'),
+    fifoPath: env.FIFO_PATH ?? '/tmp/super-dj-stream.fifo',
+  };
+}
