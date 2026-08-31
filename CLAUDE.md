@@ -1,50 +1,85 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project status
-
-This repository is currently empty — no code has been written yet. This file captures the
-project plan agreed on during design brainstorming, so it can guide the initial implementation.
-**Update this file once real code, build tooling, and tests exist** — replace the "Planned
-architecture" section below with what's actually there, and add real commands under
-"Development commands".
+Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project overview
 
-An autonomous YouTube streamer: a service that runs in Docker on Linux and streams a local
-playlist of songs to YouTube Live continuously, controlled externally via a REST API
-(start/stop for the MVP; live control — skip, insert tracks — is a planned follow-up).
+**super-dj** — an autonomous YouTube streamer. A Node.js/TypeScript service that runs in Docker
+on Linux, continuously streams a local library of audio files to YouTube Live over one
+never-interrupted RTMP connection, and is controlled externally via a REST API (start/stop/pause/
+resume/next/previous/play-by-name).
 
-## Planned architecture (MVP)
+## Architecture (as built)
 
-- **Stack:** Node.js / TypeScript.
-- **Control plane:** a REST API service (e.g. `POST /stream/start`, `POST /stream/stop`) that
-  manages the streaming process's lifecycle.
-- **Streaming pipeline:** a single long-lived `ffmpeg` process per session, using the concat
-  demuxer to play local audio files back-to-back over one continuous RTMP connection to
-  YouTube, paired with a simple static-image/looping video track. One ffmpeg process per
-  session is deliberate — restarting ffmpeg between songs would drop/reconnect the RTMP
-  connection to YouTube.
-- **Playlist source:** local audio files (mounted into the container), referenced by a
-  generated playlist manifest passed to ffmpeg's concat demuxer.
-- **Deployment:** Docker container(s) on Linux; the YouTube RTMP URL and stream key are
-  supplied as secrets/env vars, not committed to the repo.
+The concat-demuxer MVP was skipped; the implementation is the FIFO + MPEG-TS design.
 
-## Planned evolution (post-MVP)
+- **Two-process ffmpeg pipeline.** A short-lived *producer* ffmpeg per segment (one track, or a
+  silence/background "pause" segment) encodes to MPEG-TS on stdout; Node pipes that stdout into a
+  named pipe (FIFO). A single long-lived *pusher* ffmpeg reads the FIFO and `-c copy`s it to RTMP,
+  so the YouTube connection survives every track change, skip, pause and seek.
+- **Codec pinning matters.** Because the pusher uses `-c copy`, every segment must share identical
+  codec parameters (H.264/yuv420p, fixed fps + GOP, AAC 44.1kHz stereo). These are pinned in
+  `src/ffmpeg/segmentArgs.ts` — do not let a new segment builder diverge.
+- **Auto-advance.** `StreamController` listens for the producer child's `exit` and advances the
+  queue. A `segmentGeneration` counter distinguishes a natural end-of-track from a segment that was
+  deliberately superseded (next/previous/pause/stop/start), preventing double-advance.
+- **Overlay.** Each track segment composites background + cover art + drawtext (title, elapsed/
+  total, a playlist window) via `-filter_complex`.
+- **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected pusher exit sets
+  `error`, from which `start()` recovers (it cleans up leftovers and recreates the FIFO).
 
-Live control of an in-progress stream (skip track, insert a track, reorder) requires replacing
-the concat-demuxer pipeline with a named-pipe (FIFO) architecture: the Node service writes
-audio/video segments into a FIFO that a persistent ffmpeg process reads from, so the RTMP
-connection never needs to restart when the playlist changes mid-stream. The REST API layer and
-Docker packaging are expected to carry over unchanged; only the internal "player" component
-changes.
+## Layout
 
-## Tooling
+```
+src/
+  main.ts                  entrypoint: config, library scan, listen, SIGTERM/SIGINT shutdown
+  server.ts                composition root (buildServer) + createSpawner (drains ffmpeg stderr)
+  errors.ts                ApiError (status + message)
+  config/env.ts            loadConfig() from environment
+  api/                     app.ts, streamRoutes.ts, libraryRoutes.ts, errorHandler.ts, openapi.ts
+  playlist/                library.ts (disk scan), queue.ts (cursor + insertNext), types.ts
+  ffmpeg/                  segmentArgs.ts / segmentFeeder.ts (producer), rtmpPusherArgs.ts /
+                           rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
+                           overlayText.ts (drawtext escaping), types.ts (Spawner, ChildProcessLike)
+  stream/streamController.ts   session state machine, wires feeder + pusher + queue
+test/                      mirrors src/; unit tests only
+assets/                    default cover + background images
+```
 
-This project is being developed with help from the [wshobson/agents](https://github.com/wshobson/agents)
-Claude Code plugin marketplace. No repo-specific plugin has been chosen/pinned yet.
+**Testing strategy:** everything touching ffmpeg is injected as a `Spawner` /
+`ChildProcessLike` fake — unit tests never spawn real ffmpeg (`test/server.test.ts` spawns a plain
+`node -e` only to prove stderr is drained). Follow the existing fake-child pattern rather than
+introducing a new mocking style.
+
+## HTTP API
+
+`POST /stream/{start,stop,pause,resume,next,previous,play}`, `GET /stream/status`,
+`GET /library`, `POST /library/rescan`, `GET /openapi.json`, `GET /docs` (Swagger UI).
 
 ## Development commands
 
-Not yet established — no `package.json`, build, lint, or test setup exists yet.
+```
+npm install
+npm run build          # tsc -p tsconfig.json
+npm test               # jest (or npx jest)
+npm start              # node dist/main.js
+docker compose up --build
+```
+
+## Configuration
+
+Required env vars: `RTMP_URL`, `STREAM_KEY` (never commit these).
+Optional: `PORT` (3000), `AUDIO_DIR` (`/data/audio`), `FIFO_PATH` (`/tmp/super-dj-stream.fifo`),
+`DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`.
+
+## Known follow-ups (deliberately deferred)
+
+Duplicate track names by basename; `Library.list()` returns a mutable reference; `PORT` parsing is
+unvalidated; overlay elapsed time drifts from true playout position; `stopCurrent()` SIGTERMs
+mid-TS-packet; the Docker image runs as root; `assets/` holds 1×1 placeholder PNGs. Real-ffmpeg
+smoke testing of segment concatenation has not been run in CI.
+
+## Tooling
+
+Developed with help from the [wshobson/agents](https://github.com/wshobson/agents) Claude Code
+plugin marketplace. No repo-specific plugin is pinned.
