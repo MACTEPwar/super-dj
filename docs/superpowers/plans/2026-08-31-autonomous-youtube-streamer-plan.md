@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Node.js/TypeScript service that streams a local audio playlist to YouTube Live continuously via a persistent ffmpeg RTMP process, controlled by a REST API (start/stop/pause/resume/next/previous/play-by-name/rescan) without ever restarting the RTMP connection.
+**Goal:** Build the Node.js/TypeScript service that streams a local audio playlist to YouTube Live continuously via a persistent ffmpeg RTMP process, controlled by a REST API (start/stop/pause/resume/next/previous/play-by-name/rescan), rendering a "Now Playing" video screen (background + cover + title + live timer + playlist window) since YouTube does not allow streaming bare audio — all without ever restarting the RTMP connection.
 
-**Architecture:** A persistent `RtmpPusher` ffmpeg process reads a named pipe (FIFO) and copies it straight to YouTube RTMP (`-c copy`). A `SegmentFeeder` spawns short-lived ffmpeg producer processes (one per track or pause) that transcode audio+cover into MPEG-TS segments and write their bytes into the FIFO; MPEG-TS segments concatenate byte-wise, so switching what is fed does not interrupt the RTMP stream. `StreamController` is a state machine (`idle`/`streaming`/`paused`/`error`) that wires `PlaylistQueue` (queue/history/insert-next) and `Library` (directory scan) to the feeder/pusher. Express exposes this over REST with Swagger/OpenAPI docs.
+**Architecture:** A persistent `RtmpPusher` ffmpeg process reads a named pipe (FIFO) and copies it straight to YouTube RTMP (`-c copy`). A `SegmentFeeder` spawns short-lived ffmpeg producer processes (one per track or pause) that composite a background + track cover + drawtext overlays (title, live elapsed/duration timer, windowed playlist) with the audio into MPEG-TS segments and write their bytes into the FIFO; MPEG-TS segments concatenate byte-wise, so switching what is fed does not interrupt the RTMP stream. `StreamController` is a state machine (`idle`/`streaming`/`paused`/`error`) that wires `PlaylistQueue` (queue/history/insert-next), `Library` (directory scan), and an overlay builder (title + playlist window + ffprobe'd duration) to the feeder/pusher, and tracks elapsed playback time so `pause`→`resume` seeks the audio back to the same position. Express exposes this over REST with Swagger/OpenAPI docs.
 
-**Tech Stack:** Node.js, TypeScript, Express, ffmpeg (spawned as a child process), Jest + ts-jest + supertest, swagger-ui-express, Docker.
+**Tech Stack:** Node.js, TypeScript, Express, ffmpeg + ffprobe (spawned as child processes), Jest + ts-jest + supertest, swagger-ui-express, Docker.
 
 **Spec:** [docs/superpowers/specs/2026-08-31-autonomous-youtube-streamer-design.md](../specs/2026-08-31-autonomous-youtube-streamer-design.md)
 
@@ -17,11 +17,12 @@
 - State is in-memory only; no persistence, no auto-recovery after a restart.
 - Exactly one stream session at a time (design must not make future multi-session support structurally impossible, but only one session is built/tested).
 - `RTMP_URL` and `STREAM_KEY` are required env vars with no defaults; the service must refuse to start a stream without them.
-- Library scan order is alphabetical by filename; rescanning happens only on explicit `POST /library/rescan`.
-- Pause is silence + splash fed into the FIFO — never a stop/restart of the RTMP connection.
+- Library scan order is alphabetical by filename; rescanning happens only on explicit `POST /library/rescan`, and must also resync `PlaylistQueue`.
+- Pause is silence + splash fed into the FIFO — never a stop/restart of the RTMP connection. Resume continues the audio from the position it was paused at (via `-ss` seek), even though the on-screen live timer restarts from 0 at resume (documented MVP simplification — see spec §2.1).
 - `play-by-name` inserts the track as "next" in the queue; it does not switch immediately.
 - `previous` at the start of history is idempotent (stays on the current track, no error).
 - REST API must ship with Swagger/OpenAPI documentation.
+- The Now Playing screen shows a limited playlist window (2 before + current + 7 after by default), never the whole library, so on-screen text size doesn't depend on library size.
 - All filesystem paths inside `Library`/ffmpeg argument builders are built with POSIX semantics (`path.posix`), since the deployment target is always Linux and this keeps unit tests deterministic across dev OSes.
 
 ---
@@ -158,7 +159,7 @@ git commit -m "chore: project scaffolding (TypeScript, Jest)"
 - Test: `test/config/env.test.ts`
 
 **Interfaces:**
-- Produces: `loadConfig(env?: NodeJS.ProcessEnv): AppConfig`, `interface AppConfig { port: number; rtmpUrl: string; streamKey: string; audioDir: string; defaultCoverPath: string; fifoPath: string; }`
+- Produces: `loadConfig(env?: NodeJS.ProcessEnv): AppConfig`, `interface AppConfig { port: number; rtmpUrl: string; streamKey: string; audioDir: string; defaultCoverPath: string; backgroundImagePath: string; fifoPath: string; }`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -184,13 +185,17 @@ describe('loadConfig', () => {
     expect(config.port).toBe(3000);
     expect(config.audioDir).toBe('/data/audio');
     expect(config.fifoPath).toBe('/tmp/super-dj-stream.fifo');
+    expect(config.backgroundImagePath.endsWith('background.png')).toBe(true);
   });
 
   it('honors overrides', () => {
-    const config = loadConfig({ ...base, PORT: '8080', AUDIO_DIR: '/music', FIFO_PATH: '/tmp/x.fifo' } as NodeJS.ProcessEnv);
+    const config = loadConfig({
+      ...base, PORT: '8080', AUDIO_DIR: '/music', FIFO_PATH: '/tmp/x.fifo', BACKGROUND_IMAGE_PATH: '/assets/bg.png',
+    } as NodeJS.ProcessEnv);
     expect(config.port).toBe(8080);
     expect(config.audioDir).toBe('/music');
     expect(config.fifoPath).toBe('/tmp/x.fifo');
+    expect(config.backgroundImagePath).toBe('/assets/bg.png');
   });
 });
 ```
@@ -211,6 +216,7 @@ export interface AppConfig {
   streamKey: string;
   audioDir: string;
   defaultCoverPath: string;
+  backgroundImagePath: string;
   fifoPath: string;
 }
 
@@ -231,6 +237,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     streamKey,
     audioDir: env.AUDIO_DIR ?? '/data/audio',
     defaultCoverPath: env.DEFAULT_COVER_PATH ?? path.join(process.cwd(), 'assets', 'default-cover.png'),
+    backgroundImagePath: env.BACKGROUND_IMAGE_PATH ?? path.join(process.cwd(), 'assets', 'background.png'),
     fifoPath: env.FIFO_PATH ?? '/tmp/super-dj-stream.fifo',
   };
 }
@@ -538,7 +545,205 @@ git commit -m "feat: playlist queue with next/previous/insert-next"
 
 ---
 
-### Task 5: ffmpeg process types & pure argument builders
+### Task 5: Now Playing overlay text helpers
+
+**Files:**
+- Create: `src/ffmpeg/overlayText.ts`
+- Test: `test/ffmpeg/overlayText.test.ts`
+
+**Interfaces:**
+- Consumes: `Track` (Task 3).
+- Produces: `formatDuration(totalSeconds: number): string`, `escapeDrawtext(text: string): string`, `buildPlaylistWindowLines(tracks: Track[], currentIndex: number, before: number, after: number): string[]`
+
+These are pure string functions with no ffmpeg/process dependency — the rest of
+the Now Playing screen (Task 7) composes them into ffmpeg `drawtext` filter
+strings.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/ffmpeg/overlayText.test.ts
+import { formatDuration, escapeDrawtext, buildPlaylistWindowLines } from '../../src/ffmpeg/overlayText';
+import { Track } from '../../src/playlist/types';
+
+const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
+
+describe('formatDuration', () => {
+  it('formats sub-hour durations as M:SS', () => {
+    expect(formatDuration(65)).toBe('1:05');
+    expect(formatDuration(5)).toBe('0:05');
+  });
+
+  it('formats hour-plus durations as H:MM:SS', () => {
+    expect(formatDuration(3725)).toBe('1:02:05');
+  });
+
+  it('clamps negative input to zero', () => {
+    expect(formatDuration(-10)).toBe('0:00');
+  });
+});
+
+describe('escapeDrawtext', () => {
+  it('escapes backslash, colon, quote and percent for ffmpeg drawtext syntax', () => {
+    expect(escapeDrawtext(`a:b'c%d\\e`)).toBe(`a\\:b\\'c\\%d\\\\e`);
+  });
+});
+
+describe('buildPlaylistWindowLines', () => {
+  const tracks = [track('a'), track('b'), track('c'), track('d'), track('e')];
+
+  it('marks the current track and windows around it', () => {
+    const lines = buildPlaylistWindowLines(tracks, 2, 1, 1);
+    expect(lines).toEqual(['  b', '▶ c', '  d']);
+  });
+
+  it('clamps the window at the start and end of the list', () => {
+    expect(buildPlaylistWindowLines(tracks, 0, 2, 1)).toEqual(['▶ a', '  b']);
+    expect(buildPlaylistWindowLines(tracks, 4, 1, 2)).toEqual(['  d', '▶ e']);
+  });
+
+  it('returns an empty array for an empty playlist', () => {
+    expect(buildPlaylistWindowLines([], -1, 2, 7)).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `npx jest test/ffmpeg/overlayText.test.ts`
+Expected: FAIL — `Cannot find module '../../src/ffmpeg/overlayText'`
+
+- [ ] **Step 3: Implement `src/ffmpeg/overlayText.ts`**
+
+```ts
+import { Track } from '../playlist/types';
+
+export function formatDuration(totalSeconds: number): string {
+  const rounded = Math.max(0, Math.round(totalSeconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
+  const paddedSeconds = String(seconds).padStart(2, '0');
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${paddedSeconds}`;
+  }
+  return `${minutes}:${paddedSeconds}`;
+}
+
+export function escapeDrawtext(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/%/g, '\\%');
+}
+
+export function buildPlaylistWindowLines(
+  tracks: Track[],
+  currentIndex: number,
+  before: number,
+  after: number,
+): string[] {
+  if (tracks.length === 0 || currentIndex < 0) return [];
+
+  const start = Math.max(0, currentIndex - before);
+  const end = Math.min(tracks.length - 1, currentIndex + after);
+  const lines: string[] = [];
+
+  for (let i = start; i <= end; i += 1) {
+    lines.push(i === currentIndex ? `▶ ${tracks[i].name}` : `  ${tracks[i].name}`);
+  }
+
+  return lines;
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `npx jest test/ffmpeg/overlayText.test.ts`
+Expected: PASS (7 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ffmpeg/overlayText.ts test/ffmpeg/overlayText.test.ts
+git commit -m "feat: pure text helpers for the Now Playing overlay"
+```
+
+---
+
+### Task 6: Audio duration probing
+
+**Files:**
+- Create: `src/ffmpeg/duration.ts`
+- Test: `test/ffmpeg/duration.test.ts`
+
+**Interfaces:**
+- Produces: `getAudioDurationSeconds(audioPath: string, execFileFn?: typeof execFileSync): number`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/ffmpeg/duration.test.ts
+import { getAudioDurationSeconds } from '../../src/ffmpeg/duration';
+
+describe('getAudioDurationSeconds', () => {
+  it('runs ffprobe and parses the duration from its output', () => {
+    const execFileFn = jest.fn().mockReturnValue(Buffer.from('225.500000\n'));
+
+    const seconds = getAudioDurationSeconds('/music/a.mp3', execFileFn as any);
+
+    expect(execFileFn).toHaveBeenCalledWith('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'csv=p=0',
+      '/music/a.mp3',
+    ]);
+    expect(seconds).toBeCloseTo(225.5);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `npx jest test/ffmpeg/duration.test.ts`
+Expected: FAIL — `Cannot find module '../../src/ffmpeg/duration'`
+
+- [ ] **Step 3: Implement `src/ffmpeg/duration.ts`**
+
+```ts
+import { execFileSync } from 'child_process';
+
+export function getAudioDurationSeconds(
+  audioPath: string,
+  execFileFn: typeof execFileSync = execFileSync,
+): number {
+  const output = execFileFn('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'csv=p=0',
+    audioPath,
+  ]);
+  return parseFloat(output.toString().trim());
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `npx jest test/ffmpeg/duration.test.ts`
+Expected: PASS (1 test)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ffmpeg/duration.ts test/ffmpeg/duration.test.ts
+git commit -m "feat: ffprobe-based audio duration lookup"
+```
+
+---
+
+### Task 7: ffmpeg process types & pure argument builders
 
 **Files:**
 - Create: `src/ffmpeg/types.ts`
@@ -548,7 +753,8 @@ git commit -m "feat: playlist queue with next/previous/insert-next"
 - Test: `test/ffmpeg/rtmpPusherArgs.test.ts`
 
 **Interfaces:**
-- Produces: `interface ChildProcessLike { pid: number|undefined; stdout: NodeJS.ReadableStream|null; stderr: NodeJS.ReadableStream|null; kill(signal?: NodeJS.Signals): void; once(event: 'exit'|'error', listener: (...args: unknown[]) => void): void; }`, `type Spawner = (command: string, args: string[]) => ChildProcessLike`, `interface VideoParams { width: number; height: number; fps: number; }`, `buildTrackSegmentArgs(params: VideoParams & { audioPath: string; coverPath: string }): string[]`, `buildPauseSegmentArgs(params: VideoParams & { coverPath: string }): string[]`, `buildRtmpPusherArgs(params: { fifoPath: string; rtmpUrl: string; streamKey: string }): string[]`
+- Consumes: `formatDuration`, `escapeDrawtext` (Task 5).
+- Produces: `interface ChildProcessLike { pid: number|undefined; stdout: NodeJS.ReadableStream|null; stderr: NodeJS.ReadableStream|null; kill(signal?: NodeJS.Signals): void; once(event: 'exit'|'error', listener: (...args: unknown[]) => void): void; }`, `type Spawner = (command: string, args: string[]) => ChildProcessLike`, `interface VideoParams { width: number; height: number; fps: number; }`, `interface NowPlayingOverlay { title: string; playlistLines: string[]; durationSeconds: number; }`, `buildTrackSegmentArgs(params: VideoParams & { audioPath: string; coverPath: string; backgroundPath: string; fontFile: string; overlay: NowPlayingOverlay; startOffsetSeconds?: number; }): string[]`, `buildPauseSegmentArgs(params: VideoParams & { backgroundPath: string }): string[]`, `buildRtmpPusherArgs(params: { fifoPath: string; rtmpUrl: string; streamKey: string }): string[]`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -557,40 +763,50 @@ git commit -m "feat: playlist queue with next/previous/insert-next"
 import { buildTrackSegmentArgs, buildPauseSegmentArgs } from '../../src/ffmpeg/segmentArgs';
 
 describe('buildTrackSegmentArgs', () => {
-  it('builds ffmpeg args that mux the cover image with the audio file into mpegts on stdout', () => {
-    const args = buildTrackSegmentArgs({
-      audioPath: '/music/a.mp3',
-      coverPath: '/music/a.png',
-      width: 1280,
-      height: 720,
-      fps: 30,
-    });
+  const base = {
+    audioPath: '/music/a.mp3',
+    coverPath: '/music/a.png',
+    backgroundPath: '/assets/background.png',
+    fontFile: '/fonts/DejaVuSans-Bold.ttf',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    overlay: { title: 'Song A', playlistLines: ['▶ Song A', '  Song B'], durationSeconds: 65 },
+  };
 
-    expect(args).toEqual([
-      '-loop', '1',
-      '-i', '/music/a.png',
-      '-i', '/music/a.mp3',
-      '-c:v', 'libx264',
-      '-tune', 'stillimage',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      '-pix_fmt', 'yuv420p',
-      '-r', '30',
-      '-vf', 'scale=1280:720',
-      '-shortest',
-      '-f', 'mpegts',
-      'pipe:1',
-    ]);
+  it('builds ffmpeg args with the composited filter graph and no seek by default', () => {
+    const args = buildTrackSegmentArgs(base);
+
+    expect(args.slice(0, 4)).toEqual(['-loop', '1', '-i', '/assets/background.png']);
+    expect(args).toEqual(expect.arrayContaining(['-loop', '1', '-i', '/music/a.png']));
+    expect(args).toEqual(expect.arrayContaining(['-i', '/music/a.mp3']));
+    expect(args).not.toEqual(expect.arrayContaining(['-ss']));
+
+    const filterComplexIndex = args.indexOf('-filter_complex');
+    const filterComplex = args[filterComplexIndex + 1];
+    expect(filterComplex).toContain("drawtext=fontfile=/fonts/DejaVuSans-Bold.ttf:text='Song A'");
+    expect(filterComplex).toContain('%{pts\\:hms} / 1\\:05');
+    expect(filterComplex).toContain('▶ Song A\n  Song B');
+
+    expect(args).toEqual(expect.arrayContaining(['-map', '[outv]', '-map', '2:a', '-shortest', '-f', 'mpegts', 'pipe:1']));
+  });
+
+  it('adds a -ss seek before the audio input when resuming mid-track', () => {
+    const args = buildTrackSegmentArgs({ ...base, startOffsetSeconds: 42 });
+    const audioInputIndex = args.indexOf('/music/a.mp3');
+
+    expect(args[audioInputIndex - 3]).toBe('-ss');
+    expect(args[audioInputIndex - 2]).toBe('42');
   });
 });
 
 describe('buildPauseSegmentArgs', () => {
-  it('builds ffmpeg args for an unbounded silence + splash segment', () => {
-    const args = buildPauseSegmentArgs({ coverPath: '/assets/default.png', width: 1280, height: 720, fps: 30 });
+  it('builds ffmpeg args for an unbounded silence + background segment', () => {
+    const args = buildPauseSegmentArgs({ backgroundPath: '/assets/background.png', width: 1280, height: 720, fps: 30 });
 
     expect(args).toEqual([
       '-loop', '1',
-      '-i', '/assets/default.png',
+      '-i', '/assets/background.png',
       '-f', 'lavfi',
       '-i', 'anullsrc=r=44100:cl=stereo',
       '-c:v', 'libx264',
@@ -636,39 +852,79 @@ export interface ChildProcessLike {
 }
 
 export type Spawner = (command: string, args: string[]) => ChildProcessLike;
-```
 
-- [ ] **Step 4: Implement `src/ffmpeg/segmentArgs.ts`**
-
-```ts
 export interface VideoParams {
   width: number;
   height: number;
   fps: number;
 }
+```
 
-export function buildTrackSegmentArgs(params: VideoParams & { audioPath: string; coverPath: string }): string[] {
-  return [
-    '-loop', '1',
-    '-i', params.coverPath,
-    '-i', params.audioPath,
+- [ ] **Step 4: Implement `src/ffmpeg/segmentArgs.ts`**
+
+```ts
+import { VideoParams } from './types';
+import { escapeDrawtext, formatDuration } from './overlayText';
+
+export interface NowPlayingOverlay {
+  title: string;
+  playlistLines: string[];
+  durationSeconds: number;
+}
+
+export function buildTrackSegmentArgs(params: VideoParams & {
+  audioPath: string;
+  coverPath: string;
+  backgroundPath: string;
+  fontFile: string;
+  overlay: NowPlayingOverlay;
+  startOffsetSeconds?: number;
+}): string[] {
+  const { width, height, fps, audioPath, coverPath, backgroundPath, fontFile, overlay } = params;
+  const coverSize = Math.round(height * 0.6);
+  const panelX = coverSize + 80;
+  const title = escapeDrawtext(overlay.title);
+  const duration = escapeDrawtext(formatDuration(overlay.durationSeconds));
+  const playlist = escapeDrawtext(overlay.playlistLines.join('\n'));
+
+  const filterComplex = [
+    `[1:v]scale=${coverSize}:${coverSize}[cover]`,
+    `[0:v]scale=${width}:${height}[bg]`,
+    `[bg][cover]overlay=40:40[bg1]`,
+    `[bg1]drawtext=fontfile=${fontFile}:text='${title}':x=${panelX}:y=40:fontsize=42:fontcolor=white[bg2]`,
+    `[bg2]drawtext=fontfile=${fontFile}:text='%{pts\\:hms} / ${duration}':x=${panelX}:y=100:fontsize=28:fontcolor=white[bg3]`,
+    `[bg3]drawtext=fontfile=${fontFile}:text='${playlist}':x=${panelX}:y=160:fontsize=22:fontcolor=white:line_spacing=8[outv]`,
+  ].join(';');
+
+  const args = ['-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', coverPath];
+
+  if (params.startOffsetSeconds) {
+    args.push('-ss', String(params.startOffsetSeconds));
+  }
+
+  args.push(
+    '-i', audioPath,
+    '-filter_complex', filterComplex,
+    '-map', '[outv]',
+    '-map', '2:a',
     '-c:v', 'libx264',
     '-tune', 'stillimage',
     '-c:a', 'aac',
     '-b:a', '192k',
     '-pix_fmt', 'yuv420p',
-    '-r', String(params.fps),
-    '-vf', `scale=${params.width}:${params.height}`,
+    '-r', String(fps),
     '-shortest',
     '-f', 'mpegts',
     'pipe:1',
-  ];
+  );
+
+  return args;
 }
 
-export function buildPauseSegmentArgs(params: VideoParams & { coverPath: string }): string[] {
+export function buildPauseSegmentArgs(params: VideoParams & { backgroundPath: string }): string[] {
   return [
     '-loop', '1',
-    '-i', params.coverPath,
+    '-i', params.backgroundPath,
     '-f', 'lavfi',
     '-i', 'anullsrc=r=44100:cl=stereo',
     '-c:v', 'libx264',
@@ -700,26 +956,26 @@ export function buildRtmpPusherArgs(params: { fifoPath: string; rtmpUrl: string;
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `npx jest test/ffmpeg/segmentArgs.test.ts test/ffmpeg/rtmpPusherArgs.test.ts`
-Expected: PASS (2 tests)
+Expected: PASS (3 tests)
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/ffmpeg/types.ts src/ffmpeg/segmentArgs.ts src/ffmpeg/rtmpPusherArgs.ts test/ffmpeg/segmentArgs.test.ts test/ffmpeg/rtmpPusherArgs.test.ts
-git commit -m "feat: pure ffmpeg argument builders"
+git commit -m "feat: pure ffmpeg argument builders with Now Playing overlay"
 ```
 
 ---
 
-### Task 6: SegmentFeeder
+### Task 8: SegmentFeeder
 
 **Files:**
 - Create: `src/ffmpeg/segmentFeeder.ts`
 - Test: `test/ffmpeg/segmentFeeder.test.ts`
 
 **Interfaces:**
-- Consumes: `Spawner`, `ChildProcessLike` (Task 5), `buildTrackSegmentArgs`, `buildPauseSegmentArgs`, `VideoParams` (Task 5), `Track` (Task 3).
-- Produces: `interface SegmentFeederOptions extends VideoParams { spawner: Spawner; fifoPath: string; defaultCoverPath: string; createWriteStream?: (path: string) => NodeJS.WritableStream; }`, `class SegmentFeeder { constructor(options: SegmentFeederOptions); feedTrack(track: Track): ChildProcessLike; feedPause(): ChildProcessLike; stopCurrent(): void; }`
+- Consumes: `Spawner`, `ChildProcessLike`, `VideoParams`, `NowPlayingOverlay` (Task 7), `buildTrackSegmentArgs`, `buildPauseSegmentArgs` (Task 7), `Track` (Task 3).
+- Produces: `interface SegmentFeederOptions extends VideoParams { spawner: Spawner; fifoPath: string; defaultCoverPath: string; backgroundPath: string; fontFile: string; createWriteStream?: (path: string) => NodeJS.WritableStream; }`, `class SegmentFeeder { constructor(options: SegmentFeederOptions); feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds?: number): ChildProcessLike; feedPause(): ChildProcessLike; stopCurrent(): void; }`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -736,23 +992,31 @@ function fakeChild(): ChildProcessLike & { stdout: PassThrough } {
 }
 
 const track: Track = { name: 'a', audioPath: '/music/a.mp3', coverPath: null };
+const overlay = { title: 'a', playlistLines: ['▶ a'], durationSeconds: 10 };
+
+function buildFeeder(overrides: Partial<{ spawner: Spawner; createWriteStream: () => NodeJS.WritableStream }> = {}) {
+  return new SegmentFeeder({
+    spawner: overrides.spawner ?? (jest.fn().mockReturnValue(fakeChild()) as Spawner),
+    fifoPath: '/tmp/fifo',
+    defaultCoverPath: '/assets/default.png',
+    backgroundPath: '/assets/background.png',
+    fontFile: '/fonts/DejaVuSans-Bold.ttf',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    createWriteStream: overrides.createWriteStream ?? (() => new PassThrough()),
+  });
+}
 
 describe('SegmentFeeder', () => {
   it('spawns ffmpeg with track args and pipes stdout into the fifo stream', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
     const chunks: Buffer[] = [];
-    const writeStream = new Writable({
-      write(chunk, _enc, cb) { chunks.push(chunk); cb(); },
-    });
+    const writeStream = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+    const feeder = buildFeeder({ spawner, createWriteStream: () => writeStream });
 
-    const feeder = new SegmentFeeder({
-      spawner, fifoPath: '/tmp/fifo', defaultCoverPath: '/assets/default.png',
-      width: 1280, height: 720, fps: 30,
-      createWriteStream: () => writeStream,
-    });
-
-    feeder.feedTrack(track);
+    feeder.feedTrack(track, overlay);
     child.stdout.write('segment-bytes');
     child.stdout.end();
 
@@ -761,29 +1025,38 @@ describe('SegmentFeeder', () => {
   });
 
   it('feedTrack falls back to the default cover when the track has none', () => {
-    const child = fakeChild();
-    const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const feeder = new SegmentFeeder({
-      spawner, fifoPath: '/tmp/fifo', defaultCoverPath: '/assets/default.png',
-      width: 1280, height: 720, fps: 30,
-      createWriteStream: () => new PassThrough(),
-    });
+    const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
+    const feeder = buildFeeder({ spawner });
 
-    feeder.feedTrack(track);
+    feeder.feedTrack(track, overlay);
 
     expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/assets/default.png']));
+  });
+
+  it('feedTrack passes the start offset through for a resumed track', () => {
+    const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
+    const feeder = buildFeeder({ spawner });
+
+    feeder.feedTrack(track, overlay, 42);
+
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-ss', '42']));
+  });
+
+  it('feedPause spawns the background+silence args', () => {
+    const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
+    const feeder = buildFeeder({ spawner });
+
+    feeder.feedPause();
+
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/assets/background.png', '-f', 'lavfi']));
   });
 
   it('stopCurrent kills the active process', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const feeder = new SegmentFeeder({
-      spawner, fifoPath: '/tmp/fifo', defaultCoverPath: '/assets/default.png',
-      width: 1280, height: 720, fps: 30,
-      createWriteStream: () => new PassThrough(),
-    });
+    const feeder = buildFeeder({ spawner });
 
-    feeder.feedTrack(track);
+    feeder.feedTrack(track, overlay);
     feeder.stopCurrent();
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
@@ -801,13 +1074,15 @@ Expected: FAIL — `Cannot find module '../../src/ffmpeg/segmentFeeder'`
 ```ts
 import * as fs from 'fs';
 import { Track } from '../playlist/types';
-import { Spawner, ChildProcessLike } from './types';
-import { buildTrackSegmentArgs, buildPauseSegmentArgs, VideoParams } from './segmentArgs';
+import { Spawner, ChildProcessLike, VideoParams } from './types';
+import { buildTrackSegmentArgs, buildPauseSegmentArgs, NowPlayingOverlay } from './segmentArgs';
 
 export interface SegmentFeederOptions extends VideoParams {
   spawner: Spawner;
   fifoPath: string;
   defaultCoverPath: string;
+  backgroundPath: string;
+  fontFile: string;
   createWriteStream?: (path: string) => NodeJS.WritableStream;
 }
 
@@ -820,20 +1095,24 @@ export class SegmentFeeder {
     this.fifoWriteStream = createWriteStream(options.fifoPath);
   }
 
-  feedTrack(track: Track): ChildProcessLike {
+  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0): ChildProcessLike {
     const args = buildTrackSegmentArgs({
       audioPath: track.audioPath,
       coverPath: track.coverPath ?? this.options.defaultCoverPath,
+      backgroundPath: this.options.backgroundPath,
+      fontFile: this.options.fontFile,
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
+      overlay,
+      startOffsetSeconds,
     });
     return this.spawnAndPipe(args);
   }
 
   feedPause(): ChildProcessLike {
     const args = buildPauseSegmentArgs({
-      coverPath: this.options.defaultCoverPath,
+      backgroundPath: this.options.backgroundPath,
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
@@ -863,25 +1142,25 @@ export class SegmentFeeder {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx jest test/ffmpeg/segmentFeeder.test.ts`
-Expected: PASS (3 tests)
+Expected: PASS (5 tests)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/ffmpeg/segmentFeeder.ts test/ffmpeg/segmentFeeder.test.ts
-git commit -m "feat: segment feeder pipes track/pause segments into the fifo"
+git commit -m "feat: segment feeder pipes Now Playing track/pause segments into the fifo"
 ```
 
 ---
 
-### Task 7: RtmpPusher
+### Task 9: RtmpPusher
 
 **Files:**
 - Create: `src/ffmpeg/rtmpPusher.ts`
 - Test: `test/ffmpeg/rtmpPusher.test.ts`
 
 **Interfaces:**
-- Consumes: `Spawner`, `ChildProcessLike` (Task 5), `buildRtmpPusherArgs` (Task 5).
+- Consumes: `Spawner`, `ChildProcessLike` (Task 7), `buildRtmpPusherArgs` (Task 7).
 - Produces: `interface RtmpPusherParams { fifoPath: string; rtmpUrl: string; streamKey: string; }`, `class RtmpPusher { constructor(spawner: Spawner, params: RtmpPusherParams); start(onExit: (code: number|null) => void): void; stop(): void; }`
 
 - [ ] **Step 1: Write the failing tests**
@@ -993,7 +1272,7 @@ git commit -m "feat: persistent rtmp pusher process"
 
 ---
 
-### Task 8: FIFO helpers
+### Task 10: FIFO helpers
 
 **Files:**
 - Create: `src/ffmpeg/fifo.ts`
@@ -1075,7 +1354,7 @@ git commit -m "feat: fifo create/remove helpers"
 
 ---
 
-### Task 9: ApiError & StreamController
+### Task 11: ApiError & StreamController
 
 **Files:**
 - Create: `src/errors.ts`
@@ -1084,8 +1363,12 @@ git commit -m "feat: fifo create/remove helpers"
 - Test: `test/stream/streamController.test.ts`
 
 **Interfaces:**
-- Consumes: `Library`, `Track` (Task 3), `PlaylistQueue` (Task 4), `SegmentFeeder` (Task 6), `RtmpPusher` (Task 7).
-- Produces: `class ApiError extends Error { constructor(status: number, message: string); status: number; }`, `type SessionState = 'idle'|'streaming'|'paused'|'error'`, `interface StreamStatus { state: SessionState; currentTrack: string|null; nextTrack: string|null; }`, `class StreamController { constructor(deps: StreamControllerDeps); start(): void; stop(): void; pause(): void; resume(): void; next(): void; previous(): void; playByName(name: string): void; status(): StreamStatus; }`
+- Consumes: `Library`, `Track` (Task 3), `PlaylistQueue` (Task 4), `SegmentFeeder` (Task 8), `RtmpPusher` (Task 9), `NowPlayingOverlay` (Task 7).
+- Produces: `class ApiError extends Error { constructor(status: number, message: string); status: number; }`, `type SessionState = 'idle'|'streaming'|'paused'|'error'`, `interface StreamStatus { state: SessionState; currentTrack: string|null; nextTrack: string|null; }`, `class StreamController { constructor(deps: StreamControllerDeps); start(): void; stop(): void; pause(): void; resume(): void; next(): void; previous(): void; playByName(name: string): void; status(): StreamStatus; }`, `interface StreamControllerDeps { library: Library; queue: PlaylistQueue; fifoPath: string; createFifo: (path: string) => void; removeFifo: (path: string) => void; createSegmentFeeder: () => SegmentFeeder; createRtmpPusher: () => RtmpPusher; buildOverlay: (track: Track) => NowPlayingOverlay; }`
+
+`StreamController` tracks how long the current track has been playing (wall
+clock since the last `feedTrack` call) so that `pause()` → `resume()` can seek
+`SegmentFeeder.feedTrack` back to the same audio position, per spec §2.1/§3.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1096,6 +1379,7 @@ import { ApiError } from '../../src/errors';
 import { Track } from '../../src/playlist/types';
 
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
+const overlayFor = (t: Track) => ({ title: t.name, playlistLines: [`▶ ${t.name}`], durationSeconds: 100 });
 
 function buildDeps() {
   const tracks = [track('a'), track('b')];
@@ -1117,12 +1401,13 @@ function buildDeps() {
     createFifo: jest.fn(), removeFifo: jest.fn(),
     createSegmentFeeder: jest.fn().mockReturnValue(feeder),
     createRtmpPusher: jest.fn().mockReturnValue(pusher),
+    buildOverlay: jest.fn(overlayFor),
   };
   return { deps, library, queue, feeder, pusher };
 }
 
 describe('StreamController', () => {
-  it('start() creates the fifo, starts the pusher and feeds the current track', () => {
+  it('start() creates the fifo, starts the pusher and feeds the current track with no offset', () => {
     const { deps, feeder, pusher } = buildDeps();
     const controller = new StreamController(deps);
 
@@ -1130,7 +1415,10 @@ describe('StreamController', () => {
 
     expect(deps.createFifo).toHaveBeenCalledWith('/tmp/fifo');
     expect(pusher.start).toHaveBeenCalled();
-    expect(feeder.feedTrack).toHaveBeenCalledWith({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
+    expect(feeder.feedTrack).toHaveBeenCalledWith(
+      { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
+      overlayFor(track('a')),
+    );
     expect(controller.status().state).toBe('streaming');
   });
 
@@ -1148,20 +1436,32 @@ describe('StreamController', () => {
     expect(() => controller.start()).toThrow('library is empty');
   });
 
-  it('pause() feeds a pause segment; resume() feeds the current track again', () => {
+  it('pause() then resume() seeks feedTrack to the elapsed position', () => {
     const { deps, feeder } = buildDeps();
+    const nowSpy = jest.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(1_000);
     const controller = new StreamController(deps);
     controller.start();
 
+    nowSpy.mockReturnValue(1_000 + 12_345);
     controller.pause();
     expect(feeder.feedPause).toHaveBeenCalled();
     expect(controller.status().state).toBe('paused');
 
+    nowSpy.mockReturnValue(1_000 + 20_000);
     controller.resume();
+
+    expect(feeder.feedTrack).toHaveBeenLastCalledWith(
+      { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
+      overlayFor(track('a')),
+      12.345,
+    );
     expect(controller.status().state).toBe('streaming');
+
+    nowSpy.mockRestore();
   });
 
-  it('next() advances the queue and feeds the new track while streaming', () => {
+  it('next() advances the queue, resets elapsed time and feeds the new track while streaming', () => {
     const { deps, queue, feeder } = buildDeps();
     const controller = new StreamController(deps);
     controller.start();
@@ -1169,7 +1469,10 @@ describe('StreamController', () => {
     controller.next();
 
     expect(queue.next).toHaveBeenCalled();
-    expect(feeder.feedTrack).toHaveBeenCalledWith({ name: 'b', audioPath: '/music/b.mp3', coverPath: null });
+    expect(feeder.feedTrack).toHaveBeenLastCalledWith(
+      { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
+      overlayFor(track('b')),
+    );
   });
 
   it('next() throws 409 when idle', () => {
@@ -1244,8 +1547,10 @@ export interface StreamStatus {
 ```ts
 import { Library } from '../playlist/library';
 import { PlaylistQueue } from '../playlist/queue';
+import { Track } from '../playlist/types';
 import { SegmentFeeder } from '../ffmpeg/segmentFeeder';
 import { RtmpPusher } from '../ffmpeg/rtmpPusher';
+import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 
@@ -1257,12 +1562,15 @@ export interface StreamControllerDeps {
   removeFifo: (path: string) => void;
   createSegmentFeeder: () => SegmentFeeder;
   createRtmpPusher: () => RtmpPusher;
+  buildOverlay: (track: Track) => NowPlayingOverlay;
 }
 
 export class StreamController {
   private state: SessionState = 'idle';
   private feeder: SegmentFeeder | null = null;
   private pusher: RtmpPusher | null = null;
+  private trackStartedAt: number | null = null;
+  private pausedElapsedSeconds = 0;
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
@@ -1274,8 +1582,13 @@ export class StreamController {
     this.pusher = this.deps.createRtmpPusher();
     this.pusher.start(() => { this.state = 'error'; });
     this.feeder = this.deps.createSegmentFeeder();
+    this.pausedElapsedSeconds = 0;
+
     const track = this.deps.queue.current();
-    if (track) this.feeder.feedTrack(track);
+    if (track) {
+      this.feeder.feedTrack(track, this.deps.buildOverlay(track));
+      this.trackStartedAt = Date.now();
+    }
     this.state = 'streaming';
   }
 
@@ -1286,11 +1599,17 @@ export class StreamController {
     this.deps.removeFifo(this.deps.fifoPath);
     this.feeder = null;
     this.pusher = null;
+    this.trackStartedAt = null;
+    this.pausedElapsedSeconds = 0;
     this.state = 'idle';
   }
 
   pause(): void {
     if (this.state !== 'streaming') throw new ApiError(409, 'stream is not currently streaming');
+    if (this.trackStartedAt !== null) {
+      this.pausedElapsedSeconds += (Date.now() - this.trackStartedAt) / 1000;
+      this.trackStartedAt = null;
+    }
     this.feeder!.feedPause();
     this.state = 'paused';
   }
@@ -1298,7 +1617,10 @@ export class StreamController {
   resume(): void {
     if (this.state !== 'paused') throw new ApiError(409, 'stream is not paused');
     const track = this.deps.queue.current();
-    if (track) this.feeder!.feedTrack(track);
+    if (track) {
+      this.feeder!.feedTrack(track, this.deps.buildOverlay(track), this.pausedElapsedSeconds);
+      this.trackStartedAt = Date.now();
+    }
     this.state = 'streaming';
   }
 
@@ -1306,13 +1628,21 @@ export class StreamController {
     if (this.state === 'idle' || this.state === 'error') throw new ApiError(409, 'stream is not active');
     const track = this.deps.queue.next();
     if (!track) throw new ApiError(409, 'no tracks in queue');
-    if (this.state === 'streaming') this.feeder!.feedTrack(track);
+    this.pausedElapsedSeconds = 0;
+    if (this.state === 'streaming') {
+      this.feeder!.feedTrack(track, this.deps.buildOverlay(track));
+      this.trackStartedAt = Date.now();
+    }
   }
 
   previous(): void {
     if (this.state === 'idle' || this.state === 'error') throw new ApiError(409, 'stream is not active');
     const track = this.deps.queue.previous();
-    if (track && this.state === 'streaming') this.feeder!.feedTrack(track);
+    this.pausedElapsedSeconds = 0;
+    if (track && this.state === 'streaming') {
+      this.feeder!.feedTrack(track, this.deps.buildOverlay(track));
+      this.trackStartedAt = Date.now();
+    }
   }
 
   playByName(name: string): void {
@@ -1340,12 +1670,12 @@ Expected: PASS (9 tests)
 
 ```bash
 git add src/errors.ts src/stream/types.ts src/stream/streamController.ts test/stream/streamController.test.ts
-git commit -m "feat: stream controller state machine"
+git commit -m "feat: stream controller state machine with pause/resume position tracking"
 ```
 
 ---
 
-### Task 10: REST API — stream & library routes
+### Task 12: REST API — stream & library routes
 
 **Files:**
 - Create: `src/api/errorHandler.ts`
@@ -1356,7 +1686,7 @@ git commit -m "feat: stream controller state machine"
 - Test: `test/api/libraryRoutes.test.ts`
 
 **Interfaces:**
-- Consumes: `StreamController` (Task 9), `ApiError` (Task 9), `Library` (Task 3), `PlaylistQueue` (Task 4).
+- Consumes: `StreamController` (Task 11), `ApiError` (Task 11), `Library` (Task 3), `PlaylistQueue` (Task 4).
 - Produces: `wrapAsync(handler): RequestHandler`, `errorHandler(err, req, res, next): void`, `createStreamRouter(streamController: StreamController): Router`, `createLibraryRouter(library: Library, queue: PlaylistQueue): Router`, `interface AppDeps { streamController: StreamController; library: Library; queue: PlaylistQueue; }`, `createApp(deps: AppDeps): Express`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1613,7 +1943,7 @@ git commit -m "feat: REST API for stream and library control"
 
 ---
 
-### Task 11: OpenAPI / Swagger documentation
+### Task 13: OpenAPI / Swagger documentation
 
 **Files:**
 - Create: `src/api/openapi.ts`
@@ -1621,7 +1951,7 @@ git commit -m "feat: REST API for stream and library control"
 - Test: `test/api/openapi.test.ts`
 
 **Interfaces:**
-- Consumes: `createApp` (Task 10).
+- Consumes: `createApp` (Task 12).
 - Produces: `openApiSpec` (OpenAPI 3.0 document object); `createApp` now also serves `GET /openapi.json` and Swagger UI at `/docs`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1666,7 +1996,7 @@ export const openApiSpec = {
   info: {
     title: 'Super DJ Streamer API',
     version: '1.0.0',
-    description: 'Controls a continuous YouTube Live audio stream.',
+    description: 'Controls a continuous YouTube Live audio stream with a Now Playing video screen.',
   },
   paths: {
     '/stream/start': {
@@ -1689,7 +2019,7 @@ export const openApiSpec = {
     },
     '/stream/pause': {
       post: {
-        summary: 'Pause playback (silence + splash, RTMP stays connected)',
+        summary: 'Pause playback (silence + background, RTMP stays connected)',
         responses: {
           '200': { description: 'Stream paused', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
           '409': { description: 'Stream is not currently streaming' },
@@ -1698,7 +2028,7 @@ export const openApiSpec = {
     },
     '/stream/resume': {
       post: {
-        summary: 'Resume playback of the current track',
+        summary: 'Resume playback of the current track from the position it was paused at',
         responses: {
           '200': { description: 'Stream resumed', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
           '409': { description: 'Stream is not paused' },
@@ -1835,21 +2165,27 @@ git commit -m "feat: OpenAPI spec and Swagger UI for the management API"
 
 ---
 
-### Task 12: Bootstrap wiring (server.ts + main.ts)
+### Task 14: Bootstrap wiring (server.ts + main.ts)
 
 **Files:**
 - Create: `src/server.ts`
 - Create: `src/main.ts`
 - Create: `assets/default-cover.png` (manual asset — see Step 1)
+- Create: `assets/background.png` (manual asset — see Step 1)
 - Test: `test/server.test.ts`
 
 **Interfaces:**
-- Consumes: `AppConfig` (Task 2), `Library`/`PlaylistQueue` (Tasks 3–4), `StreamController` (Task 9), `SegmentFeeder`/`RtmpPusher`/`createFifo`/`removeFifo`/`Spawner` (Tasks 5–8), `createApp` (Task 10–11).
+- Consumes: `AppConfig` (Task 2), `Library`/`PlaylistQueue` (Tasks 3–4), `buildPlaylistWindowLines` (Task 5), `getAudioDurationSeconds` (Task 6), `StreamController` (Task 11), `SegmentFeeder`/`RtmpPusher`/`createFifo`/`removeFifo`/`Spawner` (Tasks 7–10), `createApp` (Task 12–13).
 - Produces: `buildServer(config: AppConfig, spawner?: Spawner): { app: Express; library: Library; queue: PlaylistQueue; streamController: StreamController }`
 
-- [ ] **Step 1: Add a placeholder default cover asset**
+- [ ] **Step 1: Add placeholder assets**
 
-Binary image content can't be authored as a plan step — place any square JPEG/PNG file at `assets/default-cover.png` manually before running this in Docker (a solid-color placeholder is fine for v1; nothing in the code validates its contents, ffmpeg will error clearly if the file is missing or unreadable).
+Binary image content can't be authored as a plan step — place any square
+JPEG/PNG at `assets/default-cover.png` (fallback track art) and any 1280×720
+image at `assets/background.png` (Now Playing screen background) manually
+before running this in Docker. A solid-color placeholder is fine for v1;
+nothing in the code validates their contents — ffmpeg will error clearly if
+either file is missing or unreadable.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1877,6 +2213,7 @@ const config: AppConfig = {
   streamKey: 'key',
   audioDir: '/music',
   defaultCoverPath: '/assets/default-cover.png',
+  backgroundImagePath: '/assets/background.png',
   fifoPath: '/tmp/test.fifo',
 };
 
@@ -1910,20 +2247,37 @@ import { spawn } from 'child_process';
 import { AppConfig } from './config/env';
 import { Library } from './playlist/library';
 import { PlaylistQueue } from './playlist/queue';
+import { Track } from './playlist/types';
 import { StreamController } from './stream/streamController';
 import { SegmentFeeder } from './ffmpeg/segmentFeeder';
 import { RtmpPusher } from './ffmpeg/rtmpPusher';
+import { NowPlayingOverlay } from './ffmpeg/segmentArgs';
 import { createFifo, removeFifo } from './ffmpeg/fifo';
+import { getAudioDurationSeconds } from './ffmpeg/duration';
+import { buildPlaylistWindowLines } from './ffmpeg/overlayText';
 import { Spawner } from './ffmpeg/types';
 import { createApp } from './api/app';
 
 const VIDEO_WIDTH = 1280;
 const VIDEO_HEIGHT = 720;
 const VIDEO_FPS = 30;
+const FONT_FILE = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+const PLAYLIST_WINDOW_BEFORE = 2;
+const PLAYLIST_WINDOW_AFTER = 7;
 
 export function buildServer(config: AppConfig, spawner: Spawner = spawn as unknown as Spawner) {
   const library = new Library(config.audioDir, config.defaultCoverPath);
   const queue = new PlaylistQueue([]);
+
+  const buildOverlay = (track: Track): NowPlayingOverlay => {
+    const allTracks = library.list();
+    const currentIndex = allTracks.findIndex((t) => t.name === track.name);
+    return {
+      title: track.name,
+      playlistLines: buildPlaylistWindowLines(allTracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER),
+      durationSeconds: getAudioDurationSeconds(track.audioPath),
+    };
+  };
 
   const streamController = new StreamController({
     library,
@@ -1931,10 +2285,13 @@ export function buildServer(config: AppConfig, spawner: Spawner = spawn as unkno
     fifoPath: config.fifoPath,
     createFifo,
     removeFifo,
+    buildOverlay,
     createSegmentFeeder: () => new SegmentFeeder({
       spawner,
       fifoPath: config.fifoPath,
       defaultCoverPath: config.defaultCoverPath,
+      backgroundPath: config.backgroundImagePath,
+      fontFile: FONT_FILE,
       width: VIDEO_WIDTH,
       height: VIDEO_HEIGHT,
       fps: VIDEO_FPS,
@@ -1989,20 +2346,20 @@ Expected: `tsc` succeeds with no errors, all test suites PASS
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/server.ts src/main.ts test/server.test.ts assets/default-cover.png
-git commit -m "feat: bootstrap server wiring (main entrypoint)"
+git add src/server.ts src/main.ts test/server.test.ts assets/default-cover.png assets/background.png
+git commit -m "feat: bootstrap server wiring with Now Playing overlay (main entrypoint)"
 ```
 
 ---
 
-### Task 13: Docker packaging
+### Task 15: Docker packaging
 
 **Files:**
 - Create: `Dockerfile`
 - Create: `docker-compose.yml`
 
 **Interfaces:**
-- Consumes: `package.json` build/start scripts (Task 1), `dist/main.js` (Task 12).
+- Consumes: `package.json` build/start scripts (Task 1), `dist/main.js` (Task 14), `FONT_FILE` path referenced in `src/server.ts` (Task 14).
 
 - [ ] **Step 1: Create `Dockerfile`**
 
@@ -2016,7 +2373,9 @@ COPY src ./src
 RUN npm run build
 
 FROM node:20-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
@@ -2046,20 +2405,21 @@ services:
 - [ ] **Step 3: Build the image to verify the Dockerfile is correct**
 
 Run: `docker build -t super-dj .`
-Expected: image builds successfully (requires Docker on the machine running this step; if unavailable locally, verify this step in CI or on the deployment host before shipping)
+Expected: image builds successfully (requires Docker on the machine running this step; if unavailable locally, verify this step in CI or on the deployment host before shipping). Confirms `fonts-dejavu-core` provides `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`, matching `FONT_FILE` in `src/server.ts`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add Dockerfile docker-compose.yml
-git commit -m "chore: Docker packaging"
+git commit -m "chore: Docker packaging with font support for the Now Playing overlay"
 ```
 
 ---
 
 ## Self-Review Notes
 
-- **Spec coverage:** every REST endpoint, the FIFO/MPEG-TS architecture, pause-as-silence, play-by-name-inserts-next, previous-idempotent-at-start, alphabetical scan, Swagger docs, Docker/env requirements, and the test strategy from the spec each map to a task above.
-- **Fixed during drafting:** `POST /library/rescan` must also update `PlaylistQueue` (via `setTracks`), not just `Library` — otherwise a rescan would never reach the queue actually being played. Task 10's `createLibraryRouter` takes `queue` for this reason, and its test asserts `queue.setTracks` is called.
+- **Spec coverage:** every REST endpoint, the FIFO/MPEG-TS architecture, the Now Playing screen (background + cover + title + live timer + duration + windowed playlist), pause-as-silence-with-position-preserving-resume, play-by-name-inserts-next, previous-idempotent-at-start, alphabetical scan, Swagger docs, Docker/env requirements, and the test strategy from the spec each map to a task above.
+- **Fixed during drafting:** `POST /library/rescan` must also update `PlaylistQueue` (via `setTracks`), not just `Library` — otherwise a rescan would never reach the queue actually being played. Task 12's `createLibraryRouter` takes `queue` for this reason, and its test asserts `queue.setTracks` is called.
+- **Fixed during drafting:** an earlier draft of `StreamController.resume()` restarted the track from position 0, contradicting the spec's "resume continues from the saved position." Task 11 now tracks elapsed wall-clock time per track and passes it to `SegmentFeeder.feedTrack` as `startOffsetSeconds`, which `buildTrackSegmentArgs` (Task 7) turns into a `-ss` seek before the audio input.
 - **Fixed during drafting:** the pause segment is unbounded (no `-shortest`, no fixed duration) and killed by `stopCurrent()` on resume, rather than a fixed-length segment that needed re-looping bookkeeping — simpler and matches "loop until resume."
-- **Type consistency:** `Track`, `ChildProcessLike`, `Spawner`, `SessionState`, `StreamStatus`, and `ApiError` are each defined exactly once and reused by name across all later tasks.
+- **Type consistency:** `Track`, `ChildProcessLike`, `Spawner`, `VideoParams`, `NowPlayingOverlay`, `SessionState`, `StreamStatus`, and `ApiError` are each defined exactly once and reused by name across all later tasks.
