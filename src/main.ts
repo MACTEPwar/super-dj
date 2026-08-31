@@ -3,14 +3,32 @@ import { buildServer } from './server';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { app, library, queue } = buildServer(config);
+  const { app, library, queue, streamController } = buildServer(config);
 
   await library.scan();
   queue.setTracks(library.list());
 
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     console.log(`super-dj listening on port ${config.port}`);
   });
+
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`received ${signal}, shutting down`);
+    try {
+      if (streamController.status().state !== 'idle') {
+        streamController.stop();
+      }
+    } catch (err) {
+      console.error('error stopping stream during shutdown', err);
+    }
+    server.close(() => process.exit(0));
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((err) => {
