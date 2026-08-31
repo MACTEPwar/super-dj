@@ -15,7 +15,7 @@ export interface StreamControllerDeps {
   removeFifo: (path: string) => void;
   createSegmentFeeder: () => SegmentFeeder;
   createRtmpPusher: () => RtmpPusher;
-  buildOverlay: (track: Track) => NowPlayingOverlay;
+  buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
 }
 
 export class StreamController {
@@ -28,7 +28,7 @@ export class StreamController {
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.state === 'streaming' || this.state === 'paused') {
       throw new ApiError(409, 'stream is already active');
     }
@@ -56,7 +56,7 @@ export class StreamController {
 
     const track = this.deps.queue.current();
     if (track) {
-      this.feedCurrentTrack(track);
+      await this.feedCurrentTrack(track);
     }
   }
 
@@ -85,31 +85,31 @@ export class StreamController {
     this.feeder!.feedPause();
   }
 
-  resume(): void {
+  async resume(): Promise<void> {
     if (this.state !== 'paused') throw new ApiError(409, 'stream is not paused');
     this.state = 'streaming';
     const track = this.deps.queue.current();
     if (track) {
-      this.feedCurrentTrack(track, this.pausedElapsedSeconds);
+      await this.feedCurrentTrack(track, this.pausedElapsedSeconds);
     }
   }
 
-  next(): void {
+  async next(): Promise<void> {
     if (this.state === 'idle' || this.state === 'error') throw new ApiError(409, 'stream is not active');
     const track = this.deps.queue.next();
     if (!track) throw new ApiError(409, 'no tracks in queue');
     this.pausedElapsedSeconds = 0;
     if (this.state === 'streaming') {
-      this.feedCurrentTrack(track);
+      await this.feedCurrentTrack(track);
     }
   }
 
-  previous(): void {
+  async previous(): Promise<void> {
     if (this.state === 'idle' || this.state === 'error') throw new ApiError(409, 'stream is not active');
     const track = this.deps.queue.previous();
     this.pausedElapsedSeconds = 0;
     if (track && this.state === 'streaming') {
-      this.feedCurrentTrack(track);
+      await this.feedCurrentTrack(track);
     }
   }
 
@@ -119,9 +119,14 @@ export class StreamController {
    * (advance to the next track) from "this segment was superseded/torn down by
    * next/previous/pause/stop/start" (do nothing).
    */
-  private feedCurrentTrack(track: Track, startOffsetSeconds = 0): void {
+  private async feedCurrentTrack(track: Track, startOffsetSeconds = 0): Promise<void> {
     const generation = ++this.segmentGeneration;
-    const overlay = this.deps.buildOverlay(track);
+    const overlay = await this.deps.buildOverlay(track);
+    // The generation may have advanced, or the session may have left
+    // 'streaming' (e.g. the pusher died, or stop()/pause() ran), while we
+    // were awaiting the overlay — a stale overlay must never be fed.
+    if (generation !== this.segmentGeneration) return;
+    if (this.state !== 'streaming') return;
     const child = startOffsetSeconds
       ? this.feeder!.feedTrack(track, overlay, startOffsetSeconds)
       : this.feeder!.feedTrack(track, overlay);
@@ -137,7 +142,12 @@ export class StreamController {
     const track = this.deps.queue.next();
     this.pausedElapsedSeconds = 0;
     if (track) {
-      this.feedCurrentTrack(track);
+      // Fire-and-forget: this runs from a child-process 'exit' callback, not
+      // an awaited call chain. Catch so a failed duration probe surfaces as a
+      // log line instead of an unhandled rejection.
+      this.feedCurrentTrack(track).catch((err) => {
+        console.error('failed to auto-advance to the next track', err);
+      });
     }
   }
 

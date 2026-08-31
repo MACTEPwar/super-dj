@@ -7,7 +7,7 @@ export function createStreamRouter(streamController: StreamController): Router {
   const router = Router();
 
   router.post('/start', wrapAsync(async (_req, res) => {
-    streamController.start();
+    await streamController.start();
     res.status(200).json(streamController.status());
   }));
 
@@ -22,17 +22,17 @@ export function createStreamRouter(streamController: StreamController): Router {
   }));
 
   router.post('/resume', wrapAsync(async (_req, res) => {
-    streamController.resume();
+    await streamController.resume();
     res.status(200).json(streamController.status());
   }));
 
   router.post('/next', wrapAsync(async (_req, res) => {
-    streamController.next();
+    await streamController.next();
     res.status(200).json(streamController.status());
   }));
 
   router.post('/previous', wrapAsync(async (_req, res) => {
-    streamController.previous();
+    await streamController.previous();
     res.status(200).json(streamController.status());
   }));
 

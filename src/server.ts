@@ -41,13 +41,13 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   const library = new Library(config.audioDir, config.defaultCoverPath);
   const queue = new PlaylistQueue([]);
 
-  const buildOverlay = (track: Track): NowPlayingOverlay => {
+  const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
     const allTracks = library.list();
     const currentIndex = allTracks.findIndex((t) => t.name === track.name);
     return {
       title: track.name,
       playlistLines: buildPlaylistWindowLines(allTracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER),
-      durationSeconds: getAudioDurationSeconds(track.audioPath),
+      durationSeconds: await getAudioDurationSeconds(track.audioPath),
     };
   };
 

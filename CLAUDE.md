@@ -23,6 +23,13 @@ The concat-demuxer MVP was skipped; the implementation is the FIFO + MPEG-TS des
 - **Auto-advance.** `StreamController` listens for the producer child's `exit` and advances the
   queue. A `segmentGeneration` counter distinguishes a natural end-of-track from a segment that was
   deliberately superseded (next/previous/pause/stop/start), preventing double-advance.
+- **Async duration probe.** `buildOverlay`/`getAudioDurationSeconds` run `ffprobe` asynchronously
+  (never `execFileSync` — that used to block Node's entire event loop on every start/resume/next/
+  previous, freezing the whole server for the probe's duration). Because feeding a track now has an
+  `await` point, `feedCurrentTrack` re-checks `segmentGeneration` *and* `state === 'streaming'`
+  right after the probe resolves, before calling `feedTrack` — otherwise a command that arrived
+  during the probe (next/previous/pause/stop, or the pusher dying) could feed a stale/superseded
+  track.
 - **Overlay.** Each track segment composites background + cover art + drawtext (title, elapsed/
   total, a playlist window) via `-filter_complex`.
 - **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected pusher exit sets
