@@ -14,6 +14,7 @@ describe('API docs', () => {
     const res = await request(buildApp()).get('/openapi.json');
     expect(res.status).toBe(200);
     expect(res.body.paths).toHaveProperty('/stream/start');
+    expect(res.body.paths).toHaveProperty('/auth/register');
   });
 
   it('serves Swagger UI at /docs', async () => {

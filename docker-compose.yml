@@ -11,7 +11,9 @@ services:
     volumes:
       - ./music:/data/audio:ro
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
   postgres:
     image: postgres:16-alpine
     environment:
@@ -20,6 +22,11 @@ services:
       POSTGRES_DB: superdj
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superdj"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres-data:

@@ -28,6 +28,18 @@ describe('auth routes', () => {
     expect(res.headers['set-cookie'][0]).toContain(`${SESSION_COOKIE_NAME}=sess-1`);
   });
 
+  it('POST /auth/register normalizes the email (trimmed and lowercased)', async () => {
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60);
+    const authService = {
+      register: jest.fn().mockResolvedValue({ user: { id: 'u1', email: 'a@example.com' }, sessionId: 'sess-1', expiresAt }),
+    };
+
+    const res = await request(buildApp(authService)).post('/auth/register').send({ email: '  A@Example.com  ', password: 'pw' });
+
+    expect(authService.register).toHaveBeenCalledWith('a@example.com', 'pw');
+    expect(res.status).toBe(200);
+  });
+
   it('POST /auth/register requires email and password in the body', async () => {
     const authService = { register: jest.fn() };
     const res = await request(buildApp(authService)).post('/auth/register').send({ email: 'a@example.com' });

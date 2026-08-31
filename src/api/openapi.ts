@@ -98,9 +98,61 @@ export const openApiSpec = {
         },
       },
     },
+    '/auth/register': {
+      post: {
+        summary: 'Register a new user and start a session',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string' }, password: { type: 'string' } } } } },
+        },
+        responses: {
+          '200': { description: 'User created', content: { 'application/json': { schema: { $ref: '#/components/schemas/User' } } } },
+          '400': { description: 'Missing or invalid email/password' },
+          '409': { description: 'Email already registered' },
+        },
+      },
+    },
+    '/auth/login': {
+      post: {
+        summary: 'Log in and start a session',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string' }, password: { type: 'string' } } } } },
+        },
+        responses: {
+          '200': { description: 'Logged in', content: { 'application/json': { schema: { $ref: '#/components/schemas/User' } } } },
+          '400': { description: 'Missing or invalid email/password' },
+          '401': { description: 'Invalid email or password' },
+        },
+      },
+    },
+    '/auth/logout': {
+      post: {
+        summary: 'Log out and clear the session',
+        responses: {
+          '200': { description: 'Logged out' },
+        },
+      },
+    },
+    '/auth/me': {
+      get: {
+        summary: 'Get the current authenticated user',
+        responses: {
+          '200': { description: 'Current user', content: { 'application/json': { schema: { $ref: '#/components/schemas/User' } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
   },
   components: {
     schemas: {
+      User: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          email: { type: 'string' },
+        },
+      },
       Track: {
         type: 'object',
         properties: {

@@ -7,9 +7,9 @@ import { requireAuth, AuthenticatedRequest } from './authMiddleware';
 
 function readCredentials(body: unknown): { email: string; password: string } {
   const { email, password } = (body ?? {}) as { email?: unknown; password?: unknown };
-  if (typeof email !== 'string' || email.length === 0) throw new ApiError(400, 'body.email is required');
+  if (typeof email !== 'string' || email.trim().length === 0) throw new ApiError(400, 'body.email is required');
   if (typeof password !== 'string' || password.length === 0) throw new ApiError(400, 'body.password is required');
-  return { email, password };
+  return { email: email.trim().toLowerCase(), password };
 }
 
 export function createAuthRouter(authService: AuthService): Router {

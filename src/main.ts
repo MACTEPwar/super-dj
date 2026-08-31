@@ -25,7 +25,11 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error('error stopping stream during shutdown', err);
     }
-    await prisma.$disconnect();
+    try {
+      await prisma.$disconnect();
+    } catch (err) {
+      console.error('error disconnecting from the database during shutdown', err);
+    }
     server.close(() => process.exit(0));
   };
 
