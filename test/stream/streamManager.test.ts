@@ -12,6 +12,7 @@ jest.mock('../../src/ffmpeg/duration', () => ({
   getAudioDurationSeconds: jest.fn().mockResolvedValue(100),
 }));
 
+import { PassThrough } from 'stream';
 import { StreamManager } from '../../src/stream/streamManager';
 import { ApiError } from '../../src/errors';
 // A fixed, valid ciphertext isn't needed for real ffmpeg here (spawner is faked) —
@@ -45,12 +46,16 @@ function buildDeps() {
       { name: 'c', audioPath: '/music/c.mp3', coverPath: null },
     ]),
   };
+  // SegmentFeeder opens a real fs.createWriteStream on the fifo path unless overridden;
+  // fake it so start()/tests never touch the real filesystem (same rationale as the
+  // fifo/duration module mocks above — no real fs/subprocess touches in a unit test).
+  const createWriteStream = jest.fn().mockImplementation(() => new PassThrough());
   return {
     deps: {
       spawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
-      fontFile: '/fonts/x.ttf', playlistRepository, destinationRepository, trackRepository,
+      fontFile: '/fonts/x.ttf', playlistRepository, destinationRepository, trackRepository, createWriteStream,
     },
-    destinationRepository, playlistRepository, trackRepository,
+    destinationRepository, playlistRepository, trackRepository, createWriteStream,
   };
 }
 
@@ -70,7 +75,7 @@ describe('StreamManager', () => {
   });
 
   it('start() creates a controller reachable via get(), and status() reflects it', async () => {
-    const { deps } = buildDeps();
+    const { deps, createWriteStream } = buildDeps();
     const manager = new StreamManager(deps as any, KEY);
 
     await manager.start('dest-1', 'playlist-1');
@@ -78,6 +83,9 @@ describe('StreamManager', () => {
     expect(manager.get('dest-1')).toBeDefined();
     expect(manager.status('dest-1').state).toBe('streaming');
     expect(manager.status('dest-1').currentTrack).toBe('a');
+    // Proves SegmentFeeder's real fs.createWriteStream(fifoPath) call was actually
+    // routed through the injected fake, not silently falling back to touching disk.
+    expect(createWriteStream).toHaveBeenCalledWith('/tmp/super-dj-stream-dest-1.fifo');
   });
 
   it('start() throws 409 if a stream is already active for that destination', async () => {

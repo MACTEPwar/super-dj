@@ -31,6 +31,10 @@ export interface StreamManagerDeps {
   playlistRepository: Pick<PlaylistRepository, 'listTracks'>;
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   trackRepository: Pick<TrackRepository, 'listByUser'>;
+  // Optional seam for tests: SegmentFeeder opens a real fs write stream onto the
+  // FIFO by default. Left undefined in production so SegmentFeeder's own default
+  // (fs.createWriteStream) applies unchanged.
+  createWriteStream?: (path: string) => NodeJS.WritableStream;
 }
 
 export class StreamManager {
@@ -89,6 +93,7 @@ export class StreamManager {
         width: VIDEO_WIDTH,
         height: VIDEO_HEIGHT,
         fps: VIDEO_FPS,
+        createWriteStream: this.deps.createWriteStream,
       }),
       createRtmpPusher: () => new RtmpPusher(this.deps.spawner, { fifoPath, rtmpUrl, streamKey }),
     });
