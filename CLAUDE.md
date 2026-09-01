@@ -90,12 +90,18 @@ and `$disconnect()` on shutdown. Sessions are opaque UUIDs stored in the `Sessio
 carried in an httpOnly cookie. Schema changes need a migration (`npx prisma migrate dev`) —
 `prisma/migrations/` is committed and must stay in sync with `schema.prisma`. No local Docker
 daemon is available in this dev environment, so migrations are generated against a temporary
-Postgres on the remote host at `192.168.14.26` (passwordless SSH): spin up a throwaway
-`postgres:16-alpine` container on an isolated docker network, run
-`npx prisma migrate dev --name <name> --skip-generate` in a throwaway Node container mounting
-only `prisma/schema.prisma` and `package.json`/`package-lock.json`, copy the generated
-`prisma/migrations/<timestamp>_<name>/` directory back into the repo, then tear down every
-temporary container/network on the remote host. Never hand-write migration SQL.
+Postgres on the remote host at `192.168.14.26` (passwordless SSH): stage `prisma/schema.prisma`,
+the **existing** `prisma/migrations/` directory, and `package.json`/`package-lock.json` in a temp
+dir on the remote host; spin up a throwaway `postgres:16-alpine` container on an isolated docker
+network; run `npm ci && npx prisma migrate dev --name <name> --skip-generate` in a throwaway
+`node:20-bookworm-slim` container on the same network (mounting the staged dir, `DATABASE_URL`
+pointing at the postgres container by its container name) — `apt-get install -y openssl` first,
+or Prisma's engine can't detect libssl in that image and errors out; copy the generated
+`prisma/migrations/<timestamp>_<name>/` directory back into the repo; then tear down every
+temporary container/network/temp-file on the remote host. Staging only `schema.prisma` without
+the existing `migrations/` directory makes Prisma treat the throwaway database as historyless and
+regenerate *every* table (including ones a real database already has) instead of an incremental
+diff — always include the migration history. Never hand-write migration SQL.
 
 **Testing strategy:** everything touching ffmpeg is injected as a `Spawner` /
 `ChildProcessLike` fake — unit tests never spawn real ffmpeg (`test/server.test.ts` spawns a plain
