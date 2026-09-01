@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { buildServer } from '../src/server';
+import { buildServer, createSpawner } from '../src/server';
 import { AppConfig } from '../src/config/env';
 import { Spawner, ChildProcessLike } from '../src/ffmpeg/types';
 import { PassThrough } from 'stream';
@@ -33,4 +33,37 @@ describe('buildServer', () => {
     const res = await request(app).get('/tracks');
     expect(res.status).toBe(401);
   });
+});
+
+describe('createSpawner', () => {
+  // The only test in this repo that spawns a real child process: it proves the
+  // reason createSpawner exists — an undrained stderr fills the ~64KB OS pipe
+  // buffer and the child blocks on write forever.
+  it('drains a child process stderr so it does not deadlock on a full pipe', async () => {
+    // Don't echo 500KB of noise into the jest output; the forwarding itself is what drains.
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const spawner = createSpawner();
+      const child: ChildProcessLike = spawner(process.execPath, [
+        '-e', "process.stderr.write('x'.repeat(500000)); process.exit(0);",
+      ]);
+
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('child did not exit — stderr likely not drained')), 5000);
+        child.once('exit', (code) => {
+          clearTimeout(timer);
+          resolve(code as number);
+        });
+        child.once('error', (err) => {
+          clearTimeout(timer);
+          reject(err as Error);
+        });
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderrSpy).toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  }, 10000);
 });
