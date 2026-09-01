@@ -4,7 +4,7 @@ export class DestinationRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
   create(data: {
-    userId: string; name: string; rtmpUrl: string; streamKeyEncrypted: string;
+    userId: string; name: string; provider: string; rtmpUrl: string | null; streamKeyEncrypted: string | null;
   }): Promise<StreamDestination> {
     return this.prisma.streamDestination.create({ data });
   }
