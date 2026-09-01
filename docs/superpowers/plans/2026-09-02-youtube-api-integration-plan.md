@@ -69,9 +69,14 @@ built-in global `fetch` for all Google HTTP calls — no new HTTP client depende
   changes to `'custom'`, `rtmpUrl`/`streamKeyEncrypted` become optional. `AppConfig` gains
   `googleOAuthClientId: string`, `googleOAuthClientSecret: string`, `appBaseUrl: string`.
 
-This task is purely additive to running code — no existing route or service is touched yet, so
-the build stays green throughout Tasks 1–9. The cutover (wiring the new pieces into `server.ts`/
-`app.ts`) is Task 10.
+This task's Prisma/config additions are themselves additive, but Step 3 below narrows
+`DestinationRepository.create()`'s signature, which the still-untouched `destinationRoutes.ts`
+depends on — so `npm run build` is expected to show a `tsc` error at that one call site starting
+here, not before. That is deliberate and self-contained: no test suite depends on a clean build
+until each task's own steps say so, and the compile error's exact scope is called out in Step 4
+below. The full build and test suite only return to green at Task 10's cutover; Task 9 fixes this
+specific call site along the way but does not itself restore a fully green build (it still leaves
+`server.ts` red until Task 10, per Task 8/9's own text).
 
 - [ ] **Step 1: Modify `prisma/schema.prisma`**
 
@@ -1492,26 +1497,28 @@ In `start()`, change the pusher's exit callback (currently `this.pusher.start(()
 
 - [ ] **Step 2: Write the failing test for the new hook**
 
-Add to `test/stream/streamController.test.ts` (find the existing test that grabs
-`pusher.start.mock.calls[0][0]` to simulate an unexpected exit, and add a sibling test near it):
+Add to `test/stream/streamController.test.ts`, as a sibling of the existing test `'does not feed
+a track if the pusher dies while the overlay is still being probed'` (that test already shows the
+exact idiom: `buildDeps()` returns `{ deps, ... }`, `pusher.start.mock.calls[0][0]` is the exit
+callback `RtmpPusher.start(onExit)` was invoked with, and `deps` is a plain object you can add
+fields to before constructing `new StreamController(deps)` — there is no `buildController(...)`
+helper in this file, only `buildDeps()`):
 
 ```ts
   it('invokes deps.onError when the pusher exits unexpectedly', async () => {
+    const { deps, pusher } = buildDeps();
     const onError = jest.fn();
-    const { controller, pusher } = buildController({ onError });
+    deps.onError = onError;
+    const controller = new StreamController(deps);
     await controller.start();
 
-    const onExit = pusher.start.mock.calls[0][0] as () => void;
-    onExit();
+    const onExit = pusher.start.mock.calls[0][0] as (code: number | null) => void;
+    onExit(1);
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(controller.status().state).toBe('error');
   });
 ```
-
-(Read the file's existing `buildController(...)` test helper first and pass `onError` through it
-the same way other optional deps are threaded in — adjust the exact call shape to match whatever
-helper already exists in that file.)
 
 - [ ] **Step 3: Run the new test to verify it fails, then passes**
 
