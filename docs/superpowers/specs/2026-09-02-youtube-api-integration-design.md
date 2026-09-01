@@ -9,10 +9,13 @@ to hand-create a broadcast in YouTube Studio and paste its RTMP URL + stream key
 YouTube is the first real implementation; the existing manual-RTMP path becomes the second
 ("custom") implementation of the same interface, not a special case.
 
-**Non-goals (deferred, YAGNI):** any streaming platform besides YouTube; per-user Google OAuth
-apps ("bring your own client"); a persistent/reusable YouTube ingestion endpoint; a frontend
-(phase 5) — the OAuth consent step is completed by a human in a browser hitting backend routes
-directly, same as every other API endpoint in this project today.
+**Non-goals (deferred, YAGNI):** *implementing* any streaming platform besides YouTube (Twitch,
+etc.) — but the OAuth connection data model and connect-flow routes are kept provider-agnostic
+from the start (see §1, §3) specifically so a second platform is a new adapter + migration, not a
+schema rework; per-user Google OAuth apps ("bring your own client"); a persistent/reusable
+YouTube ingestion endpoint; a frontend (phase 5) — the OAuth consent step is completed by a human
+in a browser hitting backend routes directly, same as every other API endpoint in this project
+today.
 
 ---
 
@@ -26,31 +29,39 @@ model StreamDestination {
   userId             String
   user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   name               String
-  rtmpUrl            String?           // now optional: null for provider = 'youtube'
-  streamKeyEncrypted String?           // now optional: null for provider = 'youtube'
-  provider           String   @default("custom")   // 'custom' | 'youtube' — default changes from 'youtube' to 'custom'
+  rtmpUrl            String?           // now optional: null for an OAuth-backed provider
+  streamKeyEncrypted String?           // now optional: null for an OAuth-backed provider
+  provider           String   @default("custom")   // 'custom' | 'youtube' (future: 'twitch', ...) — default changes from 'youtube' to 'custom'
   createdAt          DateTime @default(now())
-  youtubeConnection  YoutubeConnection?
+  oauthConnection    OAuthConnection?
 }
 
-model YoutubeConnection {
+// Generic across platforms on purpose: one row per OAuth-backed StreamDestination, regardless
+// of provider. Adding a second platform later (e.g. Twitch) means a new OAuthProviderAdapter
+// (see §3) and a new value for `StreamDestination.provider` — never a new *Connection table or
+// a schema migration to widen this one.
+model OAuthConnection {
   id                     String            @id @default(uuid())
   destinationId          String            @unique
   destination            StreamDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
-  channelId              String
-  channelTitle           String
+  provider               String            // duplicates destination.provider — kept so this row is self-describing without a join, and so a uniqueness/index on (provider, externalAccountId) is possible later
+  externalAccountId      String            // e.g. YouTube channelId; Twitch user id later
+  externalAccountName    String            // e.g. YouTube channel title; Twitch display name later
   refreshTokenEncrypted  String
   createdAt              DateTime          @default(now())
 }
 ```
 
 - `rtmpUrl`/`streamKeyEncrypted` go from required to optional. `provider = 'custom'` keeps them
-  populated exactly as today. `provider = 'youtube'` leaves them `null` forever — the real RTMP
-  ingestion URL/key are minted fresh from the YouTube API on every `/stream/start` and never
-  persisted (see §3).
-- `YoutubeConnection` is 1:1 with a `StreamDestination`, cascade-deleted with it. It holds the
-  encrypted OAuth refresh token and the channel identity (for display / sanity-checking during
-  connect).
+  populated exactly as today. Any OAuth-backed provider (`'youtube'` now, others later) leaves
+  them `null` forever — the real RTMP ingestion URL/key are minted fresh from that platform's API
+  on every `/stream/start` and never persisted (see §3).
+- `OAuthConnection` is 1:1 with a `StreamDestination`, cascade-deleted with it, and provider-
+  generic — it holds whichever platform's encrypted OAuth refresh token and external account
+  identity (for display / sanity-checking during connect). YouTube-specific fields (`channelId`/
+  `channelTitle`) from the earlier draft of this spec are renamed to the generic
+  `externalAccountId`/`externalAccountName` so the same table serves Twitch or anything else
+  later without a rename migration.
 - Migration generated the usual way (temporary Postgres on `192.168.14.26`, per `CLAUDE.md`).
 
 ## 2. Config additions
@@ -72,31 +83,52 @@ when a YouTube route is first hit is left to the plan — see Open Questions.
 
 ## 3. OAuth connect flow
 
-New router mounted at `/destinations/youtube`:
+The routes and the token-exchange mechanics are provider-generic; only YouTube has a real
+adapter registered today:
 
-- **`GET /destinations/youtube/oauth/start`** (`requireAuth`) — generates a random `state` value,
-  stores it server-side keyed to `userId` with a short TTL (reuse the `Session` table's pattern,
-  or a small new table/in-memory map — decide in plan), and returns
-  `{ authUrl: "https://accounts.google.com/o/oauth2/v2/auth?...&scope=...&state=..." }`. Requested
-  scopes: `https://www.googleapis.com/auth/youtube` (manage broadcasts/streams) and
+```ts
+interface OAuthProviderAdapter {
+  provider: string;   // 'youtube'
+  buildAuthUrl(state: string): string;
+  exchangeCode(code: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }>;
+  fetchAccountIdentity(accessToken: string): Promise<{ externalAccountId: string; externalAccountName: string }>;
+  revoke(refreshToken: string): Promise<void>;
+}
+```
+
+A small registry (`Record<string, OAuthProviderAdapter>`, just `{ youtube: new
+YoutubeOAuthAdapter(...) }` today) is looked up by the `:provider` route param. Adding Twitch
+later means writing `TwitchOAuthAdapter` and adding one registry entry — the routes below,
+`OAuthConnection`, and `StreamDestination.provider` don't change.
+
+Router mounted at `/destinations/:provider/oauth`:
+
+- **`GET /destinations/:provider/oauth/start`** (`requireAuth`) — 404s if `:provider` isn't in
+  the adapter registry. Generates a random `state` value, stores it server-side keyed to
+  `{ userId, provider }` with a short TTL (reuse the `Session` table's pattern, or a small new
+  table/in-memory map — decide in plan), and returns `{ authUrl: adapter.buildAuthUrl(state) }`.
+  For the `youtube` adapter, `buildAuthUrl` targets Google's consent screen with scopes
+  `https://www.googleapis.com/auth/youtube` (manage broadcasts/streams) and
   `https://www.googleapis.com/auth/youtube.readonly` (read channel identity) — or just the single
   broader scope if Google's granularity doesn't split them usefully; confirm exact scope string in
   the plan. The caller (a human, since there's no frontend yet) opens `authUrl` in a real browser.
 
-- **`GET /destinations/youtube/oauth/callback`** — public (Google redirects the user's browser
-  here directly, no session cookie available in that request in general, hence keying `state` to
-  `userId` server-side rather than trusting a client-supplied userId). Steps:
-  1. Validate `state`, look up the pending `userId`, consume it (single use).
-  2. Exchange the `code` query param for `{ access_token, refresh_token, expires_in }` via
-     Google's token endpoint, using `googleOAuthClientId`/`googleOAuthClientSecret`.
-  3. Call `channels.list(mine=true)` with the fresh access token to get `channelId`/`channelTitle`.
-  4. `destinationRepository.create({ userId, name: channelTitle, provider: 'youtube' })` then
-     create the linked `YoutubeConnection` row with the encrypted refresh token.
+- **`GET /destinations/:provider/oauth/callback`** — public (the platform redirects the user's
+  browser here directly, no session cookie available in that request in general, hence keying
+  `state` to `userId` server-side rather than trusting a client-supplied userId). Steps:
+  1. 404 if `:provider` isn't registered. Validate `state`, look up the pending `userId`, consume
+     it (single use).
+  2. `adapter.exchangeCode(code)` → `{ accessToken, refreshToken, expiresIn }`.
+  3. `adapter.fetchAccountIdentity(accessToken)` → `{ externalAccountId, externalAccountName }`
+     (for `youtube`: `channels.list(mine=true)`).
+  4. `destinationRepository.create({ userId, name: externalAccountName, provider })` then create
+     the linked `OAuthConnection` row (`provider`, `externalAccountId`, `externalAccountName`,
+     encrypted `refreshToken`).
   5. Respond with a minimal static HTML page ("Connected — you can close this tab"). No redirect
      to a frontend (doesn't exist yet).
 
-  If `code` exchange fails, or the account has no channel, respond with a plain error page — no
-  destination is created.
+  If the code exchange fails, or the account has no linkable identity, respond with a plain error
+  page — no destination is created.
 
 ## 4. `StreamDestinationProvider` interface
 
@@ -207,24 +239,26 @@ strings via `createRtmpPusher`, never about where they came from.
   `onPushStarted()` → best-effort `finalize()`, phase becomes `'error'`, visible via status;
   `StreamController`'s own state already goes to `'error'` through its existing path — the two
   errors are reported together but are otherwise independent.
-- `DELETE /destinations/:id` for a `youtube` destination: after the existing "stop any running
-  stream" step, also revoke the OAuth refresh token
-  (`https://oauth2.googleapis.com/revoke`, best-effort, errors logged not thrown) before deleting
-  the `YoutubeConnection` row via cascade.
+- `DELETE /destinations/:id` for any OAuth-backed destination: after the existing "stop any
+  running stream" step, also call the matching `OAuthProviderAdapter.revoke(refreshToken)`
+  (for `youtube`, `https://oauth2.googleapis.com/revoke`; best-effort, errors logged not thrown)
+  before deleting the `OAuthConnection` row via cascade.
 
 ## 8. Testing strategy
 
 Follows the existing fake-dependency pattern (`CLAUDE.md` → Testing strategy):
 
 - New `YoutubeApiClient` interface (thin wrapper: `createBroadcast`, `createStream`, `bind`,
-  `transition`, `getStreamStatus`, `deleteStream`, `refreshAccessToken`, `getChannel`, `revoke`) —
-  injected into `YoutubeProvider`, faked in unit tests exactly like `Spawner` is faked for ffmpeg.
-  Real HTTP calls to Google never happen in `npm test`.
-- `YoutubeProvider`, `CustomRtmpProvider`, the OAuth routes, and the `StreamManager` provider-
-  selection logic are all unit-testable with fakes/plain objects, matching the
-  `Pick<...>`-structural-subset pattern already used for `PlaylistRepository`/
-  `DestinationRepository`/`TrackRepository`.
-- `YoutubeConnection`'s repository (thin Prisma wrapper) is NOT unit-tested, matching
+  `transition`, `getStreamStatus`, `deleteStream`, `refreshAccessToken`, `getChannel`) — injected
+  into `YoutubeProvider`, faked in unit tests exactly like `Spawner` is faked for ffmpeg. The
+  smaller `OAuthProviderAdapter` (§3, which also has a `youtube` implementation backed by the
+  same underlying Google client) is faked the same way for the connect-flow routes. Real HTTP
+  calls to Google never happen in `npm test`.
+- `YoutubeProvider`, `CustomRtmpProvider`, the OAuth routes (tested against the adapter registry
+  with a fake adapter, not a real provider), and the `StreamManager` provider-selection logic are
+  all unit-testable with fakes/plain objects, matching the `Pick<...>`-structural-subset pattern
+  already used for `PlaylistRepository`/`DestinationRepository`/`TrackRepository`.
+- `OAuthConnection`'s repository (thin Prisma wrapper) is NOT unit-tested, matching
   `UserRepository`/`SessionRepository`/`DestinationRepository` — verified by manual smoke test
   with a real Postgres + real Google OAuth app (the user's own credentials) instead.
 - End-to-end real-YouTube smoke testing (registering a live broadcast against a real channel) is
@@ -244,3 +278,5 @@ These are intentionally left for `writing-plans` to pin down precisely rather th
 - Exact health-check polling interval/timeout for `waitingForYoutube`.
 - Exact wiring for "pusher died unexpectedly" → `lifecycle.finalize()` (callback vs poll).
 - HTTP status code mapping for `prepareSession` failures.
+- Where the `OAuthProviderAdapter` registry (§3) lives and how it's constructed (composition
+  root in `server.ts`, most likely) — mechanical, not a design fork.
