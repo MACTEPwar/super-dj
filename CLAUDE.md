@@ -50,7 +50,11 @@ independent pipeline per destination:
   stream starts.
 - **Ownership checks.** Every track/playlist/destination/stream route verifies the resource
   belongs to the authenticated user: 404 if the resource doesn't exist, 403 if it exists but
-  belongs to someone else.
+  belongs to someone else. `StreamManager.start()` additionally checks the *playlist* belongs
+  to the destination's owner. Ids referenced from a request **body** into the caller's own
+  resource (`PUT /playlists/{id}/tracks`'s `trackIds`) are instead validated against the
+  caller's own tracks and rejected with 400 — not 403/404 — so playlist membership can't leak
+  which ids exist for other users.
 
 ## Layout
 
