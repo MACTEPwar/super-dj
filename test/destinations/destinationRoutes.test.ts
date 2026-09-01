@@ -2,14 +2,15 @@ import express from 'express';
 import request from 'supertest';
 import { createDestinationRouter } from '../../src/destinations/destinationRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
+import { ApiError } from '../../src/errors';
 
 const KEY = 'a'.repeat(64);
 
-function buildApp(destinationRepository: any, userId = 'user-1') {
+function buildApp(destinationRepository: any, streamManager: any = { stop: jest.fn().mockResolvedValue(undefined) }, userId = 'user-1') {
   const authService: any = { getCurrentUser: jest.fn().mockResolvedValue({ id: userId, email: 'a@example.com' }) };
   const app = express();
   app.use(express.json());
-  app.use('/destinations', createDestinationRouter(authService, destinationRepository, KEY));
+  app.use('/destinations', createDestinationRouter(authService, destinationRepository, KEY, streamManager));
   app.use(errorHandler);
   return app;
 }
@@ -63,5 +64,30 @@ describe('destination routes', () => {
     const res = await request(buildApp(destinationRepository)).delete('/destinations/d1');
     expect(res.status).toBe(200);
     expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
+  });
+
+  it('DELETE /destinations/:id stops the running stream before deleting the row', async () => {
+    const destinationRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'd1', userId: 'user-1' }), deleteById: jest.fn() };
+    const streamManager: any = { stop: jest.fn().mockResolvedValue(undefined) };
+    const res = await request(buildApp(destinationRepository, streamManager)).delete('/destinations/d1');
+    expect(res.status).toBe(200);
+    expect(streamManager.stop).toHaveBeenCalledWith('d1');
+    expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
+  });
+
+  it('DELETE /destinations/:id still deletes when stop() reports 409 (no active stream)', async () => {
+    const destinationRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'd1', userId: 'user-1' }), deleteById: jest.fn() };
+    const streamManager: any = { stop: jest.fn().mockRejectedValue(new ApiError(409, 'stream is not active')) };
+    const res = await request(buildApp(destinationRepository, streamManager)).delete('/destinations/d1');
+    expect(res.status).toBe(200);
+    expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
+  });
+
+  it('DELETE /destinations/:id propagates a non-409 stop() failure and does not delete', async () => {
+    const destinationRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'd1', userId: 'user-1' }), deleteById: jest.fn() };
+    const streamManager: any = { stop: jest.fn().mockRejectedValue(new ApiError(500, 'teardown failed')) };
+    const res = await request(buildApp(destinationRepository, streamManager)).delete('/destinations/d1');
+    expect(res.status).toBe(500);
+    expect(destinationRepository.deleteById).not.toHaveBeenCalled();
   });
 });

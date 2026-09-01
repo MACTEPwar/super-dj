@@ -5,6 +5,7 @@ import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
+import { StreamManager } from '../stream/streamManager';
 
 function toPublicDestination(d: { id: string; name: string; rtmpUrl: string; provider: string }) {
   return { id: d.id, name: d.name, rtmpUrl: d.rtmpUrl, provider: d.provider };
@@ -14,6 +15,7 @@ export function createDestinationRouter(
   authService: AuthService,
   destinationRepository: DestinationRepository,
   encryptionKey: string,
+  streamManager: Pick<StreamManager, 'stop'>,
 ): Router {
   const router = Router();
   const auth = requireAuth(authService);
@@ -42,6 +44,14 @@ export function createDestinationRouter(
     const destination = await destinationRepository.findById(req.params.id);
     if (!destination) throw new ApiError(404, 'destination not found');
     if (destination.userId !== (req as AuthenticatedRequest).user!.id) throw new ApiError(403, 'not your destination');
+    // Tear down any running stream first, otherwise its StreamController/ffmpeg/FIFO
+    // is orphaned: /stop would 404 once the destination row is gone.
+    try {
+      await streamManager.stop(destination.id);
+    } catch (err) {
+      // 409 from stop() just means "wasn't streaming" — not a failure.
+      if (!(err instanceof ApiError && err.status === 409)) throw err;
+    }
     await destinationRepository.deleteById(destination.id);
     res.status(200).json({});
   }));
