@@ -129,6 +129,20 @@ describe('StreamController', () => {
     expect(controller.status().state).toBe('error');
   });
 
+  it('invokes deps.onError when the pusher exits unexpectedly', async () => {
+    const { deps, pusher } = buildDeps();
+    const onError = jest.fn();
+    deps.onError = onError;
+    const controller = new StreamController(deps);
+    await controller.start();
+
+    const onExit = pusher.start.mock.calls[0][0] as (code: number | null) => void;
+    onExit(1);
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(controller.status().state).toBe('error');
+  });
+
   it('pause() then resume() seeks feedTrack to the elapsed position', async () => {
     const { deps, feeder } = buildDeps();
     const nowSpy = jest.spyOn(Date, 'now');

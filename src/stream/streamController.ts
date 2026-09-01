@@ -20,6 +20,7 @@ export interface StreamControllerDeps {
   createSegmentFeeder: () => SegmentFeeder;
   createRtmpPusher: () => RtmpPusher;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
+  onError?: () => void;
 }
 
 export class StreamController {
@@ -51,7 +52,10 @@ export class StreamController {
 
     this.deps.createFifo(this.deps.fifoPath);
     this.pusher = this.deps.createRtmpPusher();
-    this.pusher.start(() => { this.state = 'error'; });
+    this.pusher.start(() => {
+      this.state = 'error';
+      this.deps.onError?.();
+    });
     this.feeder = this.deps.createSegmentFeeder();
     this.pausedElapsedSeconds = 0;
     this.trackStartedAt = null;

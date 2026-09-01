@@ -2,7 +2,7 @@ import { posix as path } from 'path';
 import { PlaylistQueue } from '../playlist/queue';
 import { Track } from '../playlist/types';
 import { StreamController } from './streamController';
-import { StreamStatus } from './types';
+import { DestinationStreamStatus, StreamStatus } from './types';
 import { SegmentFeeder } from '../ffmpeg/segmentFeeder';
 import { RtmpPusher } from '../ffmpeg/rtmpPusher';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
@@ -14,7 +14,7 @@ import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository } from '../tracks/trackRepository';
-import { decrypt } from '../crypto/streamKeyCipher';
+import { BroadcastMeta, DestinationLifecycle, StreamDestinationProvider } from '../destinations/streamDestinationProvider';
 
 const VIDEO_WIDTH = 1280;
 const VIDEO_HEIGHT = 720;
@@ -31,6 +31,7 @@ export interface StreamManagerDeps {
   playlistRepository: Pick<PlaylistRepository, 'listTracks' | 'findById'>;
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   trackRepository: Pick<TrackRepository, 'listByUser'>;
+  providers: Record<string, StreamDestinationProvider>;
   // Optional seam for tests: SegmentFeeder opens a real fs write stream onto the
   // FIFO by default. Left undefined in production so SegmentFeeder's own default
   // (fs.createWriteStream) applies unchanged.
@@ -39,14 +40,15 @@ export interface StreamManagerDeps {
 
 export class StreamManager {
   private readonly controllers = new Map<string, StreamController>();
+  private readonly lifecycles = new Map<string, { providerType: string; lifecycle: DestinationLifecycle }>();
 
-  constructor(private readonly deps: StreamManagerDeps, private readonly encryptionKey: string) {}
+  constructor(private readonly deps: StreamManagerDeps) {}
 
   get(destinationId: string): StreamController | undefined {
     return this.controllers.get(destinationId);
   }
 
-  async start(destinationId: string, playlistId: string): Promise<void> {
+  async start(destinationId: string, playlistId: string, meta?: Partial<BroadcastMeta>): Promise<void> {
     // A controller left behind in 'error' state (unexpected pusher exit) must not
     // block a restart — only a live streaming/paused session is "already active".
     const existing = this.controllers.get(destinationId);
@@ -56,6 +58,7 @@ export class StreamManager {
         throw new ApiError(409, 'a stream is already active for this destination');
       }
       this.controllers.delete(destinationId);
+      this.lifecycles.delete(destinationId);
     }
 
     const destination = await this.deps.destinationRepository.findById(destinationId);
@@ -73,10 +76,17 @@ export class StreamManager {
     const allUserTracksRaw = await this.deps.trackRepository.listByUser(destination.userId);
     const allUserTracks: Track[] = allUserTracksRaw.map((t) => ({ name: t.name, audioPath: t.audioPath, coverPath: t.coverPath }));
 
+    const provider = this.deps.providers[destination.provider];
+    if (!provider) throw new ApiError(400, `unsupported destination provider: ${destination.provider}`);
+    const resolvedMeta: BroadcastMeta = {
+      title: meta?.title ?? playlist.name,
+      description: meta?.description,
+      privacyStatus: meta?.privacyStatus,
+    };
+    const session = await provider.prepareSession(destination, resolvedMeta);
+
     const queue = new PlaylistQueue(tracks);
     const fifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}.fifo`);
-    const rtmpUrl = destination.rtmpUrl;
-    const streamKey = decrypt(destination.streamKeyEncrypted, this.encryptionKey);
 
     const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
       const currentIndex = tracks.findIndex((t) => t.name === track.name);
@@ -108,7 +118,14 @@ export class StreamManager {
         fps: VIDEO_FPS,
         createWriteStream: this.deps.createWriteStream,
       }),
-      createRtmpPusher: () => new RtmpPusher(this.deps.spawner, { fifoPath, rtmpUrl, streamKey }),
+      createRtmpPusher: () => new RtmpPusher(this.deps.spawner, { fifoPath, rtmpUrl: session.rtmpUrl, streamKey: session.streamKey }),
+      onError: () => {
+        const entry = this.lifecycles.get(destinationId);
+        this.lifecycles.delete(destinationId);
+        entry?.lifecycle.finalize().catch((err) => {
+          console.error('failed to finalize destination lifecycle after an unexpected pusher exit', err);
+        });
+      },
     });
 
     this.controllers.set(destinationId, controller);
@@ -116,13 +133,30 @@ export class StreamManager {
       await controller.start();
     } catch (err) {
       this.controllers.delete(destinationId);
+      if (session.lifecycle) {
+        await session.lifecycle.finalize().catch((finalizeErr) => {
+          console.error('failed to finalize destination lifecycle after a failed start()', finalizeErr);
+        });
+      }
       throw err;
+    }
+
+    if (session.lifecycle) {
+      this.lifecycles.set(destinationId, { providerType: destination.provider, lifecycle: session.lifecycle });
+      session.lifecycle.onPushStarted();
     }
   }
 
   async stop(destinationId: string): Promise<void> {
     this.requireController(destinationId).stop();
     this.controllers.delete(destinationId);
+    const entry = this.lifecycles.get(destinationId);
+    this.lifecycles.delete(destinationId);
+    if (entry) {
+      await entry.lifecycle.finalize().catch((err) => {
+        console.error('failed to finalize destination lifecycle on stop', err);
+      });
+    }
   }
 
   pause(destinationId: string): void {
@@ -145,10 +179,15 @@ export class StreamManager {
     this.requireController(destinationId).playByName(name);
   }
 
-  status(destinationId: string): StreamStatus {
+  status(destinationId: string): DestinationStreamStatus {
     const controller = this.controllers.get(destinationId);
-    if (!controller) return { state: 'idle', currentTrack: null, nextTrack: null };
-    return controller.status();
+    const base: StreamStatus = controller ? controller.status() : { state: 'idle', currentTrack: null, nextTrack: null };
+    const entry = this.lifecycles.get(destinationId);
+    if (!entry) return base;
+    return {
+      ...base,
+      provider: { type: entry.providerType, phase: entry.lifecycle.phase(), watchUrl: entry.lifecycle.watchUrl() },
+    };
   }
 
   private requireController(destinationId: string): StreamController {
