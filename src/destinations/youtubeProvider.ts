@@ -56,6 +56,12 @@ export class YoutubeProvider implements StreamDestinationProvider {
           try {
             const freshAccessToken = await this.deps.client.refreshAccessToken(refreshToken);
             const status = await this.deps.client.getStreamStatus(freshAccessToken, stream.id);
+            // Re-check after every await: finalize() (e.g. the user hit /stream/stop) may have
+            // completed while this poll was suspended above. Without this, a poll that was
+            // already in flight when finalize() ran would still transition the broadcast to
+            // 'live' and overwrite the 'complete' phase finalize() just set — the same class of
+            // stale-async-result hazard StreamController.feedCurrentTrack already guards against.
+            if (finalized) return;
             if (status === 'active') {
               await this.deps.client.transition(freshAccessToken, broadcast.id, 'live');
               phase = 'live';

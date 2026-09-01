@@ -110,6 +110,31 @@ describe('YoutubeProvider', () => {
     expect(client.deleteStream).toHaveBeenCalledWith('at', 'stream-1');
   });
 
+  it('a poll already in flight when finalize() runs does not transition to live or overwrite the phase', async () => {
+    let resolveStreamStatus: (status: string) => void;
+    const streamStatusPromise = new Promise<string>((resolve) => {
+      resolveStreamStatus = resolve;
+    });
+    const client = fakeClient({ getStreamStatus: jest.fn().mockReturnValue(streamStatusPromise) } as any);
+    const { provider, runNextScheduledPoll } = buildProvider(client as any);
+    const session = await provider.prepareSession(destination, meta);
+    session.lifecycle!.onPushStarted();
+
+    // Kick off the poll — it suspends on the getStreamStatus await, which we control.
+    const pollPromise = runNextScheduledPoll();
+
+    // While the poll is in flight, the user stops the stream: finalize() runs to completion.
+    await session.lifecycle!.finalize();
+    expect(session.lifecycle!.phase()).toBe('complete');
+
+    // Now let the suspended poll's getStreamStatus resolve to 'active'.
+    resolveStreamStatus!('active');
+    await pollPromise;
+
+    expect(client.transition).not.toHaveBeenCalledWith('at', 'broadcast-1', 'live');
+    expect(session.lifecycle!.phase()).toBe('complete');
+  });
+
   it('finalize() transitions the broadcast to complete and deletes the ephemeral stream', async () => {
     const { provider, client } = buildProvider();
     const session = await provider.prepareSession(destination, meta);
