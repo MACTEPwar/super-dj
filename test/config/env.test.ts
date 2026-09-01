@@ -4,6 +4,9 @@ describe('loadConfig', () => {
   const base = {
     DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
     STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    GOOGLE_OAUTH_CLIENT_ID: 'client-id',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
+    APP_BASE_URL: 'https://app.example.com',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for optional values', () => {
@@ -24,6 +27,9 @@ describe('loadConfig', () => {
 describe('loadConfig — database', () => {
   const base = {
     STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    GOOGLE_OAUTH_CLIENT_ID: 'client-id',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
+    APP_BASE_URL: 'https://app.example.com',
   } as NodeJS.ProcessEnv;
 
   it('throws when DATABASE_URL is missing', () => {
@@ -47,6 +53,9 @@ describe('loadConfig — database', () => {
 describe('loadConfig — multi-tenant additions', () => {
   const base = {
     DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    GOOGLE_OAUTH_CLIENT_ID: 'client-id',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
+    APP_BASE_URL: 'https://app.example.com',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for uploadsDir, streamKeyEncryptionKey requirement, and fifoDir', () => {
@@ -66,5 +75,36 @@ describe('loadConfig — multi-tenant additions', () => {
     } as NodeJS.ProcessEnv);
     expect(config.uploadsDir).toBe('/srv/uploads');
     expect(config.fifoDir).toBe('/var/run/super-dj');
+  });
+});
+
+describe('loadConfig — YouTube OAuth additions', () => {
+  const base = {
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+  } as NodeJS.ProcessEnv;
+
+  it('applies GOOGLE_OAUTH_CLIENT_ID/SECRET and APP_BASE_URL', () => {
+    const config = loadConfig({
+      ...base, GOOGLE_OAUTH_CLIENT_ID: 'client-id', GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret', APP_BASE_URL: 'https://app.example.com',
+    } as NodeJS.ProcessEnv);
+    expect(config.googleOAuthClientId).toBe('client-id');
+    expect(config.googleOAuthClientSecret).toBe('client-secret');
+    expect(config.appBaseUrl).toBe('https://app.example.com');
+  });
+
+  it('throws when GOOGLE_OAUTH_CLIENT_ID is missing', () => {
+    expect(() => loadConfig({ ...base, GOOGLE_OAUTH_CLIENT_SECRET: 'x', APP_BASE_URL: 'https://app.example.com' } as NodeJS.ProcessEnv))
+      .toThrow('GOOGLE_OAUTH_CLIENT_ID environment variable is required');
+  });
+
+  it('throws when GOOGLE_OAUTH_CLIENT_SECRET is missing', () => {
+    expect(() => loadConfig({ ...base, GOOGLE_OAUTH_CLIENT_ID: 'x', APP_BASE_URL: 'https://app.example.com' } as NodeJS.ProcessEnv))
+      .toThrow('GOOGLE_OAUTH_CLIENT_SECRET environment variable is required');
+  });
+
+  it('throws when APP_BASE_URL is missing', () => {
+    expect(() => loadConfig({ ...base, GOOGLE_OAUTH_CLIENT_ID: 'x', GOOGLE_OAUTH_CLIENT_SECRET: 'y' } as NodeJS.ProcessEnv))
+      .toThrow('APP_BASE_URL environment variable is required');
   });
 });

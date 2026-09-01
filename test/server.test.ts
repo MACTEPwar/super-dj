@@ -19,6 +19,9 @@ const config: AppConfig = {
   uploadsDir: '/uploads',
   streamKeyEncryptionKey: 'a'.repeat(64),
   fifoDir: '/tmp',
+  googleOAuthClientId: 'client-id',
+  googleOAuthClientSecret: 'client-secret',
+  appBaseUrl: 'https://app.example.com',
 };
 
 describe('buildServer', () => {
