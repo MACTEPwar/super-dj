@@ -28,9 +28,14 @@ export function createStreamRouter(
   router.post('/start', auth, wrapAsync(async (req, res) => {
     const destinationId = req.params.destinationId;
     await requireOwnedDestination(destinationRepository, destinationId, userId(req as AuthenticatedRequest));
-    const { playlistId } = req.body ?? {};
+    const { playlistId, title, description, privacyStatus } = req.body ?? {};
     if (typeof playlistId !== 'string' || playlistId.length === 0) throw new ApiError(400, 'body.playlistId is required');
-    await streamManager.start(destinationId, playlistId);
+    if (title !== undefined && typeof title !== 'string') throw new ApiError(400, 'body.title must be a string');
+    if (description !== undefined && typeof description !== 'string') throw new ApiError(400, 'body.description must be a string');
+    if (privacyStatus !== undefined && !['public', 'unlisted', 'private'].includes(privacyStatus)) {
+      throw new ApiError(400, "body.privacyStatus must be 'public', 'unlisted', or 'private'");
+    }
+    await streamManager.start(destinationId, playlistId, { title, description, privacyStatus });
     res.status(200).json(streamManager.status(destinationId));
   }));
 

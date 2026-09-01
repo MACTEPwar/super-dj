@@ -1,13 +1,15 @@
 import { Router } from 'express';
 import { DestinationRepository } from './destinationRepository';
-import { encrypt } from '../crypto/streamKeyCipher';
+import { OAuthConnectionRepository } from './oauthConnectionRepository';
+import { OAuthProviderAdapter } from './oauthProviderAdapter';
+import { encrypt, decrypt } from '../crypto/streamKeyCipher';
 import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
 import { StreamManager } from '../stream/streamManager';
 
-function toPublicDestination(d: { id: string; name: string; rtmpUrl: string; provider: string }) {
+function toPublicDestination(d: { id: string; name: string; rtmpUrl: string | null; provider: string }) {
   return { id: d.id, name: d.name, rtmpUrl: d.rtmpUrl, provider: d.provider };
 }
 
@@ -16,12 +18,17 @@ export function createDestinationRouter(
   destinationRepository: DestinationRepository,
   encryptionKey: string,
   streamManager: Pick<StreamManager, 'stop'>,
+  oauthProviderAdapters: Record<string, OAuthProviderAdapter>,
+  oauthConnectionRepository: Pick<OAuthConnectionRepository, 'findByDestinationId'>,
 ): Router {
   const router = Router();
   const auth = requireAuth(authService);
 
   router.post('/', auth, wrapAsync(async (req, res) => {
-    const { name, rtmpUrl, streamKey } = req.body ?? {};
+    const { name, rtmpUrl, streamKey, provider } = req.body ?? {};
+    if (provider !== undefined && provider !== 'custom') {
+      throw new ApiError(400, `unsupported provider for manual creation: ${provider}. Use /destinations/${provider}/oauth/start instead.`);
+    }
     if (typeof name !== 'string' || name.length === 0) throw new ApiError(400, 'body.name is required');
     if (typeof rtmpUrl !== 'string' || rtmpUrl.length === 0) throw new ApiError(400, 'body.rtmpUrl is required');
     if (typeof streamKey !== 'string' || streamKey.length === 0) throw new ApiError(400, 'body.streamKey is required');
@@ -29,6 +36,7 @@ export function createDestinationRouter(
     const destination = await destinationRepository.create({
       userId: (req as AuthenticatedRequest).user!.id,
       name,
+      provider: 'custom',
       rtmpUrl,
       streamKeyEncrypted: encrypt(streamKey, encryptionKey),
     });
@@ -51,6 +59,17 @@ export function createDestinationRouter(
     } catch (err) {
       // 409 from stop() just means "wasn't streaming" — not a failure.
       if (!(err instanceof ApiError && err.status === 409)) throw err;
+    }
+    if (destination.provider !== 'custom') {
+      const adapter = oauthProviderAdapters[destination.provider];
+      const connection = adapter ? await oauthConnectionRepository.findByDestinationId(destination.id) : null;
+      if (adapter && connection) {
+        try {
+          await adapter.revoke(decrypt(connection.refreshTokenEncrypted, encryptionKey));
+        } catch (err) {
+          console.error('failed to revoke OAuth token for destination', destination.id, err);
+        }
+      }
     }
     await destinationRepository.deleteById(destination.id);
     res.status(200).json({});

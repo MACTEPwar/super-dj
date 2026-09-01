@@ -29,8 +29,15 @@ describe('per-destination stream routes', () => {
     const streamManager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue({ state: 'streaming', currentTrack: 'a', nextTrack: 'b' }) };
     const res = await request(buildApp(streamManager, ownedDestination())).post('/destinations/dest-1/stream/start').send({ playlistId: 'p1' });
     expect(res.status).toBe(200);
-    expect(streamManager.start).toHaveBeenCalledWith('dest-1', 'p1');
+    expect(streamManager.start).toHaveBeenCalledWith('dest-1', 'p1', { title: undefined, description: undefined, privacyStatus: undefined });
     expect(res.body).toEqual({ state: 'streaming', currentTrack: 'a', nextTrack: 'b' });
+  });
+
+  it('POST .../start rejects an invalid privacyStatus', async () => {
+    const streamManager: any = { start: jest.fn() };
+    const res = await request(buildApp(streamManager, ownedDestination())).post('/destinations/dest-1/stream/start').send({ playlistId: 'p1', privacyStatus: 'sortof' });
+    expect(res.status).toBe(400);
+    expect(streamManager.start).not.toHaveBeenCalled();
   });
 
   it('returns 403 for a destination owned by someone else', async () => {

@@ -3,14 +3,21 @@ import request from 'supertest';
 import { createDestinationRouter } from '../../src/destinations/destinationRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
 import { ApiError } from '../../src/errors';
+import { encrypt } from '../../src/crypto/streamKeyCipher';
 
 const KEY = 'a'.repeat(64);
 
-function buildApp(destinationRepository: any, streamManager: any = { stop: jest.fn().mockResolvedValue(undefined) }, userId = 'user-1') {
+function buildApp(
+  destinationRepository: any,
+  streamManager: any = { stop: jest.fn().mockResolvedValue(undefined) },
+  userId = 'user-1',
+  oauthProviderAdapters: any = {},
+  oauthConnectionRepository: any = { findByDestinationId: jest.fn().mockResolvedValue(null) },
+) {
   const authService: any = { getCurrentUser: jest.fn().mockResolvedValue({ id: userId, email: 'a@example.com' }) };
   const app = express();
   app.use(express.json());
-  app.use('/destinations', createDestinationRouter(authService, destinationRepository, KEY, streamManager));
+  app.use('/destinations', createDestinationRouter(authService, destinationRepository, KEY, streamManager, oauthProviderAdapters, oauthConnectionRepository));
   app.use(errorHandler);
   return app;
 }
@@ -18,14 +25,14 @@ function buildApp(destinationRepository: any, streamManager: any = { stop: jest.
 describe('destination routes', () => {
   it('POST /destinations creates a destination with the stream key encrypted, and never echoes it back', async () => {
     const destinationRepository: any = {
-      create: jest.fn(async (data: any) => ({ id: 'd1', ...data, provider: 'youtube', createdAt: new Date() })),
+      create: jest.fn(async (data: any) => ({ id: 'd1', ...data, provider: 'custom', createdAt: new Date() })),
     };
     const res = await request(buildApp(destinationRepository)).post('/destinations').send({
       name: 'My YouTube', rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2', streamKey: 'abcd-1234',
     });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: 'd1', name: 'My YouTube', rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2', provider: 'youtube' });
+    expect(res.body).toEqual({ id: 'd1', name: 'My YouTube', rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2', provider: 'custom' });
     expect(res.body.streamKey).toBeUndefined();
     expect(res.body.streamKeyEncrypted).toBeUndefined();
 
@@ -44,12 +51,12 @@ describe('destination routes', () => {
   it('GET /destinations never includes the encrypted key', async () => {
     const destinationRepository: any = {
       listByUser: jest.fn().mockResolvedValue([
-        { id: 'd1', name: 'X', rtmpUrl: 'rtmp://x', provider: 'youtube', streamKeyEncrypted: 'secret-blob' },
+        { id: 'd1', name: 'X', rtmpUrl: 'rtmp://x', provider: 'custom', streamKeyEncrypted: 'secret-blob' },
       ]),
     };
     const res = await request(buildApp(destinationRepository)).get('/destinations');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ id: 'd1', name: 'X', rtmpUrl: 'rtmp://x', provider: 'youtube' }]);
+    expect(res.body).toEqual([{ id: 'd1', name: 'X', rtmpUrl: 'rtmp://x', provider: 'custom' }]);
   });
 
   it('DELETE /destinations/:id returns 403 for someone else\'s destination', async () => {
@@ -89,5 +96,33 @@ describe('destination routes', () => {
     const res = await request(buildApp(destinationRepository, streamManager)).delete('/destinations/d1');
     expect(res.status).toBe(500);
     expect(destinationRepository.deleteById).not.toHaveBeenCalled();
+  });
+
+  it('POST /destinations rejects a non-custom provider', async () => {
+    const destinationRepository: any = { create: jest.fn() };
+    const res = await request(buildApp(destinationRepository)).post('/destinations').send({
+      name: 'X', rtmpUrl: 'rtmp://x', streamKey: 'k', provider: 'youtube',
+    });
+    expect(res.status).toBe(400);
+    expect(destinationRepository.create).not.toHaveBeenCalled();
+  });
+
+  it('DELETE /destinations/:id revokes the OAuth token for a non-custom destination', async () => {
+    const destinationRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'd1', userId: 'user-1', provider: 'youtube' }), deleteById: jest.fn() };
+    const adapter = { revoke: jest.fn().mockResolvedValue(undefined) };
+    const oauthConnectionRepository = { findByDestinationId: jest.fn().mockResolvedValue({ refreshTokenEncrypted: encrypt('x', KEY) }) };
+    const res = await request(buildApp(destinationRepository, undefined, 'user-1', { youtube: adapter }, oauthConnectionRepository)).delete('/destinations/d1');
+    expect(res.status).toBe(200);
+    expect(adapter.revoke).toHaveBeenCalled();
+    expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
+  });
+
+  it('DELETE /destinations/:id still deletes if OAuth revoke fails', async () => {
+    const destinationRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'd1', userId: 'user-1', provider: 'youtube' }), deleteById: jest.fn() };
+    const adapter = { revoke: jest.fn().mockRejectedValue(new Error('google is down')) };
+    const oauthConnectionRepository = { findByDestinationId: jest.fn().mockResolvedValue({ refreshTokenEncrypted: 'blob' }) };
+    const res = await request(buildApp(destinationRepository, undefined, 'user-1', { youtube: adapter }, oauthConnectionRepository)).delete('/destinations/d1');
+    expect(res.status).toBe(200);
+    expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
   });
 });
