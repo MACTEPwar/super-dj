@@ -34,6 +34,7 @@ function buildDeps() {
     }),
   };
   const playlistRepository = {
+    findById: jest.fn().mockResolvedValue({ id: 'playlist-1', userId: 'user-1', name: 'Mix' }),
     listTracks: jest.fn().mockResolvedValue([
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
@@ -67,6 +68,22 @@ describe('StreamManager', () => {
     await expect(manager.start('dest-1', 'playlist-1')).rejects.toThrow(ApiError);
   });
 
+  it('start() throws 404 when the playlist does not exist', async () => {
+    const { deps, playlistRepository } = buildDeps();
+    playlistRepository.findById.mockResolvedValue(null);
+    const manager = new StreamManager(deps as any, KEY);
+    await expect(manager.start('dest-1', 'playlist-1')).rejects.toMatchObject({ status: 404, message: 'playlist not found' });
+    expect(playlistRepository.listTracks).not.toHaveBeenCalled();
+  });
+
+  it('start() throws 403 when the playlist belongs to another user than the destination owner', async () => {
+    const { deps, playlistRepository } = buildDeps();
+    playlistRepository.findById.mockResolvedValue({ id: 'playlist-1', userId: 'someone-else', name: 'Theirs' });
+    const manager = new StreamManager(deps as any, KEY);
+    await expect(manager.start('dest-1', 'playlist-1')).rejects.toMatchObject({ status: 403, message: 'not your playlist' });
+    expect(playlistRepository.listTracks).not.toHaveBeenCalled();
+  });
+
   it('start() throws 409 for an empty playlist', async () => {
     const { deps, playlistRepository } = buildDeps();
     playlistRepository.listTracks.mockResolvedValue([]);
@@ -93,6 +110,20 @@ describe('StreamManager', () => {
     const manager = new StreamManager(deps as any, KEY);
     await manager.start('dest-1', 'playlist-1');
     await expect(manager.start('dest-1', 'playlist-1')).rejects.toThrow(ApiError);
+  });
+
+  it('start() replaces a controller stuck in error state instead of rejecting with 409', async () => {
+    const { deps } = buildDeps();
+    const manager = new StreamManager(deps as any, KEY);
+    // Seed the registry with a crashed controller (unexpected pusher exit -> 'error').
+    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }) };
+    (manager as any).controllers.set('dest-1', crashed);
+
+    await expect(manager.start('dest-1', 'playlist-1')).resolves.toBeUndefined();
+
+    expect(manager.get('dest-1')).toBeDefined();
+    expect(manager.get('dest-1')).not.toBe(crashed);
+    expect(manager.status('dest-1').state).toBe('streaming');
   });
 
   it('status() returns a synthetic idle status when no controller exists for a destination', () => {

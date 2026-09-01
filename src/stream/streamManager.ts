@@ -28,7 +28,7 @@ export interface StreamManagerDeps {
   defaultCoverPath: string;
   backgroundImagePath: string;
   fontFile: string;
-  playlistRepository: Pick<PlaylistRepository, 'listTracks'>;
+  playlistRepository: Pick<PlaylistRepository, 'listTracks' | 'findById'>;
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   trackRepository: Pick<TrackRepository, 'listByUser'>;
   // Optional seam for tests: SegmentFeeder opens a real fs write stream onto the
@@ -47,12 +47,25 @@ export class StreamManager {
   }
 
   async start(destinationId: string, playlistId: string): Promise<void> {
-    if (this.controllers.has(destinationId)) {
-      throw new ApiError(409, 'a stream is already active for this destination');
+    // A controller left behind in 'error' state (unexpected pusher exit) must not
+    // block a restart — only a live streaming/paused session is "already active".
+    const existing = this.controllers.get(destinationId);
+    if (existing) {
+      const state = existing.status().state;
+      if (state === 'streaming' || state === 'paused') {
+        throw new ApiError(409, 'a stream is already active for this destination');
+      }
+      this.controllers.delete(destinationId);
     }
 
     const destination = await this.deps.destinationRepository.findById(destinationId);
     if (!destination) throw new ApiError(404, 'destination not found');
+
+    // The playlist must belong to the same user who owns the destination, otherwise
+    // any user owning a destination could stream another user's private playlist.
+    const playlist = await this.deps.playlistRepository.findById(playlistId);
+    if (!playlist) throw new ApiError(404, 'playlist not found');
+    if (playlist.userId !== destination.userId) throw new ApiError(403, 'not your playlist');
 
     const tracks: Track[] = await this.deps.playlistRepository.listTracks(playlistId);
     if (tracks.length === 0) throw new ApiError(409, 'playlist is empty');
