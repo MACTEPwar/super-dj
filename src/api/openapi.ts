@@ -3,66 +3,242 @@ export const openApiSpec = {
   info: {
     title: 'Super DJ Streamer API',
     version: '1.0.0',
-    description: 'Controls a continuous YouTube Live audio stream with a Now Playing video screen.',
+    description: 'Multi-tenant control plane for continuous YouTube Live (and other RTMP) audio streams with a Now Playing video screen.',
   },
   paths: {
-    '/stream/start': {
+    '/tracks': {
       post: {
-        summary: 'Start the stream',
+        summary: 'Upload a new track (multipart/form-data: audio, optional cover, optional name)',
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                required: ['audio'],
+                properties: {
+                  audio: { type: 'string', format: 'binary' },
+                  cover: { type: 'string', format: 'binary' },
+                  name: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
         responses: {
-          '200': { description: 'Stream started', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
-          '409': { description: 'Stream already active or library empty' },
+          '200': { description: 'Track uploaded', content: { 'application/json': { schema: { $ref: '#/components/schemas/TrackSummary' } } } },
+          '400': { description: 'Missing or invalid audio/cover file' },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s tracks',
+        responses: {
+          '200': { description: 'Track list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/TrackSummary' } } } } },
+          '401': { description: 'Not authenticated' },
         },
       },
     },
-    '/stream/stop': {
+    '/tracks/{id}': {
+      delete: {
+        summary: 'Delete a track owned by the authenticated user',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Track deleted' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your track' },
+          '404': { description: 'Track not found' },
+        },
+      },
+    },
+    '/playlists': {
       post: {
-        summary: 'Stop the stream',
+        summary: 'Create a new playlist',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } },
+        },
+        responses: {
+          '200': { description: 'Playlist created', content: { 'application/json': { schema: { $ref: '#/components/schemas/Playlist' } } } },
+          '400': { description: 'Missing or invalid name' },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s playlists',
+        responses: {
+          '200': { description: 'Playlist list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Playlist' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/playlists/{id}': {
+      get: {
+        summary: 'Get a playlist and its ordered tracks',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Playlist with tracks', content: { 'application/json': { schema: { $ref: '#/components/schemas/PlaylistWithTracks' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your playlist' },
+          '404': { description: 'Playlist not found' },
+        },
+      },
+      delete: {
+        summary: 'Delete a playlist owned by the authenticated user',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Playlist deleted' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your playlist' },
+          '404': { description: 'Playlist not found' },
+        },
+      },
+    },
+    '/playlists/{id}/tracks': {
+      put: {
+        summary: 'Replace the ordered list of track IDs in a playlist',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['trackIds'], properties: { trackIds: { type: 'array', items: { type: 'string' } } } } } },
+        },
+        responses: {
+          '200': { description: 'Tracks replaced' },
+          '400': { description: 'body.trackIds must be an array of strings' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your playlist' },
+          '404': { description: 'Playlist not found' },
+        },
+      },
+    },
+    '/destinations': {
+      post: {
+        summary: 'Register a new streaming destination (e.g. a YouTube Live RTMP target)',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name', 'rtmpUrl', 'streamKey'],
+                properties: { name: { type: 'string' }, rtmpUrl: { type: 'string' }, streamKey: { type: 'string' } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Destination created', content: { 'application/json': { schema: { $ref: '#/components/schemas/Destination' } } } },
+          '400': { description: 'Missing or invalid name/rtmpUrl/streamKey' },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s destinations',
+        responses: {
+          '200': { description: 'Destination list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Destination' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/destinations/{id}': {
+      delete: {
+        summary: 'Delete a destination owned by the authenticated user',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Destination deleted' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
+        },
+      },
+    },
+    '/destinations/{destinationId}/stream/start': {
+      post: {
+        summary: 'Start streaming a playlist to this destination',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['playlistId'], properties: { playlistId: { type: 'string' } } } } },
+        },
+        responses: {
+          '200': { description: 'Stream started', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
+          '400': { description: 'Missing body.playlistId' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
+          '409': { description: 'Stream already active for this destination, or playlist is empty' },
+        },
+      },
+    },
+    '/destinations/{destinationId}/stream/stop': {
+      post: {
+        summary: 'Stop the stream for this destination',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Stream stopped', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
           '409': { description: 'Stream is not active' },
         },
       },
     },
-    '/stream/pause': {
+    '/destinations/{destinationId}/stream/pause': {
       post: {
-        summary: 'Pause playback (silence + background, RTMP stays connected)',
+        summary: 'Pause playback for this destination (silence + background, RTMP stays connected)',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Stream paused', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
           '409': { description: 'Stream is not currently streaming' },
         },
       },
     },
-    '/stream/resume': {
+    '/destinations/{destinationId}/stream/resume': {
       post: {
         summary: 'Resume playback of the current track from the position it was paused at',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Stream resumed', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
           '409': { description: 'Stream is not paused' },
         },
       },
     },
-    '/stream/next': {
+    '/destinations/{destinationId}/stream/next': {
       post: {
         summary: 'Skip to the next track in the queue',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Advanced to next track', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
-          '409': { description: 'Stream is not active or queue is empty' },
-        },
-      },
-    },
-    '/stream/previous': {
-      post: {
-        summary: 'Go back to the previous track',
-        responses: {
-          '200': { description: 'Moved to previous track', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
           '409': { description: 'Stream is not active' },
         },
       },
     },
-    '/stream/play': {
+    '/destinations/{destinationId}/stream/previous': {
+      post: {
+        summary: 'Go back to the previous track',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Moved to previous track', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
+          '409': { description: 'Stream is not active' },
+        },
+      },
+    },
+    '/destinations/{destinationId}/stream/play': {
       post: {
         summary: 'Queue a specific track by name to play next',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
           content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } },
@@ -70,31 +246,22 @@ export const openApiSpec = {
         responses: {
           '200': { description: 'Track queued', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
           '400': { description: 'Missing or invalid name' },
-          '404': { description: 'Track not found' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found, or track not found' },
+          '409': { description: 'Stream is not active' },
         },
       },
     },
-    '/stream/status': {
+    '/destinations/{destinationId}/stream/status': {
       get: {
-        summary: 'Get current stream status',
+        summary: 'Get the current stream status for this destination',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Current status', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
-        },
-      },
-    },
-    '/library': {
-      get: {
-        summary: 'List tracks currently in the library',
-        responses: {
-          '200': { description: 'Track list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Track' } } } } },
-        },
-      },
-    },
-    '/library/rescan': {
-      post: {
-        summary: 'Rescan the audio directory and update the library',
-        responses: {
-          '200': { description: 'Updated track list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Track' } } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
         },
       },
     },
@@ -153,12 +320,37 @@ export const openApiSpec = {
           email: { type: 'string' },
         },
       },
-      Track: {
+      TrackSummary: {
         type: 'object',
         properties: {
+          id: { type: 'string' },
           name: { type: 'string' },
-          audioPath: { type: 'string' },
-          coverPath: { type: 'string', nullable: true },
+          durationSeconds: { type: 'number', nullable: true },
+          hasCover: { type: 'boolean' },
+        },
+      },
+      Playlist: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+        },
+      },
+      PlaylistWithTracks: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+          tracks: { type: 'array', items: { $ref: '#/components/schemas/TrackSummary' } },
+        },
+      },
+      Destination: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+          rtmpUrl: { type: 'string' },
+          provider: { type: 'string' },
         },
       },
       StreamStatus: {
