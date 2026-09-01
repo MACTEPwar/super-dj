@@ -144,6 +144,19 @@ describe('StreamManager', () => {
     expect(manager.status('dest-1').state).toBe('streaming');
   });
 
+  it('start() finalizes a stale lifecycle left behind by a crashed controller instead of dropping it', async () => {
+    const { deps } = buildDeps();
+    const manager = new StreamManager(deps as any);
+    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }) };
+    (manager as any).controllers.set('dest-1', crashed);
+    const staleLifecycle = fakeLifecycle();
+    (manager as any).lifecycles.set('dest-1', { providerType: 'youtube', lifecycle: staleLifecycle });
+
+    await manager.start('dest-1', 'playlist-1');
+
+    expect(staleLifecycle.finalize).toHaveBeenCalledTimes(1);
+  });
+
   it('status() returns a synthetic idle status when no controller exists for a destination', () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);

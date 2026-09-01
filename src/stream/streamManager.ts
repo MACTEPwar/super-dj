@@ -58,7 +58,17 @@ export class StreamManager {
         throw new ApiError(409, 'a stream is already active for this destination');
       }
       this.controllers.delete(destinationId);
+      // A stale entry here means an earlier session's lifecycle (e.g. a YouTube broadcast/
+      // stream) was never finalized — the pusher died before StreamManager got a chance to,
+      // or the destination is being restarted before that session's own cleanup ran. Finalize
+      // it now so restarting a destination never silently orphans a YouTube broadcast.
+      const staleEntry = this.lifecycles.get(destinationId);
       this.lifecycles.delete(destinationId);
+      if (staleEntry) {
+        staleEntry.lifecycle.finalize().catch((err) => {
+          console.error('failed to finalize a stale destination lifecycle before restart', err);
+        });
+      }
     }
 
     const destination = await this.deps.destinationRepository.findById(destinationId);
