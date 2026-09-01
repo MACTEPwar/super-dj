@@ -3,11 +3,11 @@ import request from 'supertest';
 import { createPlaylistRouter } from '../../src/playlists/playlistRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
 
-function buildApp(playlistRepository: any, userId = 'user-1') {
+function buildApp(playlistRepository: any, trackRepository: any = { listByUser: jest.fn().mockResolvedValue([]) }, userId = 'user-1') {
   const authService: any = { getCurrentUser: jest.fn().mockResolvedValue({ id: userId, email: 'a@example.com' }) };
   const app = express();
   app.use(express.json());
-  app.use('/playlists', createPlaylistRouter(authService, playlistRepository));
+  app.use('/playlists', createPlaylistRouter(authService, playlistRepository, trackRepository));
   app.use(errorHandler);
   return app;
 }
@@ -56,8 +56,10 @@ describe('playlist routes', () => {
       findById: jest.fn().mockResolvedValue({ id: 'p1', name: 'A', userId: 'user-1' }),
       replaceTracks: jest.fn().mockResolvedValue(undefined),
     };
-    const res = await request(buildApp(playlistRepository)).put('/playlists/p1/tracks').send({ trackIds: ['t2', 't1'] });
+    const trackRepository: any = { listByUser: jest.fn().mockResolvedValue([{ id: 't1' }, { id: 't2' }]) };
+    const res = await request(buildApp(playlistRepository, trackRepository)).put('/playlists/p1/tracks').send({ trackIds: ['t2', 't1'] });
     expect(res.status).toBe(200);
+    expect(trackRepository.listByUser).toHaveBeenCalledWith('user-1');
     expect(playlistRepository.replaceTracks).toHaveBeenCalledWith('p1', ['t2', 't1']);
   });
 
@@ -65,6 +67,18 @@ describe('playlist routes', () => {
     const playlistRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'p1', name: 'A', userId: 'user-1' }) };
     const res = await request(buildApp(playlistRepository)).put('/playlists/p1/tracks').send({ trackIds: 'not-an-array' });
     expect(res.status).toBe(400);
+  });
+
+  it('PUT /playlists/:id/tracks rejects a trackId the caller does not own', async () => {
+    const playlistRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 'p1', name: 'A', userId: 'user-1' }),
+      replaceTracks: jest.fn().mockResolvedValue(undefined),
+    };
+    const trackRepository: any = { listByUser: jest.fn().mockResolvedValue([{ id: 't1' }]) };
+    const res = await request(buildApp(playlistRepository, trackRepository))
+      .put('/playlists/p1/tracks').send({ trackIds: ['t1', 'someone-elses-track'] });
+    expect(res.status).toBe(400);
+    expect(playlistRepository.replaceTracks).not.toHaveBeenCalled();
   });
 
   it('DELETE /playlists/:id deletes an owned playlist', async () => {

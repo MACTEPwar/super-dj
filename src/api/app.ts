@@ -29,8 +29,8 @@ export function createApp(deps: AppDeps): Express {
   app.use(express.json());
   app.use('/auth', createAuthRouter(deps.authService));
   app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository));
-  app.use('/playlists', createPlaylistRouter(deps.authService, deps.playlistRepository));
-  app.use('/destinations', createDestinationRouter(deps.authService, deps.destinationRepository, deps.destinationEncryptionKey));
+  app.use('/playlists', createPlaylistRouter(deps.authService, deps.playlistRepository, deps.trackRepository));
+  app.use('/destinations', createDestinationRouter(deps.authService, deps.destinationRepository, deps.destinationEncryptionKey, deps.streamManager));
   app.use('/destinations/:destinationId/stream', createStreamRouter(deps.authService, deps.streamManager, deps.destinationRepository));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));

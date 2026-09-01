@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { PlaylistRepository } from './playlistRepository';
+import { TrackRepository } from '../tracks/trackRepository';
 import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
@@ -12,7 +13,11 @@ async function requireOwnedPlaylist(playlistRepository: PlaylistRepository, id: 
   return playlist;
 }
 
-export function createPlaylistRouter(authService: AuthService, playlistRepository: PlaylistRepository): Router {
+export function createPlaylistRouter(
+  authService: AuthService,
+  playlistRepository: PlaylistRepository,
+  trackRepository: Pick<TrackRepository, 'listByUser'>,
+): Router {
   const router = Router();
   const auth = requireAuth(authService);
 
@@ -39,6 +44,14 @@ export function createPlaylistRouter(authService: AuthService, playlistRepositor
     const { trackIds } = req.body ?? {};
     if (!Array.isArray(trackIds) || !trackIds.every((id) => typeof id === 'string')) {
       throw new ApiError(400, 'body.trackIds must be an array of strings');
+    }
+    // Every id must be one of the caller's own tracks: otherwise a user could embed
+    // another user's track into their playlist, and a stale/foreign id would surface
+    // as a raw Prisma FK-constraint 500 inside replaceTracks().
+    const ownedTracks = await trackRepository.listByUser((req as AuthenticatedRequest).user!.id);
+    const ownedIds = new Set(ownedTracks.map((t) => t.id));
+    if (!trackIds.every((id: string) => ownedIds.has(id))) {
+      throw new ApiError(400, 'one or more trackIds are invalid');
     }
     await playlistRepository.replaceTracks(playlist.id, trackIds);
     res.status(200).json({});
