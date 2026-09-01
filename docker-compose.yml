@@ -4,12 +4,12 @@ services:
     ports:
       - "3000:3000"
     environment:
-      RTMP_URL: ${RTMP_URL}
-      STREAM_KEY: ${STREAM_KEY}
-      AUDIO_DIR: /data/audio
       DATABASE_URL: postgresql://superdj:superdj@postgres:5432/superdj
+      STREAM_KEY_ENCRYPTION_KEY: ${STREAM_KEY_ENCRYPTION_KEY}
+      UPLOADS_DIR: /data/uploads
+      FIFO_DIR: /tmp
     volumes:
-      - ./music:/data/audio:ro
+      - uploads-data:/data/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -30,3 +30,4 @@ services:
 
 volumes:
   postgres-data:
+  uploads-data:
