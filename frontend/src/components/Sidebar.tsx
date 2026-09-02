@@ -5,6 +5,7 @@ const links = [
   { to: '/library', label: 'Library' },
   { to: '/playlists', label: 'Playlists' },
   { to: '/destinations', label: 'Destinations' },
+  { to: '/streams', label: 'Streams' },
 ];
 
 export function Sidebar() {

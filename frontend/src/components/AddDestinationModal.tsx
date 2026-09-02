@@ -1,10 +1,10 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import * as Dialog from '@radix-ui/react-dialog';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { destinationsApi } from '../api/destinations';
 import { ApiError } from '../api/client';
+import { Drawer } from './Drawer';
 
 interface AddDestinationModalProps {
   open: boolean;
@@ -77,38 +77,32 @@ export function AddDestinationModal({ open, onOpenChange, onCreated }: AddDestin
   }, [isConnectingYoutube, onCreated, onOpenChange]);
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/40" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white p-6 shadow-lg">
-          <Dialog.Title className="mb-4 text-lg font-semibold">Add Destination</Dialog.Title>
-          <Tabs.Root defaultValue="youtube">
-            <Tabs.List className="mb-4 flex gap-2 border-b">
-              <Tabs.Trigger value="youtube" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">YouTube</Tabs.Trigger>
-              <Tabs.Trigger value="manual" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">Manual</Tabs.Trigger>
-            </Tabs.List>
+    <Drawer open={open} onOpenChange={onOpenChange} title="Add Destination">
+      <Tabs.Root defaultValue="youtube">
+        <Tabs.List className="mb-4 flex gap-2 border-b">
+          <Tabs.Trigger value="youtube" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">YouTube</Tabs.Trigger>
+          <Tabs.Trigger value="manual" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">Manual</Tabs.Trigger>
+        </Tabs.List>
 
-            <Tabs.Content value="youtube">
-              <p className="mb-4 text-sm text-gray-600">Connect your YouTube channel to stream directly through it.</p>
-              <button onClick={handleConnectYoutube} disabled={isConnectingYoutube} className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50">
-                {isConnectingYoutube ? 'Waiting for Google…' : 'Connect with Google'}
-              </button>
-            </Tabs.Content>
+        <Tabs.Content value="youtube">
+          <p className="mb-4 text-sm text-gray-600">Connect your YouTube channel to stream directly through it.</p>
+          <button onClick={handleConnectYoutube} disabled={isConnectingYoutube} className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50">
+            {isConnectingYoutube ? 'Waiting for Google…' : 'Connect with Google'}
+          </button>
+        </Tabs.Content>
 
-            <Tabs.Content value="manual">
-              <form onSubmit={handleManualSubmit} className="space-y-3">
-                <input className="w-full rounded border px-3 py-2" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
-                <input className="w-full rounded border px-3 py-2" placeholder="RTMP URL" value={rtmpUrl} onChange={(e) => setRtmpUrl(e.target.value)} required />
-                <input className="w-full rounded border px-3 py-2" placeholder="Stream key" value={streamKey} onChange={(e) => setStreamKey(e.target.value)} required />
-                {manualError && <p className="text-sm text-red-600">{manualError}</p>}
-                <button type="submit" disabled={manualMutation.isPending} className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50">
-                  {manualMutation.isPending ? 'Adding…' : 'Add'}
-                </button>
-              </form>
-            </Tabs.Content>
-          </Tabs.Root>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        <Tabs.Content value="manual">
+          <form onSubmit={handleManualSubmit} className="space-y-3">
+            <input className="w-full rounded border px-3 py-2" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
+            <input className="w-full rounded border px-3 py-2" placeholder="RTMP URL" value={rtmpUrl} onChange={(e) => setRtmpUrl(e.target.value)} required />
+            <input className="w-full rounded border px-3 py-2" placeholder="Stream key" value={streamKey} onChange={(e) => setStreamKey(e.target.value)} required />
+            {manualError && <p className="text-sm text-red-600">{manualError}</p>}
+            <button type="submit" disabled={manualMutation.isPending} className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50">
+              {manualMutation.isPending ? 'Adding…' : 'Add'}
+            </button>
+          </form>
+        </Tabs.Content>
+      </Tabs.Root>
+    </Drawer>
   );
 }

@@ -23,6 +23,16 @@ describe('Library', () => {
     expect(screen.getByAltText('')).toHaveAttribute('src', 'http://api/tracks/t1/cover');
   });
 
+  it('opens the Add Track drawer', async () => {
+    vi.mocked(tracksApi.list).mockResolvedValue([]);
+    renderWithProviders(<Library />);
+    await screen.findByText('No tracks yet.');
+
+    await userEvent.click(screen.getByText('+ Add Track'));
+
+    expect(screen.getByRole('heading', { name: 'Add Track' })).toBeInTheDocument();
+  });
+
   it('deletes a track and refetches the list', async () => {
     vi.mocked(tracksApi.list)
       .mockResolvedValueOnce([{ id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false }])

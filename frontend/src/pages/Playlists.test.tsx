@@ -15,13 +15,24 @@ describe('Playlists', () => {
     expect(screen.getByText('Mix').closest('a')).toHaveAttribute('href', '/playlists/p1');
   });
 
-  it('creates a playlist and refetches the list', async () => {
+  it('opens the Create Playlist drawer', async () => {
+    vi.mocked(playlistsApi.list).mockResolvedValue([]);
+    renderWithProviders(<Playlists />);
+    await screen.findByText('No playlists yet.');
+
+    await userEvent.click(screen.getByText('+ Create Playlist'));
+
+    expect(screen.getByRole('heading', { name: 'Create Playlist' })).toBeInTheDocument();
+  });
+
+  it('creates a playlist via the drawer and refetches the list', async () => {
     vi.mocked(playlistsApi.list).mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'p1', name: 'New Mix' }]);
     vi.mocked(playlistsApi.create).mockResolvedValue({ id: 'p1', name: 'New Mix' });
     renderWithProviders(<Playlists />);
     await screen.findByText('No playlists yet.');
 
-    await userEvent.type(screen.getByPlaceholderText('New playlist name'), 'New Mix');
+    await userEvent.click(screen.getByText('+ Create Playlist'));
+    await userEvent.type(screen.getByPlaceholderText('Playlist name'), 'New Mix');
     await userEvent.click(screen.getByText('Create'));
 
     expect(playlistsApi.create).toHaveBeenCalledWith('New Mix');
