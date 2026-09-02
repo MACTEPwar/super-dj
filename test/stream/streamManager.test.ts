@@ -62,6 +62,12 @@ function buildDeps() {
 }
 
 describe('StreamManager', () => {
+  it('has no listener cap on the shared EventEmitter, since SSE subscribers are intentionally unbounded', () => {
+    const { deps } = buildDeps();
+    const manager = new StreamManager(deps as any);
+    expect(manager.getMaxListeners()).toBe(0);
+  });
+
   it('start() throws 404 for an unknown destination', async () => {
     const { deps, destinationRepository } = buildDeps();
     destinationRepository.findById.mockResolvedValue(null);

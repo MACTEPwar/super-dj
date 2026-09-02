@@ -212,6 +212,21 @@ by each user via `POST /destinations`. The frontend's `VITE_API_BASE_URL` is a b
 environment variable documented in `frontend/.env.example` (not a runtime env var — the frontend
 is statically served after build).
 
+**TLS is required in front of both services for a real deployment.** `docker-compose.yml` as
+written publishes both `super-dj` (backend, port 3000) and `frontend` (port 5173) over plain
+HTTP, with no TLS termination anywhere. But `NODE_ENV=production` is set in the backend's
+`Dockerfile`, which makes `sessionCookie.ts` emit the session cookie as `SameSite=None; Secure`.
+Browsers silently discard a `Secure` cookie sent over a plain `http://` origin (localhost is
+exempted, a real deployment is not) — login would appear to succeed (200 + user JSON) but every
+subsequent request would silently 401, with nothing in the logs to explain why. Put a
+TLS-terminating reverse proxy (e.g. nginx, Caddy, Traefik) in front of both services before
+deploying this compose file anywhere but local development. Additionally, prefer putting the
+frontend and backend under one registrable domain (e.g. `app.example.com` for the frontend,
+`api.example.com` for the backend) rather than two unrelated domains — Safari's Intelligent
+Tracking Prevention and Chrome's third-party-cookie restrictions can still block a cross-site
+cookie even with `SameSite=None; Secure` set correctly when the two origins don't share a
+registrable domain.
+
 ## Known follow-ups (deliberately deferred)
 
 `PORT` parsing is unvalidated; overlay elapsed time drifts from true playout position;

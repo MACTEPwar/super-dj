@@ -1,4 +1,9 @@
 services:
+  # NOTE: as written, this compose file serves both services over plain HTTP (no TLS
+  # termination anywhere). The backend's production session cookie is `Secure`, which
+  # browsers silently drop over plain HTTP — a real deployment needs a TLS-terminating
+  # reverse proxy in front of both `super-dj` and `frontend`. See CLAUDE.md's
+  # Configuration section for details.
   super-dj:
     build: .
     ports:

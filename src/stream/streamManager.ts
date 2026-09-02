@@ -48,6 +48,12 @@ export class StreamManager extends EventEmitter {
 
   constructor(private readonly deps: StreamManagerDeps) {
     super();
+    // Every open SSE connection (across ALL destinations and ALL users) adds one
+    // 'statusChanged' listener to this single shared instance — legitimately unbounded
+    // by design (as many people as want to watch a stream's status), not a leak. Disable
+    // Node's default max-listeners warning (10) so a busy multi-tenant deployment doesn't
+    // spam stderr with MaxListenersExceededWarning.
+    this.setMaxListeners(0);
   }
 
   get(destinationId: string): StreamController | undefined {
