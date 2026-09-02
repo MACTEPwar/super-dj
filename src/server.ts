@@ -17,6 +17,8 @@ import { CustomRtmpProvider } from './destinations/customRtmpProvider';
 import { YoutubeProvider } from './destinations/youtubeProvider';
 import { StreamDestinationProvider } from './destinations/streamDestinationProvider';
 import { StreamManager } from './stream/streamManager';
+import { StreamSessionRepository } from './stream/streamSessionRepository';
+import { StreamSessionManager } from './stream/streamSessionManager';
 import { Spawner, ChildProcessLike } from './ffmpeg/types';
 import { createApp } from './api/app';
 
@@ -80,6 +82,14 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     providers: streamDestinationProviders,
   });
 
+  const streamSessionRepository = new StreamSessionRepository(prisma);
+  const streamSessionManager = new StreamSessionManager({
+    streamManager,
+    streamSessionRepository,
+    destinationRepository,
+    playlistRepository,
+  });
+
   const app = createApp({
     authService,
     trackRepository,
@@ -88,6 +98,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     destinationRepository,
     destinationEncryptionKey: config.streamKeyEncryptionKey,
     streamManager,
+    streamSessionManager,
     oauthProviderAdapters,
     oauthStateRepository,
     oauthConnectionRepository,

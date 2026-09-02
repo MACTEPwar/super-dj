@@ -316,6 +316,139 @@ export const openApiSpec = {
         },
       },
     },
+    '/stream-sessions': {
+      post: {
+        summary: 'Start streaming a playlist to several destinations at once (e.g. YouTube + a custom RTMP target), fanned out to independent per-destination streams',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['playlistId', 'destinationIds'],
+                properties: {
+                  playlistId: { type: 'string' },
+                  destinationIds: { type: 'array', items: { type: 'string' }, description: 'Must be non-empty and contain no duplicates' },
+                  title: { type: 'string', description: 'Optional broadcast title override (providers that create a live broadcast, e.g. YouTube); defaults to the playlist name' },
+                  description: { type: 'string', description: 'Optional broadcast description (providers that create a live broadcast, e.g. YouTube)' },
+                  privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Optional broadcast privacy (providers that create a live broadcast, e.g. YouTube); defaults to private' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Session created; each destination started independently — a per-destination `error` field means that one destination failed to start, not the whole session', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '400': { description: 'Missing/invalid playlistId or destinationIds' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your playlist, or not your destination' },
+          '404': { description: 'Playlist not found, or a destination not found' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s stream sessions, each with live per-destination status',
+        responses: {
+          '200': { description: 'Session list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/StreamSessionStatus' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/stream-sessions/{id}': {
+      delete: {
+        summary: 'Stop every destination in this session (best-effort) and delete it',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Session stopped and deleted' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/status': {
+      get: {
+        summary: 'Get the current status of every destination in this session',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Current status', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/events': {
+      get: {
+        summary: 'Server-Sent Events stream of every destination\'s live status in this session',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'text/event-stream — each event is a StreamSessionStatus JSON payload' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/pause': {
+      post: {
+        summary: 'Pause every destination in this session (best-effort, per destination)',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Result per destination; a per-destination `error` means only that destination failed to pause', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/resume': {
+      post: {
+        summary: 'Resume every destination in this session (best-effort, per destination)',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Result per destination', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/next': {
+      post: {
+        summary: 'Skip to the next track on every destination in this session (best-effort, per destination)',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Result per destination', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/previous': {
+      post: {
+        summary: 'Go back to the previous track on every destination in this session (best-effort, per destination)',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Result per destination', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
+    '/stream-sessions/{id}/stop': {
+      post: {
+        summary: 'Stop every destination in this session (best-effort, per destination); the session row itself is left in place — use DELETE to remove it too',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Result per destination', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream session' },
+          '404': { description: 'Stream session not found' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
@@ -417,6 +550,24 @@ export const openApiSpec = {
               type: { type: 'string' },
               phase: { type: 'string' },
               watchUrl: { type: 'string', nullable: true },
+            },
+          },
+        },
+      },
+      StreamSessionStatus: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          playlistId: { type: 'string' },
+          destinations: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                destinationId: { type: 'string' },
+                status: { $ref: '#/components/schemas/StreamStatus' },
+                error: { type: 'string', description: 'Set only when this destination\'s own command failed — the other destinations in the session are unaffected' },
+              },
             },
           },
         },

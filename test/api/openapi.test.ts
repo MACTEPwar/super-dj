@@ -8,6 +8,7 @@ function buildApp() {
   const playlistRepository: any = {};
   const destinationRepository: any = {};
   const streamManager: any = {};
+  const streamSessionManager: any = {};
   return createApp({
     authService,
     trackRepository,
@@ -16,6 +17,7 @@ function buildApp() {
     destinationRepository,
     destinationEncryptionKey: 'a'.repeat(64),
     streamManager,
+    streamSessionManager,
     oauthProviderAdapters: {},
     oauthStateRepository: {} as any,
     oauthConnectionRepository: {} as any,
