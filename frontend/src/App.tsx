@@ -3,8 +3,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { AuthProvider } from './hooks/useAuth';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { AppShell } from './components/AppShell';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import Library from './pages/Library';
 
 const queryClient = new QueryClient();
 
@@ -18,8 +20,11 @@ export default function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<Navigate to="/library" replace />} />
-              {/* Library/Playlists/Destinations routes are added in Task 9 */}
+              <Route element={<AppShell />}>
+                <Route path="/" element={<Navigate to="/library" replace />} />
+                <Route path="/library" element={<Library />} />
+                {/* /playlists and /destinations routes are added in Tasks 10 & 12 */}
+              </Route>
             </Route>
           </Routes>
         </BrowserRouter>
