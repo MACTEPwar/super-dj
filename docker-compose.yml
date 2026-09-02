@@ -11,6 +11,7 @@ services:
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
       APP_BASE_URL: ${APP_BASE_URL}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
     volumes:
       - uploads-data:/data/uploads
     depends_on:
@@ -30,6 +31,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - super-dj
+    restart: unless-stopped
 
 volumes:
   postgres-data:

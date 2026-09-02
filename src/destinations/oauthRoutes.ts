@@ -57,7 +57,14 @@ export function createOAuthRouter(
       refreshTokenEncrypted: encrypt(tokens.refreshToken, encryptionKey),
     });
 
-    res.status(200).send('<html><body>Connected — you can close this tab.</body></html>');
+    res.status(200).send(`
+<html><body>
+  Connected — this tab will close automatically.
+  <script>
+    if (window.opener) { window.opener.postMessage('super-dj-oauth-connected', '*'); }
+    window.close();
+  </script>
+</body></html>`.trim());
   }));
 
   return router;

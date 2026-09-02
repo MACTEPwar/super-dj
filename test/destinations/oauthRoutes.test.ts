@@ -65,6 +65,14 @@ describe('oauth connect routes', () => {
     expect(deps.oauthStateRepository.deleteById).toHaveBeenCalledWith('state-1');
   });
 
+  it('GET /destinations/:provider/oauth/callback response tells the opener it connected and closes itself', async () => {
+    const deps = buildDeps();
+    const res = await request(buildApp(deps)).get('/destinations/youtube/oauth/callback?code=abc&state=state-1');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("window.opener.postMessage('super-dj-oauth-connected', '*')");
+    expect(res.text).toContain('window.close()');
+  });
+
   it('GET /destinations/:provider/oauth/callback rejects an invalid/expired state', async () => {
     const deps = buildDeps();
     deps.oauthStateRepository.findValid.mockResolvedValue(null);
