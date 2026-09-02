@@ -71,7 +71,7 @@ independent pipeline per destination:
 
 **Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
 the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
-(`StreamManager` emits `statuschange` events) are delivered to the client via Server-Sent Events
+(`StreamManager` emits `statusChanged` events) are delivered to the client via Server-Sent Events
 (`GET /destinations/{destinationId}/stream/events`), eliminating polling overhead.
 
 ## Layout
