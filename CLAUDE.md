@@ -199,7 +199,28 @@ destination's access token is refreshed on every API call rather than cached aga
 `expiresIn` (deliberate — avoids a whole class of expiry-timing bugs for streams that can run far
 longer than a token's ~1 hour lifetime, at the cost of a few extra token-endpoint calls). Real
 end-to-end YouTube API smoke testing (an actual channel going live via this app) has not been run,
-matching the real-ffmpeg-smoke-testing caveat above.
+matching the real-ffmpeg-smoke-testing caveat above. A YouTube destination's health-check timeout
+(in `youtubeProvider.ts`) stops the YouTube-side broadcast but doesn't stop the local ffmpeg
+pipeline, which keeps pushing to a dead ingest endpoint until the user calls `/stream/stop`
+manually. A persistently failing `refreshAccessToken` (e.g. a revoked Google grant) makes the
+health-check poll loop retry silently for the full 90s timeout instead of short-circuiting on an
+auth-class error, and — since `finalize()` also needs a working token — can leave the ephemeral
+YouTube `liveStream` undeleted. `OAuthState` rows for an abandoned `/oauth/start` (the user never
+completes the consent flow) are never swept — they just sit until their `expiresAt` passes,
+matching the pre-existing `Session` table's same lack of a sweep job. The OAuth callback's
+state-row lookup-then-delete (`oauthStateRepository.findValid` then `deleteById`) isn't atomic —
+two concurrent callbacks presenting the same valid `state` value could both pass and create two
+destinations before either delete lands. Narrow (requires already holding a valid single-use
+state), but a compare-and-delete-returning-count check would close it. `OAuthConnection` has no
+uniqueness constraint on `(provider, externalAccountId)` — a user can connect the same YouTube
+channel to multiple `StreamDestination`s, which would then compete over the same channel's
+broadcasts if both were streamed to at once. `onError` (the pusher-crash-triggers-finalize hook)
+resolves the destination's lifecycle to finalize by `destinationId` alone. In the narrow case where
+a crashed session's exit event is processed after a subsequent `start()` for the same destination
+has already completed and registered a new lifecycle, this could finalize the new (healthy)
+session's YouTube broadcast instead of the crashed one's. `RtmpPusher.stop()`'s existing
+`stopRequested` guard makes the ordinary stop path safe; this only matters for a genuine crash
+racing a fast restart.
 
 ## Tooling
 
