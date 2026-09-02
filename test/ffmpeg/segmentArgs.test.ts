@@ -52,6 +52,21 @@ describe('buildTrackSegmentArgs', () => {
     expect(args[audioInputIndex - 3]).toBe('-ss');
     expect(args[audioInputIndex - 2]).toBe('42');
   });
+
+  it('adds -output_ts_offset before the mpegts output when carrying the session clock forward', () => {
+    const args = buildTrackSegmentArgs({ ...base, outputTsOffsetSeconds: 137.5 });
+
+    const offsetIndex = args.indexOf('-output_ts_offset');
+    expect(offsetIndex).toBeGreaterThan(-1);
+    expect(args[offsetIndex + 1]).toBe('137.5');
+    expect(args.slice(offsetIndex + 2)).toEqual(['-f', 'mpegts', 'pipe:1']);
+  });
+
+  it('omits -output_ts_offset when not given (e.g. the very first segment of a session)', () => {
+    const args = buildTrackSegmentArgs(base);
+
+    expect(args).not.toEqual(expect.arrayContaining(['-output_ts_offset']));
+  });
 });
 
 describe('buildPauseSegmentArgs', () => {
@@ -75,5 +90,11 @@ describe('buildPauseSegmentArgs', () => {
       '-f', 'mpegts',
       'pipe:1',
     ]);
+  });
+
+  it('adds -output_ts_offset before the mpegts output when carrying the session clock forward', () => {
+    const args = buildPauseSegmentArgs({ backgroundPath: '/assets/background.png', width: 1280, height: 720, fps: 30, outputTsOffsetSeconds: 42 });
+
+    expect(args.slice(-5)).toEqual(['-output_ts_offset', '42', '-f', 'mpegts', 'pipe:1']);
   });
 });

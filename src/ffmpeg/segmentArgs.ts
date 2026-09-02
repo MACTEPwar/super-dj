@@ -14,6 +14,7 @@ export function buildTrackSegmentArgs(params: VideoParams & {
   fontFile: string;
   overlay: NowPlayingOverlay;
   startOffsetSeconds?: number;
+  outputTsOffsetSeconds?: number;
 }): string[] {
   const { width, height, fps, audioPath, coverPath, backgroundPath, fontFile, overlay } = params;
   const coverSize = Math.round(height * 0.6);
@@ -52,15 +53,24 @@ export function buildTrackSegmentArgs(params: VideoParams & {
     '-r', String(fps),
     '-g', String(fps * 2),
     '-shortest',
-    '-f', 'mpegts',
-    'pipe:1',
   );
+  // Every segment is its own ffmpeg process, so its muxer starts PTS/DTS back at ~0 by
+  // default — but the pusher treats the FIFO as one continuous stream and paces it with
+  // -re against real elapsed time since it started. Without carrying the running
+  // session-elapsed offset forward into each new segment, every switch reintroduces a
+  // PTS discontinuity: the pusher briefly free-runs (no real-time pacing) until the new
+  // segment's timestamps catch back up, which is what shows up as a burst/stall and
+  // decode artifacts right at the switch. See StreamController's elapsedSessionSeconds().
+  if (params.outputTsOffsetSeconds) {
+    args.push('-output_ts_offset', String(params.outputTsOffsetSeconds));
+  }
+  args.push('-f', 'mpegts', 'pipe:1');
 
   return args;
 }
 
-export function buildPauseSegmentArgs(params: VideoParams & { backgroundPath: string }): string[] {
-  return [
+export function buildPauseSegmentArgs(params: VideoParams & { backgroundPath: string; outputTsOffsetSeconds?: number }): string[] {
+  const args = [
     '-loop', '1',
     '-i', params.backgroundPath,
     '-f', 'lavfi',
@@ -74,7 +84,10 @@ export function buildPauseSegmentArgs(params: VideoParams & { backgroundPath: st
     '-r', String(params.fps),
     '-g', String(params.fps * 2),
     '-vf', `scale=${params.width}:${params.height}`,
-    '-f', 'mpegts',
-    'pipe:1',
   ];
+  if (params.outputTsOffsetSeconds) {
+    args.push('-output_ts_offset', String(params.outputTsOffsetSeconds));
+  }
+  args.push('-f', 'mpegts', 'pipe:1');
+  return args;
 }

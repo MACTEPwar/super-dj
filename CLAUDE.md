@@ -23,6 +23,18 @@ independent pipeline per destination:
 - **Codec pinning matters.** Because the pusher uses `-c copy`, every segment must share identical
   codec parameters (H.264/yuv420p, fixed fps + GOP, AAC 44.1kHz stereo). These are pinned in
   `src/ffmpeg/segmentArgs.ts` — do not let a new segment builder diverge.
+- **Segment handoff.** `SegmentFeeder.stopCurrent()` `unpipe()`s the outgoing producer's stdout
+  from the shared FIFO write stream *before* killing it and piping the next segment's stdout in —
+  `kill('SIGTERM')` alone doesn't stop a still-alive process's stdout from draining into the same
+  destination as the next segment's, and two producers piped into one stream at once interleaves
+  their MPEG-TS bytes at a switch. Every new segment also carries
+  `StreamController.elapsedSessionSeconds()` (real seconds since `start()`) forward as
+  `-output_ts_offset`, since each segment is its own ffmpeg process with PTS/DTS starting back
+  near 0 — without carrying the session clock forward, the pusher (which paces the FIFO with
+  `-re` against real elapsed time) briefly free-runs at every switch until the new segment's
+  timestamps catch back up. Both were real, user-reported causes of visible video/audio artifacts
+  and slow-looking track switches, not signs of anything wrong with the "generation" concept
+  itself.
 - **`StreamManager` owns one `StreamController` per active destination** (keyed by
   `destinationId`, in an in-memory `Map`). `StreamManager.start()` loads the playlist's track
   snapshot (used for playback and the overlay window — deliberately *not* re-read live, so

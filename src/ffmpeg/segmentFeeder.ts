@@ -32,7 +32,7 @@ export class SegmentFeeder {
     });
   }
 
-  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0): ChildProcessLike {
+  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0, outputTsOffsetSeconds = 0): ChildProcessLike {
     const args = buildTrackSegmentArgs({
       audioPath: track.audioPath,
       coverPath: track.coverPath ?? this.options.defaultCoverPath,
@@ -43,16 +43,18 @@ export class SegmentFeeder {
       fps: this.options.fps,
       overlay,
       startOffsetSeconds,
+      outputTsOffsetSeconds,
     });
     return this.spawnAndPipe(args);
   }
 
-  feedPause(): ChildProcessLike {
+  feedPause(outputTsOffsetSeconds = 0): ChildProcessLike {
     const args = buildPauseSegmentArgs({
       backgroundPath: this.options.backgroundPath,
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
+      outputTsOffsetSeconds,
     });
     return this.spawnAndPipe(args);
   }

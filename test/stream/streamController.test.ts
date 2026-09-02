@@ -75,6 +75,8 @@ describe('StreamController', () => {
     expect(feeder.feedTrack).toHaveBeenCalledWith(
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       overlayFor(track('a')),
+      0,
+      expect.any(Number),
     );
     expect(controller.status().state).toBe('streaming');
   });
@@ -152,7 +154,7 @@ describe('StreamController', () => {
 
     nowSpy.mockReturnValue(1_000 + 12_345);
     controller.pause();
-    expect(feeder.feedPause).toHaveBeenCalled();
+    expect(feeder.feedPause).toHaveBeenCalledWith(12.345);
     expect(controller.status().state).toBe('paused');
 
     nowSpy.mockReturnValue(1_000 + 20_000);
@@ -162,6 +164,7 @@ describe('StreamController', () => {
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       overlayFor(track('a')),
       12.345,
+      20,
     );
     expect(controller.status().state).toBe('streaming');
 
@@ -179,6 +182,8 @@ describe('StreamController', () => {
     expect(feeder.feedTrack).toHaveBeenLastCalledWith(
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
       overlayFor(track('b')),
+      0,
+      expect.any(Number),
     );
   });
 
@@ -245,6 +250,8 @@ describe('StreamController', () => {
     expect(feeder.feedTrack).toHaveBeenLastCalledWith(
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
       overlayFor(track('b')),
+      0,
+      expect.any(Number),
     );
     expect(controller.status().state).toBe('streaming');
   });

@@ -31,6 +31,7 @@ export class StreamController {
   private trackStartedAt: number | null = null;
   private pausedElapsedSeconds = 0;
   private segmentGeneration = 0;
+  private streamStartedAt: number | null = null;
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
@@ -61,6 +62,7 @@ export class StreamController {
     this.feeder = this.deps.createSegmentFeeder();
     this.pausedElapsedSeconds = 0;
     this.trackStartedAt = null;
+    this.streamStartedAt = Date.now();
 
     this.state = 'streaming';
 
@@ -82,6 +84,7 @@ export class StreamController {
     this.pusher = null;
     this.trackStartedAt = null;
     this.pausedElapsedSeconds = 0;
+    this.streamStartedAt = null;
     this.state = 'idle';
     this.deps.onStatusChanged?.();
   }
@@ -94,7 +97,7 @@ export class StreamController {
     }
     this.segmentGeneration += 1;
     this.state = 'paused';
-    this.feeder!.feedPause();
+    this.feeder!.feedPause(this.elapsedSessionSeconds());
     this.deps.onStatusChanged?.();
   }
 
@@ -143,15 +146,24 @@ export class StreamController {
     // were awaiting the overlay — a stale overlay must never be fed.
     if (generation !== this.segmentGeneration) return;
     if (this.state !== 'streaming') return;
-    const child = startOffsetSeconds
-      ? this.feeder!.feedTrack(track, overlay, startOffsetSeconds)
-      : this.feeder!.feedTrack(track, overlay);
+    const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds, this.elapsedSessionSeconds());
     this.trackStartedAt = Date.now();
     child?.once('exit', () => {
       if (generation !== this.segmentGeneration) return;
       if (this.state !== 'streaming') return;
       this.advanceToNextTrack();
     });
+  }
+
+  // How many real seconds this stream session has been live for. Each segment is its own
+  // ffmpeg process (fresh PTS/DTS starting near 0), but the pusher treats the FIFO as one
+  // continuous stream and paces it with -re against real elapsed time — passed to every new
+  // segment as -output_ts_offset so its timestamps continue the running session clock
+  // instead of resetting, which is what a track switch's PTS/DTS discontinuity otherwise
+  // causes: the pusher briefly free-runs until the new segment's timestamps catch back up,
+  // showing up as a burst/stall and decode artifacts right at the switch.
+  private elapsedSessionSeconds(): number {
+    return this.streamStartedAt !== null ? (Date.now() - this.streamStartedAt) / 1000 : 0;
   }
 
   private advanceToNextTrack(): void {
