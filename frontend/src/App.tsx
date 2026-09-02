@@ -8,6 +8,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Library from './pages/Library';
 import Playlists from './pages/Playlists';
+import PlaylistEditor from './pages/PlaylistEditor';
 
 const queryClient = new QueryClient();
 
@@ -25,6 +26,7 @@ export default function App() {
                 <Route path="/" element={<Navigate to="/library" replace />} />
                 <Route path="/library" element={<Library />} />
                 <Route path="/playlists" element={<Playlists />} />
+                <Route path="/playlists/:id" element={<PlaylistEditor />} />
               </Route>
             </Route>
           </Routes>
