@@ -17,6 +17,7 @@ model User {
   playlists          Playlist[]
   streamDestinations StreamDestination[]
   oauthStates        OAuthState[]
+  streamSessions     StreamSession[]
 }
 
 model Session {
@@ -46,6 +47,7 @@ model Playlist {
   name      String
   createdAt DateTime        @default(now())
   tracks    PlaylistTrack[]
+  streamSessions StreamSession[]
 }
 
 model PlaylistTrack {
@@ -67,6 +69,7 @@ model StreamDestination {
   provider           String            @default("custom")
   createdAt          DateTime          @default(now())
   oauthConnection    OAuthConnection?
+  streamSessionLinks StreamSessionDestination[]
 }
 
 model OAuthConnection {
@@ -87,4 +90,32 @@ model OAuthState {
   provider  String
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+// A saved (playlist, destinations[]) grouping so the frontend can start/pause/next/stop
+// several destinations — e.g. YouTube + a custom RTMP target — as one fan-out command.
+// Live status is never persisted here; it's derived at read-time from each destination's
+// own in-memory StreamController (same as single-destination streaming today), since a
+// server restart already kills the underlying ffmpeg processes regardless of this row.
+model StreamSession {
+  id            String                     @id @default(uuid())
+  userId        String
+  user          User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  playlistId    String
+  playlist      Playlist                   @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  title         String?
+  description   String?
+  privacyStatus String?
+  createdAt     DateTime                   @default(now())
+  destinations  StreamSessionDestination[]
+}
+
+model StreamSessionDestination {
+  id            String            @id @default(uuid())
+  sessionId     String
+  session       StreamSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  destinationId String
+  destination   StreamDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, destinationId])
 }
