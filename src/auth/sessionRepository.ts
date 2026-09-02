@@ -1,6 +1,6 @@
-import { PrismaClient, Session, User } from '@prisma/client';
+import { PrismaClient, Session } from '@prisma/client';
 
-export type SessionWithUser = Session & { user: User };
+export type SessionWithUser = Session & { user: { id: string; email: string } };
 
 export class SessionRepository {
   constructor(private readonly prisma: PrismaClient) {}
@@ -12,7 +12,9 @@ export class SessionRepository {
   findValid(id: string, now: Date): Promise<SessionWithUser | null> {
     return this.prisma.session.findFirst({
       where: { id, expiresAt: { gt: now } },
-      include: { user: true },
+      // select only id/email on the nested user — never pull passwordHash into
+      // an object that authMiddleware puts straight onto req.user and GET /auth/me echoes back
+      include: { user: { select: { id: true, email: true } } },
     });
   }
 
