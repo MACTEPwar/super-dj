@@ -33,7 +33,18 @@ export class TrackUploadService {
   constructor(private readonly deps: TrackUploadServiceDeps) {
     this.moveFile = deps.moveFile ?? (async (from, to) => {
       await fsPromises.mkdir(path.dirname(to), { recursive: true });
-      await fsPromises.rename(from, to);
+      try {
+        await fsPromises.rename(from, to);
+      } catch (err) {
+        // multer's tmp dir and UPLOADS_DIR can be on different filesystems/mounts
+        // (e.g. distinct docker volumes) — rename(2) can't cross that, unlike copy+unlink.
+        if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
+          await fsPromises.copyFile(from, to);
+          await fsPromises.unlink(from);
+        } else {
+          throw err;
+        }
+      }
     });
     this.probeDuration = deps.probeDuration ?? getAudioDurationSeconds;
     this.generateId = deps.generateId ?? randomUUID;
