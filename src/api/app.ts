@@ -1,4 +1,5 @@
 import express, { Express } from 'express';
+import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { AuthService } from '../auth/authService';
 import { createAuthRouter } from '../auth/authRoutes';
@@ -29,10 +30,12 @@ export interface AppDeps {
   oauthProviderAdapters: Record<string, OAuthProviderAdapter>;
   oauthStateRepository: OAuthStateRepository;
   oauthConnectionRepository: OAuthConnectionRepository;
+  frontendOrigin: string;
 }
 
 export function createApp(deps: AppDeps): Express {
   const app = express();
+  app.use(cors({ origin: deps.frontendOrigin, credentials: true }));
   app.use(express.json());
   app.use('/auth', createAuthRouter(deps.authService));
   app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository));

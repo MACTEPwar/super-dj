@@ -91,6 +91,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     oauthProviderAdapters,
     oauthStateRepository,
     oauthConnectionRepository,
+    frontendOrigin: config.frontendOrigin,
   });
 
   return { app, prisma };

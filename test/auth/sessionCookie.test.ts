@@ -25,4 +25,27 @@ describe('sessionCookie', () => {
     expect(getSessionIdFromCookieHeader(undefined)).toBeNull();
     expect(getSessionIdFromCookieHeader('foo=bar')).toBeNull();
   });
+
+  it('sets SameSite=None in production (cross-origin frontend needs it to send the cookie)', () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const cookie = buildSessionCookie('session-1', new Date(Date.now() + 1000));
+      expect(cookie).toContain('SameSite=None');
+      expect(cookie).toContain('Secure');
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+    }
+  });
+
+  it('sets SameSite=Lax outside production (local dev, no Secure requirement)', () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    try {
+      const cookie = buildSessionCookie('session-1', new Date(Date.now() + 1000));
+      expect(cookie).toContain('SameSite=Lax');
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+    }
+  });
 });

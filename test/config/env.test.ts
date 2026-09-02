@@ -7,6 +7,7 @@ describe('loadConfig', () => {
     GOOGLE_OAUTH_CLIENT_ID: 'client-id',
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
+    FRONTEND_ORIGIN: 'https://web.example.com',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for optional values', () => {
@@ -30,6 +31,7 @@ describe('loadConfig — database', () => {
     GOOGLE_OAUTH_CLIENT_ID: 'client-id',
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
+    FRONTEND_ORIGIN: 'https://web.example.com',
   } as NodeJS.ProcessEnv;
 
   it('throws when DATABASE_URL is missing', () => {
@@ -56,6 +58,7 @@ describe('loadConfig — multi-tenant additions', () => {
     GOOGLE_OAUTH_CLIENT_ID: 'client-id',
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
+    FRONTEND_ORIGIN: 'https://web.example.com',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for uploadsDir, streamKeyEncryptionKey requirement, and fifoDir', () => {
@@ -82,6 +85,7 @@ describe('loadConfig — YouTube OAuth additions', () => {
   const base = {
     DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
     STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    FRONTEND_ORIGIN: 'https://web.example.com',
   } as NodeJS.ProcessEnv;
 
   it('applies GOOGLE_OAUTH_CLIENT_ID/SECRET and APP_BASE_URL', () => {
@@ -106,5 +110,21 @@ describe('loadConfig — YouTube OAuth additions', () => {
   it('throws when APP_BASE_URL is missing', () => {
     expect(() => loadConfig({ ...base, GOOGLE_OAUTH_CLIENT_ID: 'x', GOOGLE_OAUTH_CLIENT_SECRET: 'y' } as NodeJS.ProcessEnv))
       .toThrow('APP_BASE_URL environment variable is required');
+  });
+});
+
+describe('loadConfig — frontend origin', () => {
+  const base = {
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db', STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    GOOGLE_OAUTH_CLIENT_ID: 'x', GOOGLE_OAUTH_CLIENT_SECRET: 'y', APP_BASE_URL: 'https://app.example.com',
+  } as NodeJS.ProcessEnv;
+
+  it('applies FRONTEND_ORIGIN', () => {
+    const config = loadConfig({ ...base, FRONTEND_ORIGIN: 'https://web.example.com' } as NodeJS.ProcessEnv);
+    expect(config.frontendOrigin).toBe('https://web.example.com');
+  });
+
+  it('throws when FRONTEND_ORIGIN is missing', () => {
+    expect(() => loadConfig(base)).toThrow('FRONTEND_ORIGIN environment variable is required');
   });
 });

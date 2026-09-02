@@ -22,6 +22,7 @@ const config: AppConfig = {
   googleOAuthClientId: 'client-id',
   googleOAuthClientSecret: 'client-secret',
   appBaseUrl: 'https://app.example.com',
+  frontendOrigin: 'https://web.example.com',
 };
 
 describe('buildServer', () => {

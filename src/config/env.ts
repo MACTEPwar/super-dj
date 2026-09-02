@@ -12,6 +12,7 @@ export interface AppConfig {
   googleOAuthClientId: string;
   googleOAuthClientSecret: string;
   appBaseUrl: string;
+  frontendOrigin: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -20,6 +21,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const googleOAuthClientId = env.GOOGLE_OAUTH_CLIENT_ID;
   const googleOAuthClientSecret = env.GOOGLE_OAUTH_CLIENT_SECRET;
   const appBaseUrl = env.APP_BASE_URL;
+  const frontendOrigin = env.FRONTEND_ORIGIN;
 
   if (!databaseUrl) {
     throw new Error('DATABASE_URL environment variable is required');
@@ -36,6 +38,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!appBaseUrl) {
     throw new Error('APP_BASE_URL environment variable is required');
   }
+  if (!frontendOrigin) {
+    throw new Error('FRONTEND_ORIGIN environment variable is required');
+  }
 
   return {
     port: env.PORT ? parseInt(env.PORT, 10) : 3000,
@@ -49,5 +54,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     googleOAuthClientId,
     googleOAuthClientSecret,
     appBaseUrl,
+    frontendOrigin,
   };
 }
