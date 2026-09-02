@@ -451,6 +451,112 @@ export const openApiSpec = {
         },
       },
     },
+    '/templates': {
+      post: {
+        summary: 'Create a named, reusable overlay template ("theme") — a positioned list of elements (cover art, title text, playlist window) rendered onto the stream video',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name', 'elements'],
+                properties: {
+                  name: { type: 'string' },
+                  elements: { type: 'array', items: { $ref: '#/components/schemas/TemplateElement' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Template created', content: { 'application/json': { schema: { $ref: '#/components/schemas/Template' } } } },
+          '400': { description: 'Missing/invalid name or elements' },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s templates',
+        responses: {
+          '200': { description: 'Template list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Template' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/templates/{id}': {
+      get: {
+        summary: 'Get a template',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Template', content: { 'application/json': { schema: { $ref: '#/components/schemas/Template' } } } },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your template' },
+          '404': { description: 'Template not found' },
+        },
+      },
+      put: {
+        summary: 'Update a template\'s name and/or elements',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  elements: { type: 'array', items: { $ref: '#/components/schemas/TemplateElement' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Template updated', content: { 'application/json': { schema: { $ref: '#/components/schemas/Template' } } } },
+          '400': { description: 'Invalid name or elements' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your template' },
+          '404': { description: 'Template not found' },
+        },
+      },
+      delete: {
+        summary: 'Delete a template',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Template deleted' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your template' },
+          '404': { description: 'Template not found' },
+        },
+      },
+    },
+    '/templates/{id}/preview': {
+      post: {
+        summary: 'Render a PNG preview of this template (or an unsaved draft, if body.elements is given) against sample scene data — for the visual editor\'s live preview, not persisted',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  elements: { type: 'array', items: { $ref: '#/components/schemas/TemplateElement' }, description: 'Optional unsaved draft — overrides the saved template\'s elements for this render only' },
+                  title: { type: 'string', description: 'Optional sample title; defaults to a placeholder' },
+                  playlistLines: { type: 'array', items: { type: 'string' }, description: 'Optional sample playlist-window lines; defaults to a placeholder' },
+                  trackId: { type: 'string', description: 'Optional — use this track\'s real cover art instead of the default cover' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'image/png' },
+          '400': { description: 'Invalid elements/title/playlistLines/trackId' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your template, or not your track' },
+          '404': { description: 'Template not found, or track not found' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
@@ -572,6 +678,30 @@ export const openApiSpec = {
               },
             },
           },
+        },
+      },
+      TemplateElement: {
+        type: 'object',
+        description: 'A positioned overlay element. `type` determines which other fields apply: `cover` needs width+height; `title`/`playlist` need width+fontSize+color.',
+        required: ['type', 'x', 'y'],
+        properties: {
+          type: { type: 'string', enum: ['cover', 'title', 'playlist'] },
+          x: { type: 'number' },
+          y: { type: 'number' },
+          width: { type: 'number' },
+          height: { type: 'number', description: '`cover` only' },
+          fontSize: { type: 'number', description: '`title`/`playlist` only' },
+          color: { type: 'string', description: '`title`/`playlist` only — CSS color string' },
+        },
+      },
+      Template: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+          elements: { type: 'array', items: { $ref: '#/components/schemas/TemplateElement' } },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
         },
       },
     },

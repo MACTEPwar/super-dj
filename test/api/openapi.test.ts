@@ -21,6 +21,8 @@ function buildApp() {
     oauthProviderAdapters: {},
     oauthStateRepository: {} as any,
     oauthConnectionRepository: {} as any,
+    templateRepository: {} as any,
+    templateRendererDeps: { fontPath: '/fonts/test.ttf', fontFamily: 'Test', defaultCoverPath: '/assets/default-cover.png' },
     frontendOrigin: 'https://web.example.com',
   });
 }

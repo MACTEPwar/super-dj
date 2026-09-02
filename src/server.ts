@@ -19,10 +19,12 @@ import { StreamDestinationProvider } from './destinations/streamDestinationProvi
 import { StreamManager } from './stream/streamManager';
 import { StreamSessionRepository } from './stream/streamSessionRepository';
 import { StreamSessionManager } from './stream/streamSessionManager';
+import { TemplateRepository } from './templates/templateRepository';
 import { Spawner, ChildProcessLike } from './ffmpeg/types';
 import { createApp } from './api/app';
 
 const FONT_FILE = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+const OVERLAY_FONT_FAMILY = 'DejaVu Sans';
 const YOUTUBE_OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube';
 
 /**
@@ -90,6 +92,13 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     playlistRepository,
   });
 
+  const templateRepository = new TemplateRepository(prisma);
+  const templateRendererDeps = {
+    fontPath: FONT_FILE,
+    fontFamily: OVERLAY_FONT_FAMILY,
+    defaultCoverPath: config.defaultCoverPath,
+  };
+
   const app = createApp({
     authService,
     trackRepository,
@@ -102,6 +111,8 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     oauthProviderAdapters,
     oauthStateRepository,
     oauthConnectionRepository,
+    templateRepository,
+    templateRendererDeps,
     frontendOrigin: config.frontendOrigin,
   });
 

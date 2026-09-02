@@ -18,6 +18,8 @@ import { StreamManager } from '../stream/streamManager';
 import { createStreamRouter } from '../stream/streamRoutes';
 import { StreamSessionManager } from '../stream/streamSessionManager';
 import { createStreamSessionRouter } from '../stream/streamSessionRoutes';
+import { TemplateRepository } from '../templates/templateRepository';
+import { createTemplateRouter, TemplateRendererDeps } from '../templates/templateRoutes';
 import { errorHandler } from './errorHandler';
 import { openApiSpec } from './openapi';
 
@@ -33,6 +35,8 @@ export interface AppDeps {
   oauthProviderAdapters: Record<string, OAuthProviderAdapter>;
   oauthStateRepository: OAuthStateRepository;
   oauthConnectionRepository: OAuthConnectionRepository;
+  templateRepository: TemplateRepository;
+  templateRendererDeps: TemplateRendererDeps;
   frontendOrigin: string;
 }
 
@@ -50,6 +54,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/destinations', createOAuthRouter(deps.authService, deps.oauthProviderAdapters, deps.oauthStateRepository, deps.oauthConnectionRepository, deps.destinationRepository, deps.destinationEncryptionKey));
   app.use('/destinations/:destinationId/stream', createStreamRouter(deps.authService, deps.streamManager, deps.destinationRepository));
   app.use('/stream-sessions', createStreamSessionRouter(deps.authService, deps.streamSessionManager, deps.streamManager));
+  app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
   app.use(errorHandler);

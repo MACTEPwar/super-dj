@@ -18,6 +18,7 @@ model User {
   streamDestinations StreamDestination[]
   oauthStates        OAuthState[]
   streamSessions     StreamSession[]
+  streamTemplates    StreamTemplate[]
 }
 
 model Session {
@@ -118,4 +119,20 @@ model StreamSessionDestination {
   destination   StreamDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, destinationId])
+}
+
+// A saved, named, reusable overlay layout ("theme") the user designs once (background/cover
+// position, title text style, playlist-window style, ...) and picks by id when starting a
+// stream — same relationship a Playlist has to a stream: authored ahead of time, referenced at
+// start. `elements` is a JSON array of positioned element configs; kept schemaless in the DB
+// deliberately since the set of element types/style fields is expected to grow as the visual
+// editor (Stage 3 of the overlay rework) adds more of them — see CLAUDE.md.
+model StreamTemplate {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  elements  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

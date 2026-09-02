@@ -53,7 +53,10 @@ independent pipeline per destination:
   track. A track's `durationSeconds` is also probed once at upload time and cached on the `Track`
   row, so playlist listings don't need to re-probe.
 - **Overlay.** Each track segment composites background + cover art + drawtext (title, elapsed/
-  total, a playlist window) via `-filter_complex`.
+  total, a playlist window) via `-filter_complex`. This is Stage 1+ of an in-progress rework
+  (see "Overlay templates" below) — the plan is to replace this hand-built drawtext approach
+  with a pre-rendered PNG once the render pipeline is wired into `SegmentFeeder`; not done yet,
+  drawtext is still what actually ships to a live stream today.
 - **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected pusher exit sets
   `error`, from which `start()` recovers (it cleans up leftovers and recreates the FIFO).
 - **Stream keys at rest.** `StreamDestination.streamKeyEncrypted` is AES-256-GCM-encrypted
@@ -94,6 +97,40 @@ independent pipeline per destination:
   dedicated `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just
   a `custom` destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key,
   which already works through the existing `CustomRtmpProvider` path.
+
+**Overlay templates (in progress).** Rework driven by two goals at once: fix the recurring
+segment-switch corruption (see "Known follow-ups" below) *and* lay the foundation for a
+user-configurable overlay ("canvas editor", à la OBS scene composition — positioned cover art,
+title text, playlist window, eventually custom images/fonts). Staged rollout, tracked here as it
+lands:
+- **Stage 0 (done):** `StreamTemplate` (Prisma) is a named, reusable, per-user overlay layout —
+  `elements: Json`, an array of positioned element configs (`{type: 'cover'|'title'|'playlist',
+  x, y, width, height?, fontSize?, color?}`, validated by `src/templates/templateTypes.ts`'s
+  hand-rolled `isValidTemplateElement` rather than a schema library, since the element-type set
+  is expected to keep growing through the later stages). `src/render/sceneRenderer.ts` renders a
+  template + scene data (title, playlist lines, cover) to a PNG via **Satori** (HTML/CSS-shaped
+  layout → SVG) + **@resvg/resvg-js** (SVG → PNG) — chosen over a headless-browser renderer
+  (Puppeteer/Playwright) specifically because this has to re-render on the order of once a
+  second *per active stream*, multi-tenant; Satori has no browser-process overhead. `POST
+  /templates/{id}/preview` renders a template (or an unsaved draft passed in the body) against
+  sample scene data and returns the PNG directly, for the future visual editor's live preview.
+  `CustomRtmpProvider`/`YoutubeProvider`/the ffmpeg pipeline do not consume templates yet — this
+  stage is renderer + CRUD only.
+- **Stage 1 (not started):** wire `renderScene()`'s output into `SegmentFeeder` in place of the
+  hand-built `drawtext` filter graph in `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping
+  goes away with it) — still one ffmpeg process per segment, architecture otherwise untouched.
+  `StreamSession`/`.../stream/start` gain a `templateId` the user picks alongside the playlist.
+- **Stage 2 (not started, riskiest):** move each destination's whole session to a single
+  persistent ffmpeg process (concat-demuxer-with-rewritten-playlist, or filter-graph input
+  switching via zmq/sendcmd — not yet decided, wants a spike before committing) instead of one
+  process per segment. This is what actually eliminates the continuity-counter discontinuity at
+  every switch, not just papers over it.
+- **Stage 3 (not started):** drag-and-drop visual canvas editor in the frontend (full editor from
+  the start, not a simpler form-based v1 — user's explicit call), backed by the Stage 0 CRUD +
+  preview endpoint.
+- **Stage 4 (not started):** wire the editor's saved template into the real per-user stream
+  start flow as the actual selected `templateId`, replacing the sample scene data Stage 0's
+  preview endpoint uses.
 
 **Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
 the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
@@ -140,9 +177,14 @@ src/
   ffmpeg/                   segmentArgs.ts / segmentFeeder.ts (producer), rtmpPusherArgs.ts /
                             rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
                             overlayText.ts (drawtext escaping), types.ts (Spawner, ChildProcessLike)
+  templates/                templateRepository.ts (Prisma), templateRoutes.ts (mounted at
+                            /templates, incl. POST /:id/preview), templateTypes.ts
+                            (TemplateElement union + isValidTemplateElement(s))
+  render/                   sceneRenderer.ts (template + scene data -> PNG via satori + resvg),
+                            imageDataUri.ts (local image file -> data: URI, for satori's <img>)
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
                             StreamDestination, OAuthConnection, OAuthState, StreamSession,
-                            StreamSessionDestination) + migrations/
+                            StreamSessionDestination, StreamTemplate) + migrations/
 test/                       mirrors src/; unit tests only
 assets/                     default cover + background images
 frontend/                   React + Vite SPA
@@ -225,6 +267,14 @@ destination failed, not the whole call. `GET /stream-sessions`,
 in the session, best-effort per destination), `GET /stream-sessions/{id}/status`,
 `GET /stream-sessions/{id}/events` (SSE, aggregated), `DELETE /stream-sessions/{id}` (stops every
 destination, then deletes the session row) — all scoped to the session's owner.
+
+`POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
+`PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout
+(positioned `cover`/`title`/`playlist` elements); not yet consumed by the actual stream pipeline
+(Stage 0 of the overlay rework — see Architecture). `POST /templates/{id}/preview` (optional
+`elements[]` to preview an unsaved draft instead of the saved template, optional `title`/
+`playlistLines`/`trackId` sample scene data) renders and returns the PNG directly
+(`image/png`), not persisted.
 
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
