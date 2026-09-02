@@ -11,20 +11,22 @@ type FakeChild = {
   stderr: null;
   kill: jest.Mock;
   once: jest.Mock;
-  emitExit: (code?: number | null) => void;
+  // Named for the 'close' event StreamController actually listens on for auto-advance
+  // (not 'exit' — see streamController.ts for why that distinction matters).
+  emitClose: (code?: number | null) => void;
 };
 
 function fakeChild(): FakeChild {
-  let exitListener: ((code: number | null) => void) | null = null;
+  let closeListener: ((code: number | null) => void) | null = null;
   return {
     pid: 1,
     stdout: null,
     stderr: null,
     kill: jest.fn(),
     once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
-      if (event === 'exit') exitListener = listener as (code: number | null) => void;
+      if (event === 'close') closeListener = listener as (code: number | null) => void;
     }),
-    emitExit: (code = 0) => exitListener && exitListener(code),
+    emitClose: (code = 0) => closeListener && closeListener(code),
   };
 }
 
@@ -242,7 +244,7 @@ describe('StreamController', () => {
     await controller.start();
 
     expect(children).toHaveLength(1);
-    children[0].emitExit(0);
+    children[0].emitClose(0);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -266,7 +268,7 @@ describe('StreamController', () => {
     expect(feeder.feedTrack).toHaveBeenCalledTimes(2);
 
     // The killed first segment's ffmpeg exits asynchronously afterwards.
-    children[0].emitExit(null);
+    children[0].emitClose(null);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -280,7 +282,7 @@ describe('StreamController', () => {
     await controller.start();
 
     controller.stop();
-    children[0].emitExit(null);
+    children[0].emitClose(null);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -353,7 +355,7 @@ describe('StreamController', () => {
     await controller.start();
     onStatusChanged.mockClear();
 
-    children[0].emitExit(0);
+    children[0].emitClose(0);
 
     expect(onStatusChanged).toHaveBeenCalledTimes(1);
   });

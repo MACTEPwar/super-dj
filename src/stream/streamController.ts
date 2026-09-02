@@ -148,7 +148,14 @@ export class StreamController {
     if (this.state !== 'streaming') return;
     const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds, this.elapsedSessionSeconds());
     this.trackStartedAt = Date.now();
-    child?.once('exit', () => {
+    // 'close' (not 'exit') — Node's 'exit' can fire before the child's stdio streams have
+    // finished flushing to their listeners. Reacting on 'exit' meant advanceToNextTrack()
+    // (and the SegmentFeeder.stopCurrent()/unpipe it triggers via the next feedTrack) could
+    // fire while this segment's tail was still draining into the fifo write stream, cutting
+    // it off mid-flush — a second, independent source of the same corrupt-packet symptom the
+    // interleaving-pipe race caused, this time on natural end-of-track rather than a manual
+    // next/previous/pause.
+    child?.once('close', () => {
       if (generation !== this.segmentGeneration) return;
       if (this.state !== 'streaming') return;
       this.advanceToNextTrack();
