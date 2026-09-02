@@ -1,0 +1,178 @@
+{
+  "app": { "name": "super-dj" },
+  "language": { "en": "English", "ru": "Русский", "uk": "Українська" },
+  "sidebar": {
+    "library": "Библиотека",
+    "playlists": "Плейлисты",
+    "destinations": "Направления",
+    "streams": "Трансляции",
+    "signOut": "Выйти"
+  },
+  "auth": {
+    "login": {
+      "title": "Вход",
+      "email": "Email",
+      "password": "Пароль",
+      "submit": "Войти",
+      "noAccount": "Нет аккаунта?",
+      "registerLink": "Зарегистрироваться",
+      "failed": "Не удалось войти"
+    },
+    "register": {
+      "title": "Создать аккаунт",
+      "submit": "Создать аккаунт",
+      "haveAccount": "Уже есть аккаунт?",
+      "signInLink": "Войти",
+      "failed": "Не удалось зарегистрироваться"
+    }
+  },
+  "library": {
+    "title": "Библиотека",
+    "addTrack": "+ Добавить трек",
+    "empty": "Треков пока нет.",
+    "durationUnknown": "длительность неизвестна",
+    "durationSeconds": "{{seconds}} с",
+    "delete": "Удалить",
+    "deleteFailed": "Не удалось удалить трек"
+  },
+  "addTrackDrawer": {
+    "title": "Добавить трек",
+    "audioFile": "Аудиофайл",
+    "coverFile": "Обложка (необязательно)",
+    "namePlaceholder": "Название трека (необязательно — по умолчанию имя файла)",
+    "upload": "Загрузить",
+    "uploading": "Загрузка…",
+    "failed": "Не удалось загрузить"
+  },
+  "playlists": {
+    "title": "Плейлисты",
+    "create": "+ Создать плейлист",
+    "empty": "Плейлистов пока нет.",
+    "delete": "Удалить",
+    "deleteFailed": "Не удалось удалить плейлист"
+  },
+  "createPlaylistDrawer": {
+    "title": "Создать плейлист",
+    "namePlaceholder": "Название плейлиста",
+    "create": "Создать",
+    "creating": "Создание…",
+    "failed": "Не удалось создать плейлист"
+  },
+  "playlistEditor": {
+    "loading": "Загрузка…",
+    "save": "Сохранить изменения",
+    "saving": "Сохранение…",
+    "saved": "Плейлист сохранён",
+    "saveFailed": "Не удалось сохранить плейлист",
+    "remove": "Убрать",
+    "emptyTracks": "В этом плейлисте пока нет треков — добавьте их ниже.",
+    "addTracksHeading": "Добавить треки",
+    "add": "Добавить",
+    "allAdded": "Все треки уже в этом плейлисте."
+  },
+  "destinations": {
+    "title": "Направления",
+    "add": "+ Добавить направление",
+    "empty": "Направлений пока нет.",
+    "delete": "Удалить",
+    "deleteFailed": "Не удалось удалить направление"
+  },
+  "addDestinationModal": {
+    "title": "Добавить направление",
+    "tabYoutube": "YouTube",
+    "tabManual": "Вручную",
+    "youtubeDescription": "Подключите канал YouTube, чтобы транслировать напрямую через него.",
+    "connectWithGoogle": "Подключить через Google",
+    "waitingForGoogle": "Ожидание Google…",
+    "namePlaceholder": "Название",
+    "rtmpUrlPlaceholder": "RTMP-адрес",
+    "streamKeyPlaceholder": "Ключ трансляции",
+    "add": "Добавить",
+    "adding": "Добавление…",
+    "addFailed": "Не удалось добавить направление",
+    "connectFailed": "Не удалось начать подключение YouTube"
+  },
+  "destinationPanel": {
+    "title": "Управление трансляцией",
+    "selectPlaylist": "Выберите плейлист…",
+    "start": "Начать трансляцию",
+    "starting": "Запуск…",
+    "state": "Статус: {{state}}",
+    "nowPlaying": "Сейчас играет: {{track}}",
+    "next": "Далее: {{track}}",
+    "previous": "⏮ Назад",
+    "pause": "⏸ Пауза",
+    "resume": "▶ Продолжить",
+    "nextTrack": "⏭ Далее",
+    "stop": "⏹ Стоп",
+    "playPlaceholder": "Включить трек по названию следующим…",
+    "queue": "В очередь",
+    "watchOnYoutube": "Смотреть на YouTube",
+    "startFailed": "Не удалось начать трансляцию",
+    "stopFailed": "Не удалось остановить трансляцию",
+    "pauseFailed": "Не удалось поставить на паузу",
+    "resumeFailed": "Не удалось продолжить",
+    "nextFailed": "Не удалось переключить на следующий трек",
+    "previousFailed": "Не удалось вернуться к предыдущему треку",
+    "trackNotFound": "Трек не найден"
+  },
+  "streams": {
+    "title": "Трансляции",
+    "start": "+ Начать трансляцию",
+    "empty": "Трансляций пока нет.",
+    "stopAndRemove": "Остановить и удалить",
+    "stopFailed": "Не удалось остановить трансляцию"
+  },
+  "startStreamDrawer": {
+    "title": "Начать трансляцию",
+    "playlistLabel": "Плейлист",
+    "selectPlaylist": "Выберите плейлист…",
+    "destinationsLabel": "Направления",
+    "destinationsHelp": "Выбранные направления запускаются одновременно, с одного и того же плейлиста.",
+    "noDestinations": "Направлений пока нет.",
+    "youtubeHelp": "Метаданные трансляции для направления(-й) YouTube в этом стриме.",
+    "titlePlaceholder": "Название (необязательно — по умолчанию имя плейлиста)",
+    "descriptionPlaceholder": "Описание (необязательно)",
+    "privacyLabel": "Доступ",
+    "private": "Приватный",
+    "unlisted": "Доступ по ссылке",
+    "public": "Публичный",
+    "startButton_one": "Начать трансляцию на {{count}} направление",
+    "startButton_few": "Начать трансляцию на {{count}} направления",
+    "startButton_many": "Начать трансляцию на {{count}} направлений",
+    "startButton_other": "Начать трансляцию на {{count}} направления",
+    "starting": "Запуск…",
+    "failed": "Не удалось начать трансляцию"
+  },
+  "streamSessionPanel": {
+    "titlePrefix": "Трансляция: {{name}}",
+    "previous": "⏮ Назад",
+    "pauseAll": "⏸ Пауза всем",
+    "resumeAll": "▶ Продолжить всем",
+    "nextAll": "⏭ Далее",
+    "stopAll": "⏹ Стоп всем",
+    "nowPlayingNext": "Сейчас играет: {{track}} · Далее: {{next}}",
+    "noDestinations": "В этой трансляции нет направлений.",
+    "pauseFailed": "Не удалось поставить на паузу",
+    "resumeFailed": "Не удалось продолжить",
+    "nextFailed": "Не удалось переключить на следующий трек",
+    "previousFailed": "Не удалось вернуться к предыдущему треку",
+    "stopFailed": "Не удалось остановить"
+  },
+  "streamPhase": {
+    "creating": "🟡 Подготовка трансляции…",
+    "waitingForYoutube": "🟡 Подключение к YouTube…",
+    "live": "🔴 В эфире",
+    "complete": "⚫ Завершено",
+    "error": "🔴 Ошибка"
+  },
+  "streamState": {
+    "idle": "не активен",
+    "streaming": "в эфире",
+    "paused": "на паузе",
+    "error": "ошибка"
+  },
+  "drawer": {
+    "close": "Закрыть"
+  }
+}

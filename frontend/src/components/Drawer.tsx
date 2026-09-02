@@ -1,5 +1,6 @@
 import { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { useTranslation } from 'react-i18next';
 
 interface DrawerProps {
   open: boolean;
@@ -14,6 +15,7 @@ interface DrawerProps {
 // already used for its centered modal — focus trap, Escape-to-close, and overlay-click-to-close
 // come for free, only the positioning/sizing differs.
 export function Drawer({ open, onOpenChange, title, children }: DrawerProps) {
+  const { t } = useTranslation();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -21,7 +23,7 @@ export function Drawer({ open, onOpenChange, title, children }: DrawerProps) {
         <Dialog.Content className="fixed right-0 top-0 flex h-full w-full max-w-md flex-col bg-white shadow-xl">
           <div className="flex items-center justify-between border-b p-4">
             <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
-            <Dialog.Close className="rounded p-1 text-gray-500 hover:bg-gray-100" aria-label="Close">✕</Dialog.Close>
+            <Dialog.Close className="rounded p-1 text-gray-500 hover:bg-gray-100" aria-label={t('drawer.close')}>✕</Dialog.Close>
           </div>
           <div className="flex-1 overflow-y-auto p-4">{children}</div>
         </Dialog.Content>

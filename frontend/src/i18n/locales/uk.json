@@ -1,0 +1,178 @@
+{
+  "app": { "name": "super-dj" },
+  "language": { "en": "English", "ru": "Русский", "uk": "Українська" },
+  "sidebar": {
+    "library": "Бібліотека",
+    "playlists": "Плейлисти",
+    "destinations": "Напрямки",
+    "streams": "Трансляції",
+    "signOut": "Вийти"
+  },
+  "auth": {
+    "login": {
+      "title": "Вхід",
+      "email": "Email",
+      "password": "Пароль",
+      "submit": "Увійти",
+      "noAccount": "Немає акаунта?",
+      "registerLink": "Зареєструватися",
+      "failed": "Не вдалося увійти"
+    },
+    "register": {
+      "title": "Створити акаунт",
+      "submit": "Створити акаунт",
+      "haveAccount": "Вже є акаунт?",
+      "signInLink": "Увійти",
+      "failed": "Не вдалося зареєструватися"
+    }
+  },
+  "library": {
+    "title": "Бібліотека",
+    "addTrack": "+ Додати трек",
+    "empty": "Треків поки немає.",
+    "durationUnknown": "тривалість невідома",
+    "durationSeconds": "{{seconds}} с",
+    "delete": "Видалити",
+    "deleteFailed": "Не вдалося видалити трек"
+  },
+  "addTrackDrawer": {
+    "title": "Додати трек",
+    "audioFile": "Аудіофайл",
+    "coverFile": "Обкладинка (необов'язково)",
+    "namePlaceholder": "Назва треку (необов'язково — за замовчуванням ім'я файлу)",
+    "upload": "Завантажити",
+    "uploading": "Завантаження…",
+    "failed": "Не вдалося завантажити"
+  },
+  "playlists": {
+    "title": "Плейлисти",
+    "create": "+ Створити плейлист",
+    "empty": "Плейлистів поки немає.",
+    "delete": "Видалити",
+    "deleteFailed": "Не вдалося видалити плейлист"
+  },
+  "createPlaylistDrawer": {
+    "title": "Створити плейлист",
+    "namePlaceholder": "Назва плейлиста",
+    "create": "Створити",
+    "creating": "Створення…",
+    "failed": "Не вдалося створити плейлист"
+  },
+  "playlistEditor": {
+    "loading": "Завантаження…",
+    "save": "Зберегти зміни",
+    "saving": "Збереження…",
+    "saved": "Плейлист збережено",
+    "saveFailed": "Не вдалося зберегти плейлист",
+    "remove": "Прибрати",
+    "emptyTracks": "У цьому плейлисті поки немає треків — додайте їх нижче.",
+    "addTracksHeading": "Додати треки",
+    "add": "Додати",
+    "allAdded": "Усі треки вже в цьому плейлисті."
+  },
+  "destinations": {
+    "title": "Напрямки",
+    "add": "+ Додати напрямок",
+    "empty": "Напрямків поки немає.",
+    "delete": "Видалити",
+    "deleteFailed": "Не вдалося видалити напрямок"
+  },
+  "addDestinationModal": {
+    "title": "Додати напрямок",
+    "tabYoutube": "YouTube",
+    "tabManual": "Вручну",
+    "youtubeDescription": "Підключіть канал YouTube, щоб транслювати напряму через нього.",
+    "connectWithGoogle": "Підключити через Google",
+    "waitingForGoogle": "Очікування Google…",
+    "namePlaceholder": "Назва",
+    "rtmpUrlPlaceholder": "RTMP-адреса",
+    "streamKeyPlaceholder": "Ключ трансляції",
+    "add": "Додати",
+    "adding": "Додавання…",
+    "addFailed": "Не вдалося додати напрямок",
+    "connectFailed": "Не вдалося розпочати підключення YouTube"
+  },
+  "destinationPanel": {
+    "title": "Керування трансляцією",
+    "selectPlaylist": "Оберіть плейлист…",
+    "start": "Розпочати трансляцію",
+    "starting": "Запуск…",
+    "state": "Стан: {{state}}",
+    "nowPlaying": "Зараз грає: {{track}}",
+    "next": "Далі: {{track}}",
+    "previous": "⏮ Назад",
+    "pause": "⏸ Пауза",
+    "resume": "▶ Продовжити",
+    "nextTrack": "⏭ Далі",
+    "stop": "⏹ Стоп",
+    "playPlaceholder": "Увімкнути трек за назвою наступним…",
+    "queue": "У чергу",
+    "watchOnYoutube": "Дивитися на YouTube",
+    "startFailed": "Не вдалося розпочати трансляцію",
+    "stopFailed": "Не вдалося зупинити трансляцію",
+    "pauseFailed": "Не вдалося поставити на паузу",
+    "resumeFailed": "Не вдалося продовжити",
+    "nextFailed": "Не вдалося перемкнути на наступний трек",
+    "previousFailed": "Не вдалося повернутися до попереднього треку",
+    "trackNotFound": "Трек не знайдено"
+  },
+  "streams": {
+    "title": "Трансляції",
+    "start": "+ Розпочати трансляцію",
+    "empty": "Трансляцій поки немає.",
+    "stopAndRemove": "Зупинити і видалити",
+    "stopFailed": "Не вдалося зупинити трансляцію"
+  },
+  "startStreamDrawer": {
+    "title": "Розпочати трансляцію",
+    "playlistLabel": "Плейлист",
+    "selectPlaylist": "Оберіть плейлист…",
+    "destinationsLabel": "Напрямки",
+    "destinationsHelp": "Обрані напрямки запускаються одночасно, з одного й того самого плейлиста.",
+    "noDestinations": "Напрямків поки немає.",
+    "youtubeHelp": "Метадані трансляції для напрямку(-ів) YouTube у цьому стримі.",
+    "titlePlaceholder": "Назва (необов'язково — за замовчуванням назва плейлиста)",
+    "descriptionPlaceholder": "Опис (необов'язково)",
+    "privacyLabel": "Доступ",
+    "private": "Приватний",
+    "unlisted": "Доступ за посиланням",
+    "public": "Публічний",
+    "startButton_one": "Розпочати трансляцію на {{count}} напрямок",
+    "startButton_few": "Розпочати трансляцію на {{count}} напрямки",
+    "startButton_many": "Розпочати трансляцію на {{count}} напрямків",
+    "startButton_other": "Розпочати трансляцію на {{count}} напрямку",
+    "starting": "Запуск…",
+    "failed": "Не вдалося розпочати трансляцію"
+  },
+  "streamSessionPanel": {
+    "titlePrefix": "Трансляція: {{name}}",
+    "previous": "⏮ Назад",
+    "pauseAll": "⏸ Пауза всім",
+    "resumeAll": "▶ Продовжити всім",
+    "nextAll": "⏭ Далі",
+    "stopAll": "⏹ Стоп усім",
+    "nowPlayingNext": "Зараз грає: {{track}} · Далі: {{next}}",
+    "noDestinations": "У цій трансляції немає напрямків.",
+    "pauseFailed": "Не вдалося поставити на паузу",
+    "resumeFailed": "Не вдалося продовжити",
+    "nextFailed": "Не вдалося перемкнути на наступний трек",
+    "previousFailed": "Не вдалося повернутися до попереднього треку",
+    "stopFailed": "Не вдалося зупинити"
+  },
+  "streamPhase": {
+    "creating": "🟡 Підготовка трансляції…",
+    "waitingForYoutube": "🟡 Підключення до YouTube…",
+    "live": "🔴 В ефірі",
+    "complete": "⚫ Завершено",
+    "error": "🔴 Помилка"
+  },
+  "streamState": {
+    "idle": "не активний",
+    "streaming": "в ефірі",
+    "paused": "на паузі",
+    "error": "помилка"
+  },
+  "drawer": {
+    "close": "Закрити"
+  }
+}

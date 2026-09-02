@@ -1,0 +1,176 @@
+{
+  "app": { "name": "super-dj" },
+  "language": { "en": "English", "ru": "Русский", "uk": "Українська" },
+  "sidebar": {
+    "library": "Library",
+    "playlists": "Playlists",
+    "destinations": "Destinations",
+    "streams": "Streams",
+    "signOut": "Sign out"
+  },
+  "auth": {
+    "login": {
+      "title": "Sign in",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "noAccount": "No account?",
+      "registerLink": "Register",
+      "failed": "Login failed"
+    },
+    "register": {
+      "title": "Create an account",
+      "submit": "Create account",
+      "haveAccount": "Already have an account?",
+      "signInLink": "Sign in",
+      "failed": "Registration failed"
+    }
+  },
+  "library": {
+    "title": "Library",
+    "addTrack": "+ Add Track",
+    "empty": "No tracks yet.",
+    "durationUnknown": "duration unknown",
+    "durationSeconds": "{{seconds}}s",
+    "delete": "Delete",
+    "deleteFailed": "Failed to delete track"
+  },
+  "addTrackDrawer": {
+    "title": "Add Track",
+    "audioFile": "Audio file",
+    "coverFile": "Cover image (optional)",
+    "namePlaceholder": "Track name (optional — defaults to file name)",
+    "upload": "Upload",
+    "uploading": "Uploading…",
+    "failed": "Upload failed"
+  },
+  "playlists": {
+    "title": "Playlists",
+    "create": "+ Create Playlist",
+    "empty": "No playlists yet.",
+    "delete": "Delete",
+    "deleteFailed": "Failed to delete playlist"
+  },
+  "createPlaylistDrawer": {
+    "title": "Create Playlist",
+    "namePlaceholder": "Playlist name",
+    "create": "Create",
+    "creating": "Creating…",
+    "failed": "Failed to create playlist"
+  },
+  "playlistEditor": {
+    "loading": "Loading…",
+    "save": "Save changes",
+    "saving": "Saving…",
+    "saved": "Playlist saved",
+    "saveFailed": "Failed to save playlist",
+    "remove": "Remove",
+    "emptyTracks": "No tracks in this playlist yet — add some below.",
+    "addTracksHeading": "Add tracks",
+    "add": "Add",
+    "allAdded": "All tracks are already in this playlist."
+  },
+  "destinations": {
+    "title": "Destinations",
+    "add": "+ Add Destination",
+    "empty": "No destinations yet.",
+    "delete": "Delete",
+    "deleteFailed": "Failed to delete destination"
+  },
+  "addDestinationModal": {
+    "title": "Add Destination",
+    "tabYoutube": "YouTube",
+    "tabManual": "Manual",
+    "youtubeDescription": "Connect your YouTube channel to stream directly through it.",
+    "connectWithGoogle": "Connect with Google",
+    "waitingForGoogle": "Waiting for Google…",
+    "namePlaceholder": "Name",
+    "rtmpUrlPlaceholder": "RTMP URL",
+    "streamKeyPlaceholder": "Stream key",
+    "add": "Add",
+    "adding": "Adding…",
+    "addFailed": "Failed to add destination",
+    "connectFailed": "Failed to start YouTube connection"
+  },
+  "destinationPanel": {
+    "title": "Stream Control",
+    "selectPlaylist": "Select a playlist…",
+    "start": "Start stream",
+    "starting": "Starting…",
+    "state": "State: {{state}}",
+    "nowPlaying": "Now playing: {{track}}",
+    "next": "Next: {{track}}",
+    "previous": "⏮ Previous",
+    "pause": "⏸ Pause",
+    "resume": "▶ Resume",
+    "nextTrack": "⏭ Next",
+    "stop": "⏹ Stop",
+    "playPlaceholder": "Play a track by name next…",
+    "queue": "Queue",
+    "watchOnYoutube": "Watch on YouTube",
+    "startFailed": "Failed to start stream",
+    "stopFailed": "Failed to stop stream",
+    "pauseFailed": "Failed to pause",
+    "resumeFailed": "Failed to resume",
+    "nextFailed": "Failed to skip to next track",
+    "previousFailed": "Failed to go to previous track",
+    "trackNotFound": "Track not found"
+  },
+  "streams": {
+    "title": "Streams",
+    "start": "+ Start Stream",
+    "empty": "No stream sessions yet.",
+    "stopAndRemove": "Stop & remove",
+    "stopFailed": "Failed to stop stream session"
+  },
+  "startStreamDrawer": {
+    "title": "Start Stream",
+    "playlistLabel": "Playlist",
+    "selectPlaylist": "Select a playlist…",
+    "destinationsLabel": "Destinations",
+    "destinationsHelp": "Selected destinations all start together, from the same playlist.",
+    "noDestinations": "No destinations yet.",
+    "youtubeHelp": "Broadcast metadata for the YouTube destination(s) in this stream.",
+    "titlePlaceholder": "Title (optional — defaults to playlist name)",
+    "descriptionPlaceholder": "Description (optional)",
+    "privacyLabel": "Privacy",
+    "private": "Private",
+    "unlisted": "Unlisted",
+    "public": "Public",
+    "startButton_one": "Start stream on {{count}} destination",
+    "startButton_other": "Start stream on {{count}} destinations",
+    "starting": "Starting…",
+    "failed": "Failed to start stream"
+  },
+  "streamSessionPanel": {
+    "titlePrefix": "Stream: {{name}}",
+    "previous": "⏮ Previous",
+    "pauseAll": "⏸ Pause all",
+    "resumeAll": "▶ Resume all",
+    "nextAll": "⏭ Next",
+    "stopAll": "⏹ Stop all",
+    "nowPlayingNext": "Now playing: {{track}} · Next: {{next}}",
+    "noDestinations": "This session has no destinations.",
+    "pauseFailed": "Failed to pause",
+    "resumeFailed": "Failed to resume",
+    "nextFailed": "Failed to skip to next track",
+    "previousFailed": "Failed to go to previous track",
+    "stopFailed": "Failed to stop"
+  },
+  "streamPhase": {
+    "creating": "🟡 Preparing broadcast…",
+    "waitingForYoutube": "🟡 Connecting to YouTube…",
+    "live": "🔴 Live",
+    "complete": "⚫ Ended",
+    "error": "🔴 Error"
+  },
+  "streamState": {
+    "idle": "idle",
+    "streaming": "streaming",
+    "paused": "paused",
+    "error": "error"
+  },
+  "drawer": {
+    "close": "Close"
+  }
+}

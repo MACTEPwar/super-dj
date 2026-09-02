@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useMutation } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { destinationsApi } from '../api/destinations';
 import { ApiError } from '../api/client';
@@ -13,6 +14,7 @@ interface AddDestinationModalProps {
 }
 
 export function AddDestinationModal({ open, onOpenChange, onCreated }: AddDestinationModalProps) {
+  const { t } = useTranslation();
   const [name, setName] = useState('');
   const [rtmpUrl, setRtmpUrl] = useState('');
   const [streamKey, setStreamKey] = useState('');
@@ -27,7 +29,7 @@ export function AddDestinationModal({ open, onOpenChange, onCreated }: AddDestin
       onOpenChange(false);
       setName(''); setRtmpUrl(''); setStreamKey('');
     },
-    onError: (err) => setManualError(err instanceof ApiError ? err.message : 'Failed to add destination'),
+    onError: (err) => setManualError(err instanceof ApiError ? err.message : t('addDestinationModal.addFailed')),
   });
 
   function handleManualSubmit(e: FormEvent) {
@@ -42,7 +44,7 @@ export function AddDestinationModal({ open, onOpenChange, onCreated }: AddDestin
       popupRef.current = window.open(authUrl, 'super-dj-oauth', 'width=500,height=700');
       setConnectingYoutube(true);
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Failed to start YouTube connection');
+      toast.error(err instanceof ApiError ? err.message : t('addDestinationModal.connectFailed'));
     }
   }
 
@@ -77,28 +79,28 @@ export function AddDestinationModal({ open, onOpenChange, onCreated }: AddDestin
   }, [isConnectingYoutube, onCreated, onOpenChange]);
 
   return (
-    <Drawer open={open} onOpenChange={onOpenChange} title="Add Destination">
+    <Drawer open={open} onOpenChange={onOpenChange} title={t('addDestinationModal.title')}>
       <Tabs.Root defaultValue="youtube">
         <Tabs.List className="mb-4 flex gap-2 border-b">
-          <Tabs.Trigger value="youtube" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">YouTube</Tabs.Trigger>
-          <Tabs.Trigger value="manual" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">Manual</Tabs.Trigger>
+          <Tabs.Trigger value="youtube" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">{t('addDestinationModal.tabYoutube')}</Tabs.Trigger>
+          <Tabs.Trigger value="manual" className="px-3 py-2 text-sm data-[state=active]:border-b-2 data-[state=active]:border-black">{t('addDestinationModal.tabManual')}</Tabs.Trigger>
         </Tabs.List>
 
         <Tabs.Content value="youtube">
-          <p className="mb-4 text-sm text-gray-600">Connect your YouTube channel to stream directly through it.</p>
+          <p className="mb-4 text-sm text-gray-600">{t('addDestinationModal.youtubeDescription')}</p>
           <button onClick={handleConnectYoutube} disabled={isConnectingYoutube} className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50">
-            {isConnectingYoutube ? 'Waiting for Google…' : 'Connect with Google'}
+            {isConnectingYoutube ? t('addDestinationModal.waitingForGoogle') : t('addDestinationModal.connectWithGoogle')}
           </button>
         </Tabs.Content>
 
         <Tabs.Content value="manual">
           <form onSubmit={handleManualSubmit} className="space-y-3">
-            <input className="w-full rounded border px-3 py-2" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
-            <input className="w-full rounded border px-3 py-2" placeholder="RTMP URL" value={rtmpUrl} onChange={(e) => setRtmpUrl(e.target.value)} required />
-            <input className="w-full rounded border px-3 py-2" placeholder="Stream key" value={streamKey} onChange={(e) => setStreamKey(e.target.value)} required />
+            <input className="w-full rounded border px-3 py-2" placeholder={t('addDestinationModal.namePlaceholder')} value={name} onChange={(e) => setName(e.target.value)} required />
+            <input className="w-full rounded border px-3 py-2" placeholder={t('addDestinationModal.rtmpUrlPlaceholder')} value={rtmpUrl} onChange={(e) => setRtmpUrl(e.target.value)} required />
+            <input className="w-full rounded border px-3 py-2" placeholder={t('addDestinationModal.streamKeyPlaceholder')} value={streamKey} onChange={(e) => setStreamKey(e.target.value)} required />
             {manualError && <p className="text-sm text-red-600">{manualError}</p>}
             <button type="submit" disabled={manualMutation.isPending} className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50">
-              {manualMutation.isPending ? 'Adding…' : 'Add'}
+              {manualMutation.isPending ? t('addDestinationModal.adding') : t('addDestinationModal.add')}
             </button>
           </form>
         </Tabs.Content>

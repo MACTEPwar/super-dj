@@ -1,11 +1,13 @@
 import { FormEvent, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../hooks/useAuth';
 import { ApiError } from '../api/client';
 
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -17,19 +19,19 @@ export default function Login() {
       await login(email, password);
       navigate('/library');
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Login failed');
+      setError(err instanceof ApiError ? err.message : t('auth.login.failed'));
     }
   }
 
   return (
     <div className="flex min-h-screen items-center justify-center">
       <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4 rounded-lg border p-6">
-        <h1 className="text-xl font-semibold">Sign in</h1>
-        <input className="w-full rounded border px-3 py-2" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <input className="w-full rounded border px-3 py-2" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        <h1 className="text-xl font-semibold">{t('auth.login.title')}</h1>
+        <input className="w-full rounded border px-3 py-2" type="email" placeholder={t('auth.login.email')} value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input className="w-full rounded border px-3 py-2" type="password" placeholder={t('auth.login.password')} value={password} onChange={(e) => setPassword(e.target.value)} required />
         {error && <p className="text-sm text-red-600">{error}</p>}
-        <button type="submit" className="w-full rounded bg-black px-3 py-2 text-white">Sign in</button>
-        <p className="text-sm text-gray-500">No account? <a className="underline" href="/register">Register</a></p>
+        <button type="submit" className="w-full rounded bg-black px-3 py-2 text-white">{t('auth.login.submit')}</button>
+        <p className="text-sm text-gray-500">{t('auth.login.noAccount')} <a className="underline" href="/register">{t('auth.login.registerLink')}</a></p>
       </form>
     </div>
   );

@@ -1,15 +1,17 @@
 import { NavLink } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../hooks/useAuth';
-
-const links = [
-  { to: '/library', label: 'Library' },
-  { to: '/playlists', label: 'Playlists' },
-  { to: '/destinations', label: 'Destinations' },
-  { to: '/streams', label: 'Streams' },
-];
+import { LanguageSwitcher } from './LanguageSwitcher';
 
 export function Sidebar() {
   const { user, logout } = useAuth();
+  const { t } = useTranslation();
+  const links = [
+    { to: '/library', label: t('sidebar.library') },
+    { to: '/playlists', label: t('sidebar.playlists') },
+    { to: '/destinations', label: t('sidebar.destinations') },
+    { to: '/streams', label: t('sidebar.streams') },
+  ];
   return (
     <aside className="flex h-screen w-56 flex-col justify-between border-r bg-gray-50 p-4">
       <div>
@@ -27,8 +29,9 @@ export function Sidebar() {
         </nav>
       </div>
       <div className="space-y-2 text-sm">
+        <LanguageSwitcher />
         <div className="truncate text-gray-500">{user?.email}</div>
-        <button onClick={() => logout()} className="text-gray-600 underline">Sign out</button>
+        <button onClick={() => logout()} className="text-gray-600 underline">{t('sidebar.signOut')}</button>
       </div>
     </aside>
   );
