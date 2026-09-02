@@ -8,11 +8,20 @@ import { TrackRepository } from './tracks/trackRepository';
 import { TrackUploadService } from './tracks/trackUploadService';
 import { PlaylistRepository } from './playlists/playlistRepository';
 import { DestinationRepository } from './destinations/destinationRepository';
+import { OAuthConnectionRepository } from './destinations/oauthConnectionRepository';
+import { OAuthStateRepository } from './destinations/oauthStateRepository';
+import { createYoutubeApiClient } from './destinations/youtubeApiClient';
+import { YoutubeOAuthAdapter } from './destinations/youtubeOAuthAdapter';
+import { OAuthProviderAdapter } from './destinations/oauthProviderAdapter';
+import { CustomRtmpProvider } from './destinations/customRtmpProvider';
+import { YoutubeProvider } from './destinations/youtubeProvider';
+import { StreamDestinationProvider } from './destinations/streamDestinationProvider';
 import { StreamManager } from './stream/streamManager';
 import { Spawner, ChildProcessLike } from './ffmpeg/types';
 import { createApp } from './api/app';
 
 const FONT_FILE = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+const YOUTUBE_OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube';
 
 /**
  * Wraps child_process.spawn so every spawned ffmpeg has its stderr drained.
@@ -42,6 +51,22 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   const trackUploadService = new TrackUploadService({ trackRepository, uploadsDir: config.uploadsDir });
   const playlistRepository = new PlaylistRepository(prisma);
   const destinationRepository = new DestinationRepository(prisma);
+  const oauthConnectionRepository = new OAuthConnectionRepository(prisma);
+  const oauthStateRepository = new OAuthStateRepository(prisma);
+
+  const youtubeApiClient = createYoutubeApiClient({ clientId: config.googleOAuthClientId, clientSecret: config.googleOAuthClientSecret });
+  const youtubeOAuthAdapter = new YoutubeOAuthAdapter({
+    client: youtubeApiClient,
+    clientId: config.googleOAuthClientId,
+    redirectUri: `${config.appBaseUrl}/destinations/youtube/oauth/callback`,
+    scope: YOUTUBE_OAUTH_SCOPE,
+  });
+  const oauthProviderAdapters: Record<string, OAuthProviderAdapter> = { youtube: youtubeOAuthAdapter };
+
+  const streamDestinationProviders: Record<string, StreamDestinationProvider> = {
+    custom: new CustomRtmpProvider(config.streamKeyEncryptionKey),
+    youtube: new YoutubeProvider({ client: youtubeApiClient, encryptionKey: config.streamKeyEncryptionKey, oauthConnectionRepository }),
+  };
 
   const streamManager = new StreamManager({
     spawner,
@@ -52,7 +77,8 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     playlistRepository,
     destinationRepository,
     trackRepository,
-  }, config.streamKeyEncryptionKey);
+    providers: streamDestinationProviders,
+  });
 
   const app = createApp({
     authService,
@@ -62,6 +88,9 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     destinationRepository,
     destinationEncryptionKey: config.streamKeyEncryptionKey,
     streamManager,
+    oauthProviderAdapters,
+    oauthStateRepository,
+    oauthConnectionRepository,
   });
 
   return { app, prisma };

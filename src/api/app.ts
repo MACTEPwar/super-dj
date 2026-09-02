@@ -9,6 +9,10 @@ import { PlaylistRepository } from '../playlists/playlistRepository';
 import { createPlaylistRouter } from '../playlists/playlistRoutes';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { createDestinationRouter } from '../destinations/destinationRoutes';
+import { createOAuthRouter } from '../destinations/oauthRoutes';
+import { OAuthProviderAdapter } from '../destinations/oauthProviderAdapter';
+import { OAuthStateRepository } from '../destinations/oauthStateRepository';
+import { OAuthConnectionRepository } from '../destinations/oauthConnectionRepository';
 import { StreamManager } from '../stream/streamManager';
 import { createStreamRouter } from '../stream/streamRoutes';
 import { errorHandler } from './errorHandler';
@@ -22,6 +26,9 @@ export interface AppDeps {
   destinationRepository: DestinationRepository;
   destinationEncryptionKey: string;
   streamManager: StreamManager;
+  oauthProviderAdapters: Record<string, OAuthProviderAdapter>;
+  oauthStateRepository: OAuthStateRepository;
+  oauthConnectionRepository: OAuthConnectionRepository;
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -30,7 +37,8 @@ export function createApp(deps: AppDeps): Express {
   app.use('/auth', createAuthRouter(deps.authService));
   app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository));
   app.use('/playlists', createPlaylistRouter(deps.authService, deps.playlistRepository, deps.trackRepository));
-  app.use('/destinations', createDestinationRouter(deps.authService, deps.destinationRepository, deps.destinationEncryptionKey, deps.streamManager));
+  app.use('/destinations', createDestinationRouter(deps.authService, deps.destinationRepository, deps.destinationEncryptionKey, deps.streamManager, deps.oauthProviderAdapters, deps.oauthConnectionRepository));
+  app.use('/destinations', createOAuthRouter(deps.authService, deps.oauthProviderAdapters, deps.oauthStateRepository, deps.oauthConnectionRepository, deps.destinationRepository, deps.destinationEncryptionKey));
   app.use('/destinations/:destinationId/stream', createStreamRouter(deps.authService, deps.streamManager, deps.destinationRepository));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));

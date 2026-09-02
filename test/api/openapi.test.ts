@@ -16,6 +16,9 @@ function buildApp() {
     destinationRepository,
     destinationEncryptionKey: 'a'.repeat(64),
     streamManager,
+    oauthProviderAdapters: {},
+    oauthStateRepository: {} as any,
+    oauthConnectionRepository: {} as any,
   });
 }
 

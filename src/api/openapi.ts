@@ -113,7 +113,7 @@ export const openApiSpec = {
     },
     '/destinations': {
       post: {
-        summary: 'Register a new streaming destination (e.g. a YouTube Live RTMP target)',
+        summary: 'Register a new custom RTMP streaming destination. body.provider must be \'custom\' or omitted — use GET /destinations/{provider}/oauth/start to connect a YouTube (or other OAuth) destination instead',
         requestBody: {
           required: true,
           content: {
@@ -121,14 +121,14 @@ export const openApiSpec = {
               schema: {
                 type: 'object',
                 required: ['name', 'rtmpUrl', 'streamKey'],
-                properties: { name: { type: 'string' }, rtmpUrl: { type: 'string' }, streamKey: { type: 'string' } },
+                properties: { name: { type: 'string' }, rtmpUrl: { type: 'string' }, streamKey: { type: 'string' }, provider: { type: 'string', enum: ['custom'] } },
               },
             },
           },
         },
         responses: {
           '200': { description: 'Destination created', content: { 'application/json': { schema: { $ref: '#/components/schemas/Destination' } } } },
-          '400': { description: 'Missing or invalid name/rtmpUrl/streamKey' },
+          '400': { description: 'Missing or invalid name/rtmpUrl/streamKey, or an unsupported provider' },
           '401': { description: 'Not authenticated' },
         },
       },
@@ -152,13 +152,52 @@ export const openApiSpec = {
         },
       },
     },
+    '/destinations/{provider}/oauth/start': {
+      get: {
+        summary: 'Begin connecting a streaming-platform account via OAuth2 (e.g. YouTube)',
+        parameters: [{ name: 'provider', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Auth URL to open in a browser', content: { 'application/json': { schema: { type: 'object', properties: { authUrl: { type: 'string' } } } } } },
+          '401': { description: 'Not authenticated' },
+          '404': { description: 'Unknown provider' },
+        },
+      },
+    },
+    '/destinations/{provider}/oauth/callback': {
+      get: {
+        summary: 'OAuth2 redirect target — exchanges the code and creates the destination',
+        parameters: [
+          { name: 'provider', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'code', in: 'query', required: true, schema: { type: 'string' } },
+          { name: 'state', in: 'query', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'Connected — an HTML confirmation page' },
+          '400': { description: 'Missing/invalid code or state' },
+          '404': { description: 'Unknown provider' },
+        },
+      },
+    },
     '/destinations/{destinationId}/stream/start': {
       post: {
         summary: 'Start streaming a playlist to this destination',
         parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
-          content: { 'application/json': { schema: { type: 'object', required: ['playlistId'], properties: { playlistId: { type: 'string' } } } } },
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['playlistId'],
+                properties: {
+                  playlistId: { type: 'string' },
+                  title: { type: 'string', description: 'Optional broadcast title override (providers that create a live broadcast, e.g. YouTube); defaults to the playlist name' },
+                  description: { type: 'string', description: 'Optional broadcast description (providers that create a live broadcast, e.g. YouTube)' },
+                  privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Optional broadcast privacy (providers that create a live broadcast, e.g. YouTube); defaults to private' },
+                },
+              },
+            },
+          },
         },
         responses: {
           '200': { description: 'Stream started', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
@@ -349,7 +388,7 @@ export const openApiSpec = {
         properties: {
           id: { type: 'string' },
           name: { type: 'string' },
-          rtmpUrl: { type: 'string' },
+          rtmpUrl: { type: 'string', nullable: true },
           provider: { type: 'string' },
         },
       },
@@ -359,6 +398,15 @@ export const openApiSpec = {
           state: { type: 'string', enum: ['idle', 'streaming', 'paused', 'error'] },
           currentTrack: { type: 'string', nullable: true },
           nextTrack: { type: 'string', nullable: true },
+          provider: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              type: { type: 'string' },
+              phase: { type: 'string' },
+              watchUrl: { type: 'string', nullable: true },
+            },
+          },
         },
       },
     },

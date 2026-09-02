@@ -48,6 +48,19 @@ independent pipeline per destination:
   (`src/crypto/streamKeyCipher.ts`) with `STREAM_KEY_ENCRYPTION_KEY`; the plaintext key is never
   echoed back by the API (`toPublicDestination` omits it) and is only decrypted in-memory when a
   stream starts.
+- **`StreamDestinationProvider` / `OAuthProviderAdapter` split.** How a destination is *connected*
+  (OAuth2 authorization code flow, provider-generic via `OAuthProviderAdapter` — currently just
+  `YoutubeOAuthAdapter`) is a separate concern from how a *stream session* is prepared for it
+  (`StreamDestinationProvider` — `CustomRtmpProvider` for a manually-entered RTMP URL/key,
+  `YoutubeProvider` for an OAuth-connected YouTube channel). `StreamManager` picks a
+  `StreamDestinationProvider` by `destination.provider` and calls `prepareSession()`, which for
+  YouTube creates an ephemeral `liveBroadcast` + `liveStream` *per streaming session* (not
+  persisted — created fresh on `start()`, transitioned to `live` once the pusher's RTMP push is
+  healthy, and torn down/deleted on `stop()` or an unexpected pusher exit) and returns the RTMP
+  ingest URL/key StreamManager needs, plus a `DestinationLifecycle` handle for that polling/
+  teardown. `OAuthConnection` (refresh token, external account id/name) is itself
+  provider-generic — keyed by `destinationId` and a `provider` string — so a future OAuth-based
+  provider doesn't need its own connection table.
 - **Ownership checks.** Every track/playlist/destination/stream route verifies the resource
   belongs to the authenticated user: 404 if the resource doesn't exist, 403 if it exists but
   belongs to someone else. `StreamManager.start()` additionally checks the *playlist* belongs
@@ -73,7 +86,14 @@ src/
                             trackRoutes.ts
   playlists/                playlistRepository.ts (Prisma, ordered PlaylistTrack join),
                             playlistRoutes.ts
-  destinations/             destinationRepository.ts (Prisma), destinationRoutes.ts
+  destinations/             destinationRepository.ts (Prisma), destinationRoutes.ts,
+                            oauthConnectionRepository.ts / oauthStateRepository.ts (Prisma),
+                            oauthProviderAdapter.ts (interface), oauthRoutes.ts (mounted at
+                            /destinations/:provider/oauth), youtubeApiClient.ts (thin Google/
+                            YouTube Data API v3 HTTP wrapper), youtubeOAuthAdapter.ts
+                            (OAuthProviderAdapter for YouTube), streamDestinationProvider.ts
+                            (interface + DestinationLifecyclePhase), customRtmpProvider.ts /
+                            youtubeProvider.ts (StreamDestinationProvider impls)
   crypto/streamKeyCipher.ts AES-256-GCM encrypt/decrypt for stream keys at rest
   stream/                   streamManager.ts (per-destination StreamController registry),
                             streamController.ts (session state machine; LibraryLike adapter),
@@ -84,7 +104,7 @@ src/
                             rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
                             overlayText.ts (drawtext escaping), types.ts (Spawner, ChildProcessLike)
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
-                            StreamDestination) + migrations/
+                            StreamDestination, OAuthConnection, OAuthState) + migrations/
 test/                       mirrors src/; unit tests only
 assets/                     default cover + background images
 ```
@@ -111,7 +131,8 @@ diff — always include the migration history. Never hand-write migration SQL.
 `ChildProcessLike` fake — unit tests never spawn real ffmpeg (`test/server.test.ts` spawns a plain
 `node -e` only to prove stderr is drained). Prisma-backed repositories (`userRepository.ts`,
 `sessionRepository.ts`, `trackRepository.ts`, `playlistRepository.ts`,
-`destinationRepository.ts`) are thin wrappers verified by manual smoke test with a real Postgres
+`destinationRepository.ts`, `oauthConnectionRepository.ts`, `oauthStateRepository.ts`) are thin
+wrappers verified by manual smoke test with a real Postgres
 (`docker compose up`), not unit tests — services that consume them (`StreamManager`,
 `TrackUploadService`, route handlers) take `Pick<...>` structural subsets so they can be
 unit-tested with plain-object fakes instead. Follow the existing fake-child / fake-repository
@@ -130,8 +151,17 @@ pattern rather than introducing a new mocking style.
 `POST /destinations` (`name`, `rtmpUrl`, `streamKey` — key is encrypted at rest and never
 returned), `GET /destinations`, `DELETE /destinations/{id}`.
 
+`GET /destinations/{provider}/oauth/start` (returns an `authUrl` to open in a browser),
+`GET /destinations/{provider}/oauth/callback` (the OAuth2 redirect target — exchanges the code
+and creates the destination) — the OAuth2 connect flow for a provider-backed destination (e.g.
+`youtube`), as an alternative to `POST /destinations` for manually-entered RTMP destinations.
+
 `POST /destinations/{id}/stream/{start,stop,pause,resume,next,previous,play}`,
 `GET /destinations/{id}/stream/status` — all scoped to the destination's owner.
+`POST .../stream/start` also accepts optional `title`/`description`/`privacyStatus` fields, used
+by providers that create a live broadcast (e.g. YouTube) — ignored by `custom` destinations; it
+400s on a missing/invalid `body.playlistId` as well as a non-string `title`/`description` or a
+`privacyStatus` outside `'public'`/`'unlisted'`/`'private'`.
 
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
@@ -148,7 +178,10 @@ docker compose up --build
 ## Configuration
 
 Required env vars: `DATABASE_URL`, `STREAM_KEY_ENCRYPTION_KEY` (32-byte hex key for AES-256-GCM;
-never commit these).
+never commit these), `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `APP_BASE_URL`
+(the app's own externally-reachable base URL, used to build the YouTube OAuth redirect URI —
+`GOOGLE_OAUTH_CLIENT_ID`/`_SECRET` come from a Google Cloud Console OAuth client with the YouTube
+Data API v3 enabled, an external, manual, one-time setup step).
 Optional: `PORT` (3000), `SESSION_TTL_DAYS` (30), `UPLOADS_DIR` (`/data/uploads`), `FIFO_DIR`
 (`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`.
 
@@ -161,7 +194,12 @@ by each user via `POST /destinations`.
 `stopCurrent()` SIGTERMs mid-TS-packet; the Docker image runs as root; `assets/` holds 1×1
 placeholder PNGs; uploaded files are never cleaned up on track deletion (`DELETE /tracks/{id}`
 removes the DB row but not `{UPLOADS_DIR}/{userId}/{trackId}/`); no per-user storage quota. Real-
-ffmpeg smoke testing of segment concatenation has not been run in CI.
+ffmpeg smoke testing of segment concatenation has not been run in CI. A YouTube-connected
+destination's access token is refreshed on every API call rather than cached against its
+`expiresIn` (deliberate — avoids a whole class of expiry-timing bugs for streams that can run far
+longer than a token's ~1 hour lifetime, at the cost of a few extra token-endpoint calls). Real
+end-to-end YouTube API smoke testing (an actual channel going live via this app) has not been run,
+matching the real-ffmpeg-smoke-testing caveat above.
 
 ## Tooling
 

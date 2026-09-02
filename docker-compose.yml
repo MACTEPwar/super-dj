@@ -8,6 +8,9 @@ services:
       STREAM_KEY_ENCRYPTION_KEY: ${STREAM_KEY_ENCRYPTION_KEY}
       UPLOADS_DIR: /data/uploads
       FIFO_DIR: /tmp
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
+      APP_BASE_URL: ${APP_BASE_URL}
     volumes:
       - uploads-data:/data/uploads
     depends_on:
