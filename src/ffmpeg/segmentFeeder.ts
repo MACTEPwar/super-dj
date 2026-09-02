@@ -15,6 +15,7 @@ export interface SegmentFeederOptions extends VideoParams {
 export class SegmentFeeder {
   private readonly fifoWriteStream: NodeJS.WritableStream;
   private activeProcess: ChildProcessLike | null = null;
+  private activeStdout: NodeJS.ReadableStream | null = null;
 
   constructor(private readonly options: SegmentFeederOptions) {
     const createWriteStream = options.createWriteStream ?? ((p: string) => fs.createWriteStream(p));
@@ -57,6 +58,19 @@ export class SegmentFeeder {
   }
 
   stopCurrent(): void {
+    if (this.activeStdout) {
+      // kill() doesn't stop the dying process's stdout from still draining into
+      // fifoWriteStream — a real ffmpeg process takes a little while to actually exit
+      // after SIGTERM, and by the time it does, spawnAndPipe() has typically already
+      // piped the *next* segment's stdout into the same destination. With both piped at
+      // once, their MPEG-TS bytes interleave unpredictably, corrupting the bitstream
+      // right at the switch point: this is what shows up as video/audio glitches and a
+      // slow-looking track change (the pusher/decoder has to resync afterwards).
+      // Unpiping immediately closes that window regardless of how long the process
+      // itself takes to die.
+      this.activeStdout.unpipe(this.fifoWriteStream);
+      this.activeStdout = null;
+    }
     if (this.activeProcess) {
       this.activeProcess.kill('SIGTERM');
       this.activeProcess = null;
@@ -73,6 +87,7 @@ export class SegmentFeeder {
     const child = this.options.spawner('ffmpeg', args);
     if (child.stdout) {
       child.stdout.pipe(this.fifoWriteStream, { end: false });
+      this.activeStdout = child.stdout;
     }
     this.activeProcess = child;
     return child;

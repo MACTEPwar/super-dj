@@ -79,6 +79,29 @@ describe('SegmentFeeder', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
+  it('unpipes the outgoing producer so a still-draining old segment cannot interleave with the next one', () => {
+    // kill('SIGTERM') doesn't make a real ffmpeg process's stdout stop emitting data
+    // immediately — there's a window before it actually exits. Without an explicit
+    // unpipe, that leftover data and the next segment's data would both flow into the
+    // same fifo write stream at once, interleaving two MPEG-TS streams into one
+    // corrupted byte stream (the artifacts/slow-recovery a track switch used to cause).
+    const chunks: Buffer[] = [];
+    const writeStream = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+    const child1 = fakeChild();
+    const child2 = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValueOnce(child1).mockReturnValueOnce(child2);
+    const feeder = buildFeeder({ spawner, createWriteStream: () => writeStream });
+
+    feeder.feedTrack(track, overlay);
+    feeder.feedTrack(track, overlay);
+
+    child1.stdout.write('stale-bytes-from-the-dying-process');
+    child2.stdout.write('fresh-segment-bytes');
+    child2.stdout.end();
+
+    expect(Buffer.concat(chunks).toString()).toBe('fresh-segment-bytes');
+  });
+
   it('close() ends the fifo write stream', () => {
     const writeStream = new PassThrough();
     const endSpy = jest.spyOn(writeStream, 'end');
