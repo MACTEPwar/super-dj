@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -29,9 +28,9 @@ export default function Destinations() {
       <ul className="divide-y rounded-lg border">
         {destinationsQuery.data?.map((destination) => (
           <li key={destination.id} className="flex items-center justify-between p-3">
-            <Link to={`/destinations/${destination.id}`} className="font-medium underline">
+            <span className="font-medium">
               {destination.name} <span className="text-xs text-gray-500">({destination.provider})</span>
-            </Link>
+            </span>
             <button onClick={() => deleteMutation.mutate(destination.id)} className="text-sm text-red-600">{t('destinations.delete')}</button>
           </li>
         ))}

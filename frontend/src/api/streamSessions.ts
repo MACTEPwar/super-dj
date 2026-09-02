@@ -1,5 +1,19 @@
 import { api, API_BASE_URL } from './client';
-import { StreamStatus } from './stream';
+
+export type SessionState = 'idle' | 'streaming' | 'paused' | 'error';
+
+export interface ProviderStatus {
+  type: string;
+  phase: string;
+  watchUrl: string | null;
+}
+
+export interface StreamStatus {
+  state: SessionState;
+  currentTrack: string | null;
+  nextTrack: string | null;
+  provider?: ProviderStatus;
+}
 
 export interface StreamSessionDestinationStatus {
   destinationId: string;

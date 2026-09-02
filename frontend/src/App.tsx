@@ -10,7 +10,6 @@ import Library from './pages/Library';
 import Playlists from './pages/Playlists';
 import PlaylistEditor from './pages/PlaylistEditor';
 import Destinations from './pages/Destinations';
-import DestinationPanel from './pages/DestinationPanel';
 import Streams from './pages/Streams';
 import StreamSessionPanel from './pages/StreamSessionPanel';
 
@@ -32,7 +31,6 @@ export default function App() {
                 <Route path="/playlists" element={<Playlists />} />
                 <Route path="/playlists/:id" element={<PlaylistEditor />} />
                 <Route path="/destinations" element={<Destinations />} />
-                <Route path="/destinations/:id" element={<DestinationPanel />} />
                 <Route path="/streams" element={<Streams />} />
                 <Route path="/streams/:id" element={<StreamSessionPanel />} />
               </Route>
