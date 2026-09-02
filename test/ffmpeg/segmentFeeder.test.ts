@@ -88,4 +88,14 @@ describe('SegmentFeeder', () => {
 
     expect(endSpy).toHaveBeenCalled();
   });
+
+  it('does not crash the process when the fifo write stream errors (e.g. EPIPE after the pusher dies)', () => {
+    // A Node EventEmitter with no 'error' listener throws synchronously on emit('error', ...)
+    // — this is exactly how an unhandled EPIPE on the fifo write stream used to crash the
+    // entire server (every other user's active stream included), not just this one.
+    const writeStream = new PassThrough();
+    buildFeeder({ createWriteStream: () => writeStream });
+
+    expect(() => writeStream.emit('error', new Error('EPIPE: broken pipe, write'))).not.toThrow();
+  });
 });

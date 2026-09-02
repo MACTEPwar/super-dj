@@ -19,6 +19,16 @@ export class SegmentFeeder {
   constructor(private readonly options: SegmentFeederOptions) {
     const createWriteStream = options.createWriteStream ?? ((p: string) => fs.createWriteStream(p));
     this.fifoWriteStream = createWriteStream(options.fifoPath);
+    // Writes fail with EPIPE once the FIFO's reader (the pusher ffmpeg) has died or
+    // exited — e.g. an RTMP connection drop — which can race a producer segment still
+    // writing to it. An 'error' event with no listener is an uncaught exception in
+    // Node, which would crash the whole process (every other user's active stream
+    // included, not just this one), so this must never be left unhandled even though
+    // StreamController already reacts to the pusher's own exit via RtmpPusher's
+    // onExit callback.
+    this.fifoWriteStream.on('error', (err) => {
+      console.error('fifo write stream error', err);
+    });
   }
 
   feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0): ChildProcessLike {
