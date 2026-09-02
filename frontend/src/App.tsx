@@ -7,6 +7,7 @@ import { AppShell } from './components/AppShell';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Library from './pages/Library';
+import Playlists from './pages/Playlists';
 
 const queryClient = new QueryClient();
 
@@ -23,7 +24,7 @@ export default function App() {
               <Route element={<AppShell />}>
                 <Route path="/" element={<Navigate to="/library" replace />} />
                 <Route path="/library" element={<Library />} />
-                {/* /playlists and /destinations routes are added in Tasks 10 & 12 */}
+                <Route path="/playlists" element={<Playlists />} />
               </Route>
             </Route>
           </Routes>
