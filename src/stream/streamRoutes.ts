@@ -89,5 +89,33 @@ export function createStreamRouter(
     res.status(200).json(streamManager.status(destinationId));
   }));
 
+  router.get('/events', auth, wrapAsync(async (req, res) => {
+    const destinationId = req.params.destinationId;
+    await requireOwnedDestination(destinationRepository, destinationId, userId(req as AuthenticatedRequest));
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const send = (): void => {
+      res.write(`data: ${JSON.stringify(streamManager.status(destinationId))}\n\n`);
+    };
+    send();
+
+    const listener = (id: string): void => {
+      if (id === destinationId) send();
+    };
+    streamManager.on('statusChanged', listener);
+
+    // Keeps intermediary proxies/load balancers from timing out an otherwise-idle connection.
+    const heartbeat = setInterval(() => { res.write(':heartbeat\n\n'); }, 20000);
+
+    req.on('close', () => {
+      streamManager.off('statusChanged', listener);
+      clearInterval(heartbeat);
+    });
+  }));
+
   return router;
 }

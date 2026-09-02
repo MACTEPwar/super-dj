@@ -304,6 +304,18 @@ export const openApiSpec = {
         },
       },
     },
+    '/destinations/{destinationId}/stream/events': {
+      get: {
+        summary: 'Server-Sent Events stream of this destination\'s live status',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'text/event-stream — each event is a StreamStatus JSON payload' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
