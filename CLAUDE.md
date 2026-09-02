@@ -11,7 +11,7 @@ per destination — all via a REST API, gated behind email/password auth.
 
 ## Architecture (as built)
 
-The FIFO + MPEG-TS pipeline (not the concat-demuxer MVP) is used per active stream, one
+**Backend streaming pipeline.** The FIFO + MPEG-TS pipeline (not the concat-demuxer MVP) is used per active stream, one
 independent pipeline per destination:
 
 - **Two-process ffmpeg pipeline per destination.** A short-lived *producer* ffmpeg per segment
@@ -69,6 +69,11 @@ independent pipeline per destination:
   caller's own tracks and rejected with 400 — not 403/404 — so playlist membership can't leak
   which ids exist for other users.
 
+**Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
+the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
+(`StreamManager` emits `statuschange` events) are delivered to the client via Server-Sent Events
+(`GET /destinations/{destinationId}/stream/events`), eliminating polling overhead.
+
 ## Layout
 
 ```
@@ -107,6 +112,12 @@ prisma/                     schema.prisma (User, Session, Track, Playlist, Playl
                             StreamDestination, OAuthConnection, OAuthState) + migrations/
 test/                       mirrors src/; unit tests only
 assets/                     default cover + background images
+frontend/                   React + Vite SPA
+  src/
+    api/                    typed API client (fetch wrappers + type definitions)
+    pages/                  route page components
+    components/             shared UI components
+    hooks/                  custom React hooks
 ```
 
 **Persistence:** PostgreSQL via Prisma. `main.ts` calls `prisma.$connect()` at boot (fail fast)
@@ -143,7 +154,7 @@ pattern rather than introducing a new mocking style.
 `POST /auth/{register,login,logout}`, `GET /auth/me`.
 
 `POST /tracks` (multipart: `audio` file required, `cover` file optional, `name` optional),
-`GET /tracks`, `DELETE /tracks/{id}`.
+`GET /tracks`, `GET /tracks/{id}/cover`, `DELETE /tracks/{id}`.
 
 `POST /playlists`, `GET /playlists`, `GET /playlists/{id}`, `PUT /playlists/{id}/tracks`
 (replaces the ordered track list), `DELETE /playlists/{id}`.
@@ -157,7 +168,8 @@ and creates the destination) — the OAuth2 connect flow for a provider-backed d
 `youtube`), as an alternative to `POST /destinations` for manually-entered RTMP destinations.
 
 `POST /destinations/{id}/stream/{start,stop,pause,resume,next,previous,play}`,
-`GET /destinations/{id}/stream/status` — all scoped to the destination's owner.
+`GET /destinations/{id}/stream/status`, `GET /destinations/{id}/stream/events` — all scoped to the
+destination's owner.
 `POST .../stream/start` also accepts optional `title`/`description`/`privacyStatus` fields, used
 by providers that create a live broadcast (e.g. YouTube) — ignored by `custom` destinations; it
 400s on a missing/invalid `body.playlistId` as well as a non-string `title`/`description` or a
@@ -167,6 +179,7 @@ by providers that create a live broadcast (e.g. YouTube) — ignored by `custom`
 
 ## Development commands
 
+Backend:
 ```
 npm install
 npm run build          # tsc -p tsconfig.json
@@ -175,18 +188,29 @@ npm start              # node dist/main.js
 docker compose up --build
 ```
 
+Frontend:
+```
+cd frontend && npm install
+npm run dev            # Vite dev server
+npm test               # vitest
+npm run build          # Vite build
+```
+
 ## Configuration
 
 Required env vars: `DATABASE_URL`, `STREAM_KEY_ENCRYPTION_KEY` (32-byte hex key for AES-256-GCM;
 never commit these), `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `APP_BASE_URL`
 (the app's own externally-reachable base URL, used to build the YouTube OAuth redirect URI —
 `GOOGLE_OAUTH_CLIENT_ID`/`_SECRET` come from a Google Cloud Console OAuth client with the YouTube
-Data API v3 enabled, an external, manual, one-time setup step).
+Data API v3 enabled, an external, manual, one-time setup step), `FRONTEND_ORIGIN` (the frontend's
+externally-reachable origin, used for CORS policy).
 Optional: `PORT` (3000), `SESSION_TTL_DAYS` (30), `UPLOADS_DIR` (`/data/uploads`), `FIFO_DIR`
 (`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`.
 
 RTMP URL and stream key are no longer global config — they're per-`StreamDestination`, supplied
-by each user via `POST /destinations`.
+by each user via `POST /destinations`. The frontend's `VITE_API_BASE_URL` is a build-time
+environment variable documented in `frontend/.env.example` (not a runtime env var — the frontend
+is statically served after build).
 
 ## Known follow-ups (deliberately deferred)
 
@@ -220,7 +244,7 @@ a crashed session's exit event is processed after a subsequent `start()` for the
 has already completed and registered a new lifecycle, this could finalize the new (healthy)
 session's YouTube broadcast instead of the crashed one's. `RtmpPusher.stop()`'s existing
 `stopRequested` guard makes the ordinary stop path safe; this only matters for a genuine crash
-racing a fast restart.
+racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow.
 
 ## Tooling
 
