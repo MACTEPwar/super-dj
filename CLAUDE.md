@@ -69,10 +69,28 @@ independent pipeline per destination:
   caller's own tracks and rejected with 400 — not 403/404 — so playlist membership can't leak
   which ids exist for other users.
 
+- **Multi-destination stream sessions.** `StreamSession` (+ join table `StreamSessionDestination`)
+  groups a playlist with several destinations — e.g. a YouTube channel and a custom-RTMP Twitch
+  entry — so the frontend can start/pause/next/previous/stop all of them with one call.
+  `StreamSessionManager` is a thin fan-out orchestrator on top of `StreamManager`; it does not
+  touch `StreamController`/ffmpeg at all — every destination in a session keeps its own
+  independent pipeline exactly as a single-destination stream does, so one destination failing
+  (e.g. a YouTube API hiccup) never blocks the others from going live. Only the *definition*
+  (which destinations + which playlist) is persisted; live status is always derived at read time
+  from each destination's own in-memory `StreamController`, same as `StreamManager.status()` for
+  a lone destination — a session row never claims to be "live" on its own. Twitch has no
+  dedicated `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just
+  a `custom` destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key,
+  which already works through the existing `CustomRtmpProvider` path.
+
 **Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
 the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
 (`StreamManager` emits `statusChanged` events) are delivered to the client via Server-Sent Events
-(`GET /destinations/{destinationId}/stream/events`), eliminating polling overhead.
+(`GET /destinations/{destinationId}/stream/events`, or `GET /stream-sessions/{id}/events` for a
+multi-destination session), eliminating polling overhead. Every add/edit form (track upload,
+playlist creation, destination connection, starting a stream) opens in a shared `Drawer`
+component (a slide-out panel built on the same Radix `Dialog` primitive) rather than being inlined
+on the page.
 
 ## Layout
 
@@ -103,20 +121,26 @@ src/
   stream/                   streamManager.ts (per-destination StreamController registry),
                             streamController.ts (session state machine; LibraryLike adapter),
                             streamRoutes.ts (mounted at /destinations/:destinationId/stream),
-                            types.ts
+                            streamSessionRepository.ts (Prisma), streamSessionManager.ts
+                            (fan-out orchestration over StreamManager), streamSessionRoutes.ts
+                            (mounted at /stream-sessions), types.ts
   playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
   ffmpeg/                   segmentArgs.ts / segmentFeeder.ts (producer), rtmpPusherArgs.ts /
                             rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
                             overlayText.ts (drawtext escaping), types.ts (Spawner, ChildProcessLike)
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
-                            StreamDestination, OAuthConnection, OAuthState) + migrations/
+                            StreamDestination, OAuthConnection, OAuthState, StreamSession,
+                            StreamSessionDestination) + migrations/
 test/                       mirrors src/; unit tests only
 assets/                     default cover + background images
 frontend/                   React + Vite SPA
   src/
     api/                    typed API client (fetch wrappers + type definitions)
-    pages/                  route page components
-    components/             shared UI components
+    pages/                  route page components (incl. Streams.tsx list, StreamSessionPanel.tsx
+                            multi-destination dashboard)
+    components/             shared UI components (Drawer.tsx + the drawers built on it:
+                            AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal,
+                            StartStreamDrawer)
     hooks/                  custom React hooks
 ```
 
@@ -142,8 +166,8 @@ diff — always include the migration history. Never hand-write migration SQL.
 `ChildProcessLike` fake — unit tests never spawn real ffmpeg (`test/server.test.ts` spawns a plain
 `node -e` only to prove stderr is drained). Prisma-backed repositories (`userRepository.ts`,
 `sessionRepository.ts`, `trackRepository.ts`, `playlistRepository.ts`,
-`destinationRepository.ts`, `oauthConnectionRepository.ts`, `oauthStateRepository.ts`) are thin
-wrappers verified by manual smoke test with a real Postgres
+`destinationRepository.ts`, `oauthConnectionRepository.ts`, `oauthStateRepository.ts`,
+`streamSessionRepository.ts`) are thin wrappers verified by manual smoke test with a real Postgres
 (`docker compose up`), not unit tests — services that consume them (`StreamManager`,
 `TrackUploadService`, route handlers) take `Pick<...>` structural subsets so they can be
 unit-tested with plain-object fakes instead. Follow the existing fake-child / fake-repository
@@ -174,6 +198,15 @@ destination's owner.
 by providers that create a live broadcast (e.g. YouTube) — ignored by `custom` destinations; it
 400s on a missing/invalid `body.playlistId` as well as a non-string `title`/`description` or a
 `privacyStatus` outside `'public'`/`'unlisted'`/`'private'`.
+
+`POST /stream-sessions` (`playlistId`, `destinationIds[]`, plus optional `title`/`description`/
+`privacyStatus` — same semantics as `.../stream/start`) creates a session and starts every listed
+destination independently; a per-destination `error` field on the response means only that one
+destination failed, not the whole call. `GET /stream-sessions`,
+`POST /stream-sessions/{id}/{pause,resume,next,previous,stop}` (fanned out to every destination
+in the session, best-effort per destination), `GET /stream-sessions/{id}/status`,
+`GET /stream-sessions/{id}/events` (SSE, aggregated), `DELETE /stream-sessions/{id}` (stops every
+destination, then deletes the session row) — all scoped to the session's owner.
 
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
@@ -259,7 +292,7 @@ a crashed session's exit event is processed after a subsequent `start()` for the
 has already completed and registered a new lifecycle, this could finalize the new (healthy)
 session's YouTube broadcast instead of the crashed one's. `RtmpPusher.stop()`'s existing
 `stopRequested` guard makes the ordinary stop path safe; this only matters for a genuine crash
-racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow.
+racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow. A `StreamSession`'s destination list is fixed at creation — there's no add/remove-destination-from-a-live-session endpoint; adding a destination mid-stream means starting a new session for it instead. `StreamSessionManager.deleteById()`'s per-destination `stop()` calls aren't atomic with each other (same class of narrow race as the rest of this list) — a crash between two of them could leave the session row deleted while one destination is still streaming, orphaned exactly like a single-destination stream would be if its owning destination were deleted mid-stream.
 
 ## Tooling
 
