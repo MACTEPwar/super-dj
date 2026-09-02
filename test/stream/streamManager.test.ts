@@ -131,6 +131,39 @@ describe('StreamManager', () => {
     await expect(manager.start('dest-1', 'playlist-1')).rejects.toThrow(ApiError);
   });
 
+  it('rejects a second concurrent start() for the same destination before either registers a controller, instead of leaking a lifecycle', async () => {
+    const { deps, customProvider } = buildDeps();
+    // Hold prepareSession's promise open so BOTH start() calls are kicked off — and the
+    // second call's synchronous "already starting" guard actually lands — while the first
+    // call is still in flight, rather than relying on real timing/setTimeout races.
+    let releasePrepareSession!: (value: { rtmpUrl: string; streamKey: string }) => void;
+    const prepareSessionGate = new Promise<{ rtmpUrl: string; streamKey: string }>((resolve) => {
+      releasePrepareSession = resolve;
+    });
+    customProvider.prepareSession.mockReturnValue(prepareSessionGate);
+
+    const manager = new StreamManager(deps as any);
+
+    const p1 = manager.start('dest-1', 'playlist-1');
+    const p2 = manager.start('dest-1', 'playlist-1');
+
+    releasePrepareSession({ rtmpUrl: 'rtmp://example.com/live', streamKey: 'real-stream-key' });
+
+    const results = await Promise.allSettled([p1, p2]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ApiError);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ status: 409 });
+
+    // Only one controller ever got registered — the loser never reached this.controllers.set(),
+    // so there's no orphaned StreamController/lifecycle sitting behind the winner's entry.
+    expect(manager.get('dest-1')).toBeDefined();
+    expect(customProvider.prepareSession).toHaveBeenCalledTimes(1);
+  });
+
   it('start() replaces a controller stuck in error state instead of rejecting with 409', async () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);

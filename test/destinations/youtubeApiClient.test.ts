@@ -72,11 +72,18 @@ describe('createYoutubeApiClient', () => {
     expect(stream).toEqual({ id: 'stream-1', ingestionAddress: 'rtmp://a.rtmp.youtube.com/live2', streamName: 'abcd-1234' });
   });
 
-  it('createBroadcast returns just the created id', async () => {
+  it('createBroadcast returns just the created id, and disables the monitor stream', async () => {
     mockFetchOnce(200, { id: 'broadcast-1' });
     const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });
 
     expect(await client.createBroadcast('at', { title: 'T', description: 'D', privacyStatus: 'private' })).toEqual({ id: 'broadcast-1' });
+
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(init.body);
+    // A monitor-enabled broadcast (YouTube's default) may require transitioning through
+    // 'testing' before 'live', but youtubeProvider.ts transitions straight to 'live' — so
+    // the monitor stream must be explicitly disabled here.
+    expect(body.contentDetails).toEqual({ enableAutoStart: false, enableAutoStop: false, monitorStream: { enableMonitorStream: false } });
   });
 
   it('getStreamStatus reads status.streamStatus from the first item', async () => {

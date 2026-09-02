@@ -113,16 +113,17 @@ describe('destination routes', () => {
     const oauthConnectionRepository = { findByDestinationId: jest.fn().mockResolvedValue({ refreshTokenEncrypted: encrypt('x', KEY) }) };
     const res = await request(buildApp(destinationRepository, undefined, 'user-1', { youtube: adapter }, oauthConnectionRepository)).delete('/destinations/d1');
     expect(res.status).toBe(200);
-    expect(adapter.revoke).toHaveBeenCalled();
+    expect(adapter.revoke).toHaveBeenCalledWith('x');
     expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
   });
 
   it('DELETE /destinations/:id still deletes if OAuth revoke fails', async () => {
     const destinationRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'd1', userId: 'user-1', provider: 'youtube' }), deleteById: jest.fn() };
     const adapter = { revoke: jest.fn().mockRejectedValue(new Error('google is down')) };
-    const oauthConnectionRepository = { findByDestinationId: jest.fn().mockResolvedValue({ refreshTokenEncrypted: 'blob' }) };
+    const oauthConnectionRepository = { findByDestinationId: jest.fn().mockResolvedValue({ refreshTokenEncrypted: encrypt('rt', KEY) }) };
     const res = await request(buildApp(destinationRepository, undefined, 'user-1', { youtube: adapter }, oauthConnectionRepository)).delete('/destinations/d1');
     expect(res.status).toBe(200);
+    expect(adapter.revoke).toHaveBeenCalledWith('rt');
     expect(destinationRepository.deleteById).toHaveBeenCalledWith('d1');
   });
 });

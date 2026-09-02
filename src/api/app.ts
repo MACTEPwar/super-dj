@@ -37,6 +37,9 @@ export function createApp(deps: AppDeps): Express {
   app.use('/auth', createAuthRouter(deps.authService));
   app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository));
   app.use('/playlists', createPlaylistRouter(deps.authService, deps.playlistRepository, deps.trackRepository));
+  // Both routers share this prefix safely today because createDestinationRouter has no GET /:id —
+  // adding one would shadow createOAuthRouter's GET /:provider/oauth/{start,callback}. Keep that
+  // in mind if that route is ever added.
   app.use('/destinations', createDestinationRouter(deps.authService, deps.destinationRepository, deps.destinationEncryptionKey, deps.streamManager, deps.oauthProviderAdapters, deps.oauthConnectionRepository));
   app.use('/destinations', createOAuthRouter(deps.authService, deps.oauthProviderAdapters, deps.oauthStateRepository, deps.oauthConnectionRepository, deps.destinationRepository, deps.destinationEncryptionKey));
   app.use('/destinations/:destinationId/stream', createStreamRouter(deps.authService, deps.streamManager, deps.destinationRepository));

@@ -100,7 +100,7 @@ export function createYoutubeApiClient(config: { clientId: string; clientSecret:
         body: JSON.stringify({
           snippet: { title: meta.title, description: meta.description, scheduledStartTime: new Date().toISOString() },
           status: { privacyStatus: meta.privacyStatus },
-          contentDetails: { enableAutoStart: false, enableAutoStop: false },
+          contentDetails: { enableAutoStart: false, enableAutoStop: false, monitorStream: { enableMonitorStream: false } },
         }),
       });
       const body = await readJsonOrThrow(res, 'createBroadcast');
@@ -113,6 +113,10 @@ export function createYoutubeApiClient(config: { clientId: string; clientSecret:
         headers: { ...authHeader(accessToken), 'Content-Type': 'application/json' },
         body: JSON.stringify({
           snippet: { title: meta.title },
+          // Must match the pinned video params in src/stream/streamManager.ts (VIDEO_WIDTH/
+          // VIDEO_HEIGHT/VIDEO_FPS) and src/ffmpeg/segmentArgs.ts — the RTMP pusher uses -c copy,
+          // so YouTube's declared ingest resolution/framerate must agree with what's actually
+          // being pushed.
           cdn: { frameRate: '30fps', resolution: '720p', ingestionType: 'rtmp' },
         }),
       });

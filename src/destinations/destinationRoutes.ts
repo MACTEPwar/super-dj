@@ -62,6 +62,9 @@ export function createDestinationRouter(
     }
     if (destination.provider !== 'custom') {
       const adapter = oauthProviderAdapters[destination.provider];
+      if (!adapter) {
+        console.warn('no OAuthProviderAdapter registered for provider, refresh token was not revoked', destination.provider, destination.id);
+      }
       const connection = adapter ? await oauthConnectionRepository.findByDestinationId(destination.id) : null;
       if (adapter && connection) {
         try {
