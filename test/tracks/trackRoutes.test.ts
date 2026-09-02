@@ -1,5 +1,8 @@
 import express from 'express';
 import request from 'supertest';
+import * as fs from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
 import { createTrackRouter } from '../../src/tracks/trackRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
 
@@ -84,5 +87,36 @@ describe('track routes', () => {
     const res = await request(app).post('/tracks').attach('audio', Buffer.from('data'), 'song.exe');
     expect(res.status).toBe(400);
     expect(uploadService.upload).not.toHaveBeenCalled();
+  });
+
+  it('GET /tracks/:id/cover streams the cover file for an owned track', async () => {
+    const coverPath = path.join(os.tmpdir(), `cover-test-${Date.now()}.png`);
+    await fs.writeFile(coverPath, Buffer.from([0x89, 0x50, 0x4e, 0x47])); // PNG magic bytes, minimal
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1', coverPath }),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).get('/tracks/t1/cover');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/^image\//);
+    await fs.unlink(coverPath);
+  });
+
+  it('GET /tracks/:id/cover 404s when the track has no cover', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1', coverPath: null }),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).get('/tracks/t1/cover');
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /tracks/:id/cover returns 403 for another user\'s track', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'someone-else', coverPath: '/x.png' }),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).get('/tracks/t1/cover');
+    expect(res.status).toBe(403);
   });
 });

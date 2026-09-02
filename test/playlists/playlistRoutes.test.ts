@@ -45,6 +45,16 @@ describe('playlist routes', () => {
     expect(res.body).toEqual({ id: 'p1', name: 'A', tracks: [{ name: 'a', audioPath: '/x/a.mp3', coverPath: null }] });
   });
 
+  it('GET /playlists/:id includes each track\'s id', async () => {
+    const playlistRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 'p1', name: 'Mix', userId: 'user-1' }),
+      listTracks: jest.fn().mockResolvedValue([{ id: 't1', name: 'a', audioPath: '/a.mp3', coverPath: null }]),
+    };
+    const res = await request(buildApp(playlistRepository)).get('/playlists/p1');
+    expect(res.status).toBe(200);
+    expect(res.body.tracks[0].id).toBe('t1');
+  });
+
   it('GET /playlists/:id returns 403 for someone else\'s playlist', async () => {
     const playlistRepository: any = { findById: jest.fn().mockResolvedValue({ id: 'p1', name: 'A', userId: 'someone-else' }) };
     const res = await request(buildApp(playlistRepository)).get('/playlists/p1');

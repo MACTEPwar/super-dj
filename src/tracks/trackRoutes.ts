@@ -55,6 +55,14 @@ export function createTrackRouter(
     res.status(200).json(tracks.map(toSummary));
   }));
 
+  router.get('/:id/cover', auth, wrapAsync(async (req, res) => {
+    const track = await trackRepository.findById(req.params.id);
+    if (!track) throw new ApiError(404, 'track not found');
+    if (track.userId !== (req as AuthenticatedRequest).user!.id) throw new ApiError(403, 'not your track');
+    if (!track.coverPath) throw new ApiError(404, 'track has no cover');
+    res.sendFile(track.coverPath);
+  }));
+
   router.delete('/:id', auth, wrapAsync(async (req, res) => {
     const track = await trackRepository.findById(req.params.id);
     if (!track) throw new ApiError(404, 'track not found');

@@ -1,6 +1,7 @@
 import { PrismaClient, Playlist } from '@prisma/client';
 
 export interface PlaylistTrackView {
+  id: string;
   name: string;
   audioPath: string;
   coverPath: string | null;
@@ -28,6 +29,7 @@ export class PlaylistRepository {
       include: { track: true },
     });
     return rows.map((row) => ({
+      id: row.track.id,
       name: row.track.name,
       audioPath: row.track.audioPath,
       coverPath: row.track.coverPath,
