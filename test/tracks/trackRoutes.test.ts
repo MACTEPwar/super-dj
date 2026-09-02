@@ -81,6 +81,14 @@ describe('track routes', () => {
     expect(uploadService.upload).toHaveBeenCalledWith('user-1', undefined, expect.objectContaining({ originalname: 'song.mp3' }), undefined);
   });
 
+  it('POST /tracks decodes a non-ASCII (e.g. Cyrillic) filename correctly', async () => {
+    const uploadService: any = { upload: jest.fn().mockResolvedValue({ id: 't1', name: 'Ммм', durationSeconds: 5, hasCover: false }) };
+    const { app } = buildApp({ uploadService });
+    const res = await request(app).post('/tracks').attach('audio', Buffer.from('fake-mp3-bytes'), 'Ммм...mp3');
+    expect(res.status).toBe(200);
+    expect(uploadService.upload).toHaveBeenCalledWith('user-1', undefined, expect.objectContaining({ originalname: 'Ммм...mp3' }), undefined);
+  });
+
   it('POST /tracks rejects an unsupported audio extension', async () => {
     const uploadService: any = { upload: jest.fn() };
     const { app } = buildApp({ uploadService });

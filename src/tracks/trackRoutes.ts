@@ -16,6 +16,14 @@ const MAX_COVER_BYTES = 10 * 1024 * 1024;
 
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: MAX_AUDIO_BYTES } });
 
+// busboy (multer's multipart parser) decodes the `filename` header value as latin1 by
+// default, per the multipart spec's historical default — but browsers send raw UTF-8
+// bytes there with no RFC 5987 encoding, so a non-ASCII filename comes out mojibake'd
+// unless we redecode it as UTF-8 here.
+function fixMulterFilenameEncoding(originalname: string): string {
+  return Buffer.from(originalname, 'latin1').toString('utf8');
+}
+
 function toSummary(track: { id: string; name: string; durationSeconds: number | null; coverPath: string | null }) {
   return { id: track.id, name: track.name, durationSeconds: track.durationSeconds, hasCover: track.coverPath !== null };
 }
@@ -32,12 +40,14 @@ export function createTrackRouter(
     const files = req.files as { audio?: Express.Multer.File[]; cover?: Express.Multer.File[] } | undefined;
     const audioFile = files?.audio?.[0];
     if (!audioFile) throw new ApiError(400, 'audio file is required');
+    audioFile.originalname = fixMulterFilenameEncoding(audioFile.originalname);
     if (!AUDIO_EXTENSIONS.includes(path.extname(audioFile.originalname).toLowerCase())) {
       throw new ApiError(400, 'unsupported audio format');
     }
 
     const coverFile = files?.cover?.[0];
     if (coverFile) {
+      coverFile.originalname = fixMulterFilenameEncoding(coverFile.originalname);
       if (!COVER_EXTENSIONS.includes(path.extname(coverFile.originalname).toLowerCase())) {
         throw new ApiError(400, 'unsupported cover format');
       }
