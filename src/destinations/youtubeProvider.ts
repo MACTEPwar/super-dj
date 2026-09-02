@@ -36,6 +36,7 @@ export class YoutubeProvider implements StreamDestinationProvider {
     const accessToken = await this.deps.client.refreshAccessToken(refreshToken);
     const broadcast = await this.deps.client.createBroadcast(accessToken, {
       title: meta.title, description: meta.description ?? '', privacyStatus: meta.privacyStatus ?? 'private',
+      latencyPreference: meta.latencyPreference ?? 'normal',
     });
     const stream = await this.deps.client.createStream(accessToken, { title: meta.title });
     await this.deps.client.bind(accessToken, broadcast.id, stream.id);

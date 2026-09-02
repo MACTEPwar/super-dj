@@ -194,13 +194,19 @@ and creates the destination) — the OAuth2 connect flow for a provider-backed d
 `POST /destinations/{id}/stream/{start,stop,pause,resume,next,previous,play}`,
 `GET /destinations/{id}/stream/status`, `GET /destinations/{id}/stream/events` — all scoped to the
 destination's owner.
-`POST .../stream/start` also accepts optional `title`/`description`/`privacyStatus` fields, used
-by providers that create a live broadcast (e.g. YouTube) — ignored by `custom` destinations; it
-400s on a missing/invalid `body.playlistId` as well as a non-string `title`/`description` or a
-`privacyStatus` outside `'public'`/`'unlisted'`/`'private'`.
+`POST .../stream/start` also accepts optional `title`/`description`/`privacyStatus`/
+`latencyPreference` fields, used by providers that create a live broadcast (e.g. YouTube) —
+ignored by `custom` destinations; it 400s on a missing/invalid `body.playlistId` as well as a
+non-string `title`/`description`, a `privacyStatus` outside `'public'`/`'unlisted'`/`'private'`,
+or a `latencyPreference` outside `'normal'`/`'low'`/`'ultraLow'`. `latencyPreference` maps
+straight to YouTube's own broadcast `contentDetails.latencyPreference` and defaults to `'normal'`
+when omitted — YouTube's own default, and its highest end-to-end latency (its ingest→transcode→
+CDN→player pipeline typically adds ~20-40s regardless of how fast this app reacts to a command);
+`'low'`/`'ultraLow'` trade some playback-buffering resilience for viewers on slow connections for
+a much snappier feel.
 
 `POST /stream-sessions` (`playlistId`, `destinationIds[]`, plus optional `title`/`description`/
-`privacyStatus` — same semantics as `.../stream/start`) creates a session and starts every listed
+`privacyStatus`/`latencyPreference` — same semantics as `.../stream/start`) creates a session and starts every listed
 destination independently; a per-destination `error` field on the response means only that one
 destination failed, not the whole call. `GET /stream-sessions`,
 `POST /stream-sessions/{id}/{pause,resume,next,previous,stop}` (fanned out to every destination

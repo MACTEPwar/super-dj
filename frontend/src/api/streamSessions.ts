@@ -33,6 +33,7 @@ export interface StartStreamSessionOptions {
   title?: string;
   description?: string;
   privacyStatus?: 'public' | 'unlisted' | 'private';
+  latencyPreference?: 'normal' | 'low' | 'ultraLow';
 }
 
 export const streamSessionsApi = {

@@ -26,7 +26,7 @@ export interface YoutubeApiClient {
   refreshAccessToken(refreshToken: string): Promise<string>;
   revoke(refreshToken: string): Promise<void>;
   getChannel(accessToken: string): Promise<YoutubeChannel>;
-  createBroadcast(accessToken: string, meta: { title: string; description: string; privacyStatus: 'public' | 'unlisted' | 'private' }): Promise<YoutubeBroadcast>;
+  createBroadcast(accessToken: string, meta: { title: string; description: string; privacyStatus: 'public' | 'unlisted' | 'private'; latencyPreference: 'normal' | 'low' | 'ultraLow' }): Promise<YoutubeBroadcast>;
   createStream(accessToken: string, meta: { title: string }): Promise<YoutubeStream>;
   bind(accessToken: string, broadcastId: string, streamId: string): Promise<void>;
   transition(accessToken: string, broadcastId: string, status: 'live' | 'complete'): Promise<void>;
@@ -100,7 +100,10 @@ export function createYoutubeApiClient(config: { clientId: string; clientSecret:
         body: JSON.stringify({
           snippet: { title: meta.title, description: meta.description, scheduledStartTime: new Date().toISOString() },
           status: { privacyStatus: meta.privacyStatus },
-          contentDetails: { enableAutoStart: false, enableAutoStop: false, monitorStream: { enableMonitorStream: false } },
+          // YouTube defaults to 'normal' latency (its own ingest→transcode→CDN pipeline adds
+          // ~20-40s end to end) when this is omitted — surfaced as a user-facing choice since
+          // 'low'/'ultraLow' trade some playback-buffering resilience for a much snappier feel.
+          contentDetails: { enableAutoStart: false, enableAutoStop: false, monitorStream: { enableMonitorStream: false }, latencyPreference: meta.latencyPreference },
         }),
       });
       const body = await readJsonOrThrow(res, 'createBroadcast');

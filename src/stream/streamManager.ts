@@ -114,6 +114,7 @@ export class StreamManager extends EventEmitter {
         title: meta?.title ?? playlist.name,
         description: meta?.description,
         privacyStatus: meta?.privacyStatus,
+        latencyPreference: meta?.latencyPreference,
       };
       const session = await provider.prepareSession(destination, resolvedMeta);
 

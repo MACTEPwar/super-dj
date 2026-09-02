@@ -29,7 +29,7 @@ describe('per-destination stream routes', () => {
     const streamManager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue({ state: 'streaming', currentTrack: 'a', nextTrack: 'b' }) };
     const res = await request(buildApp(streamManager, ownedDestination())).post('/destinations/dest-1/stream/start').send({ playlistId: 'p1' });
     expect(res.status).toBe(200);
-    expect(streamManager.start).toHaveBeenCalledWith('dest-1', 'p1', { title: undefined, description: undefined, privacyStatus: undefined });
+    expect(streamManager.start).toHaveBeenCalledWith('dest-1', 'p1', { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined });
     expect(res.body).toEqual({ state: 'streaming', currentTrack: 'a', nextTrack: 'b' });
   });
 
@@ -38,6 +38,20 @@ describe('per-destination stream routes', () => {
     const res = await request(buildApp(streamManager, ownedDestination())).post('/destinations/dest-1/stream/start').send({ playlistId: 'p1', privacyStatus: 'sortof' });
     expect(res.status).toBe(400);
     expect(streamManager.start).not.toHaveBeenCalled();
+  });
+
+  it('POST .../start rejects an invalid latencyPreference', async () => {
+    const streamManager: any = { start: jest.fn() };
+    const res = await request(buildApp(streamManager, ownedDestination())).post('/destinations/dest-1/stream/start').send({ playlistId: 'p1', latencyPreference: 'sortof' });
+    expect(res.status).toBe(400);
+    expect(streamManager.start).not.toHaveBeenCalled();
+  });
+
+  it('POST .../start passes a valid latencyPreference through', async () => {
+    const streamManager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue({ state: 'streaming', currentTrack: 'a', nextTrack: 'b' }) };
+    const res = await request(buildApp(streamManager, ownedDestination())).post('/destinations/dest-1/stream/start').send({ playlistId: 'p1', latencyPreference: 'ultraLow' });
+    expect(res.status).toBe(200);
+    expect(streamManager.start).toHaveBeenCalledWith('dest-1', 'p1', expect.objectContaining({ latencyPreference: 'ultraLow' }));
   });
 
   it('returns 403 for a destination owned by someone else', async () => {

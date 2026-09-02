@@ -24,6 +24,7 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [privacyStatus, setPrivacyStatus] = useState<'public' | 'unlisted' | 'private'>('private');
+  const [latencyPreference, setLatencyPreference] = useState<'normal' | 'low' | 'ultraLow'>('normal');
   const [formError, setFormError] = useState<string | null>(null);
 
   const selectedDestinations = (destinationsQuery.data ?? []).filter((d) => destinationIds.includes(d.id));
@@ -36,6 +37,7 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
       title: title || undefined,
       description: description || undefined,
       privacyStatus: hasYoutubeDestination ? privacyStatus : undefined,
+      latencyPreference: hasYoutubeDestination ? latencyPreference : undefined,
     }),
     onSuccess: (session) => {
       onOpenChange(false);
@@ -110,6 +112,20 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
                 <option value="unlisted">{t('startStreamDrawer.unlisted')}</option>
                 <option value="public">{t('startStreamDrawer.public')}</option>
               </select>
+            </div>
+            <div>
+              <label htmlFor="stream-latency" className="block text-sm font-medium">{t('startStreamDrawer.latencyLabel')}</label>
+              <select
+                id="stream-latency"
+                className="mt-1 w-full rounded border px-3 py-2"
+                value={latencyPreference}
+                onChange={(e) => setLatencyPreference(e.target.value as 'normal' | 'low' | 'ultraLow')}
+              >
+                <option value="normal">{t('startStreamDrawer.latencyNormal')}</option>
+                <option value="low">{t('startStreamDrawer.latencyLow')}</option>
+                <option value="ultraLow">{t('startStreamDrawer.latencyUltraLow')}</option>
+              </select>
+              <p className="mt-1 text-xs text-gray-500">{t('startStreamDrawer.latencyHelp')}</p>
             </div>
           </div>
         )}

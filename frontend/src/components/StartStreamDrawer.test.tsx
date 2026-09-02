@@ -58,20 +58,39 @@ describe('StartStreamDrawer', () => {
     await userEvent.click(screen.getByRole('button', { name: /Start stream/ }));
 
     await waitFor(() => expect(streamSessionsApi.create).toHaveBeenCalledWith({
-      playlistId: 'p1', destinationIds: ['d2'], title: undefined, description: undefined, privacyStatus: undefined,
+      playlistId: 'p1', destinationIds: ['d2'], title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined,
     }));
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith('/streams/s1'));
   });
 
-  it('shows YouTube broadcast fields only when a YouTube destination is selected', async () => {
+  it('shows YouTube broadcast fields (including latency) only when a YouTube destination is selected', async () => {
     render();
     await screen.findByText('Friday Mix');
 
     expect(screen.queryByLabelText('Privacy')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Stream latency')).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByLabelText('My YouTube (youtube)'));
 
     expect(screen.getByLabelText('Privacy')).toBeInTheDocument();
+    expect(screen.getByLabelText('Stream latency')).toBeInTheDocument();
+  });
+
+  it('defaults latency to normal and passes an explicit choice through for a YouTube destination', async () => {
+    vi.mocked(streamSessionsApi.create).mockResolvedValue({ id: 's1', playlistId: 'p1', destinations: [] });
+    render();
+    await screen.findByText('Friday Mix');
+
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByLabelText('My YouTube (youtube)'));
+    expect((screen.getByLabelText('Stream latency') as HTMLSelectElement).value).toBe('normal');
+
+    await userEvent.selectOptions(screen.getByLabelText('Stream latency'), 'ultraLow');
+    await userEvent.click(screen.getByRole('button', { name: /Start stream/ }));
+
+    await waitFor(() => expect(streamSessionsApi.create).toHaveBeenCalledWith(
+      expect.objectContaining({ latencyPreference: 'ultraLow' }),
+    ));
   });
 
   it('shows the backend\'s error message when creation fails', async () => {

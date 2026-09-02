@@ -43,10 +43,18 @@ describe('YoutubeProvider', () => {
 
     expect(session.rtmpUrl).toBe('rtmp://a.rtmp.youtube.com/live2');
     expect(session.streamKey).toBe('key-1');
-    expect(client.createBroadcast).toHaveBeenCalledWith('at', { title: 'My Stream', description: 'desc', privacyStatus: 'private' });
+    expect(client.createBroadcast).toHaveBeenCalledWith('at', { title: 'My Stream', description: 'desc', privacyStatus: 'private', latencyPreference: 'normal' });
     expect(client.createStream).toHaveBeenCalledWith('at', { title: 'My Stream' });
     expect(client.bind).toHaveBeenCalledWith('at', 'broadcast-1', 'stream-1');
     expect(session.lifecycle).toBeDefined();
+  });
+
+  it('passes an explicit latencyPreference through to createBroadcast', async () => {
+    const { provider, client } = buildProvider();
+
+    await provider.prepareSession(destination, { ...meta, latencyPreference: 'ultraLow' });
+
+    expect(client.createBroadcast).toHaveBeenCalledWith('at', expect.objectContaining({ latencyPreference: 'ultraLow' }));
   });
 
   it('prepareSession throws a 502 if the destination has no OAuthConnection', async () => {
