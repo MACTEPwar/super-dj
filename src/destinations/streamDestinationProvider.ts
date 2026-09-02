@@ -13,6 +13,7 @@ export interface DestinationLifecycle {
   phase(): DestinationLifecyclePhase;
   watchUrl(): string | null;
   finalize(): Promise<void>;
+  onPhaseChange?(cb: () => void): void;
 }
 
 export interface PreparedSession {

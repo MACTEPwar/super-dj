@@ -43,12 +43,14 @@ export class YoutubeProvider implements StreamDestinationProvider {
     let phase: DestinationLifecyclePhase = 'creating';
     let pushStarted = false;
     let finalized = false;
+    let phaseChangeListener: (() => void) | null = null;
 
     const lifecycle: DestinationLifecycle = {
       onPushStarted: () => {
         if (pushStarted) return;
         pushStarted = true;
         phase = 'waitingForYoutube';
+        phaseChangeListener?.();
         const deadline = this.clock() + this.healthTimeoutMs;
 
         const poll = async (): Promise<void> => {
@@ -65,6 +67,7 @@ export class YoutubeProvider implements StreamDestinationProvider {
             if (status === 'active') {
               await this.deps.client.transition(freshAccessToken, broadcast.id, 'live');
               phase = 'live';
+              phaseChangeListener?.();
               return;
             }
           } catch (err) {
@@ -82,6 +85,7 @@ export class YoutubeProvider implements StreamDestinationProvider {
 
       phase: () => phase,
       watchUrl: () => `https://www.youtube.com/watch?v=${broadcast.id}`,
+      onPhaseChange: (cb) => { phaseChangeListener = cb; },
 
       finalize: async () => {
         if (finalized) return;
@@ -101,6 +105,7 @@ export class YoutubeProvider implements StreamDestinationProvider {
           console.error('failed to delete ephemeral YouTube liveStream', err);
         }
         phase = 'complete';
+        phaseChangeListener?.();
       },
     };
 

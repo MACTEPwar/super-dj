@@ -1,4 +1,5 @@
 import { posix as path } from 'path';
+import { EventEmitter } from 'events';
 import { PlaylistQueue } from '../playlist/queue';
 import { Track } from '../playlist/types';
 import { StreamController } from './streamController';
@@ -40,12 +41,14 @@ export interface StreamManagerDeps {
   createWriteStream?: (path: string) => NodeJS.WritableStream;
 }
 
-export class StreamManager {
+export class StreamManager extends EventEmitter {
   private readonly controllers = new Map<string, StreamController>();
   private readonly lifecycles = new Map<string, { providerType: string; lifecycle: DestinationLifecycle }>();
   private readonly starting = new Set<string>();
 
-  constructor(private readonly deps: StreamManagerDeps) {}
+  constructor(private readonly deps: StreamManagerDeps) {
+    super();
+  }
 
   get(destinationId: string): StreamController | undefined {
     return this.controllers.get(destinationId);
@@ -149,6 +152,9 @@ export class StreamManager {
             console.error('failed to finalize destination lifecycle after an unexpected pusher exit', err);
           });
         },
+        onStatusChanged: () => {
+          this.emit('statusChanged', destinationId);
+        },
       });
 
       this.controllers.set(destinationId, controller);
@@ -166,6 +172,7 @@ export class StreamManager {
 
       if (session.lifecycle) {
         this.lifecycles.set(destinationId, { providerType: destination.provider, lifecycle: session.lifecycle });
+        session.lifecycle.onPhaseChange?.(() => { this.emit('statusChanged', destinationId); });
         session.lifecycle.onPushStarted();
       }
     } finally {

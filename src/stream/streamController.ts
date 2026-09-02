@@ -21,6 +21,7 @@ export interface StreamControllerDeps {
   createRtmpPusher: () => RtmpPusher;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
   onError?: () => void;
+  onStatusChanged?: () => void;
 }
 
 export class StreamController {
@@ -55,6 +56,7 @@ export class StreamController {
     this.pusher.start(() => {
       this.state = 'error';
       this.deps.onError?.();
+      this.deps.onStatusChanged?.();
     });
     this.feeder = this.deps.createSegmentFeeder();
     this.pausedElapsedSeconds = 0;
@@ -66,6 +68,7 @@ export class StreamController {
     if (track) {
       await this.feedCurrentTrack(track);
     }
+    this.deps.onStatusChanged?.();
   }
 
   stop(): void {
@@ -80,6 +83,7 @@ export class StreamController {
     this.trackStartedAt = null;
     this.pausedElapsedSeconds = 0;
     this.state = 'idle';
+    this.deps.onStatusChanged?.();
   }
 
   pause(): void {
@@ -91,6 +95,7 @@ export class StreamController {
     this.segmentGeneration += 1;
     this.state = 'paused';
     this.feeder!.feedPause();
+    this.deps.onStatusChanged?.();
   }
 
   async resume(): Promise<void> {
@@ -100,6 +105,7 @@ export class StreamController {
     if (track) {
       await this.feedCurrentTrack(track, this.pausedElapsedSeconds);
     }
+    this.deps.onStatusChanged?.();
   }
 
   async next(): Promise<void> {
@@ -110,6 +116,7 @@ export class StreamController {
     if (this.state === 'streaming') {
       await this.feedCurrentTrack(track);
     }
+    this.deps.onStatusChanged?.();
   }
 
   async previous(): Promise<void> {
@@ -119,6 +126,7 @@ export class StreamController {
     if (track && this.state === 'streaming') {
       await this.feedCurrentTrack(track);
     }
+    this.deps.onStatusChanged?.();
   }
 
   /**
@@ -148,6 +156,7 @@ export class StreamController {
 
   private advanceToNextTrack(): void {
     const track = this.deps.queue.next();
+    this.deps.onStatusChanged?.();
     this.pausedElapsedSeconds = 0;
     if (track) {
       // Fire-and-forget: this runs from a child-process 'exit' callback, not
@@ -163,6 +172,7 @@ export class StreamController {
     const track = this.deps.library.findByName(name);
     if (!track) throw new ApiError(404, `track not found: ${name}`);
     this.deps.queue.insertNext(track);
+    this.deps.onStatusChanged?.();
   }
 
   status(): StreamStatus {

@@ -169,4 +169,21 @@ describe('YoutubeProvider', () => {
     expect(client.transition).not.toHaveBeenCalled();
     expect(client.deleteStream).toHaveBeenCalled();
   });
+
+  it('invokes a registered onPhaseChange listener at every phase transition', async () => {
+    const client = fakeClient({ getStreamStatus: jest.fn().mockResolvedValue('active') } as any);
+    const { provider, runNextScheduledPoll } = buildProvider(client as any);
+    const session = await provider.prepareSession(destination, meta);
+    const onPhaseChange = jest.fn();
+    session.lifecycle!.onPhaseChange!(onPhaseChange);
+
+    session.lifecycle!.onPushStarted(); // creating -> waitingForYoutube
+    expect(onPhaseChange).toHaveBeenCalledTimes(1);
+
+    await runNextScheduledPoll(); // waitingForYoutube -> live
+    expect(onPhaseChange).toHaveBeenCalledTimes(2);
+
+    await session.lifecycle!.finalize(); // live -> complete
+    expect(onPhaseChange).toHaveBeenCalledTimes(3);
+  });
 });

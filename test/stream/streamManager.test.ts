@@ -20,6 +20,7 @@ function fakeLifecycle(overrides: Record<string, jest.Mock> = {}) {
     phase: jest.fn().mockReturnValue('waitingForYoutube'),
     watchUrl: jest.fn().mockReturnValue('https://www.youtube.com/watch?v=broadcast-1'),
     finalize: jest.fn().mockResolvedValue(undefined),
+    onPhaseChange: jest.fn(),
     ...overrides,
   };
 }
@@ -265,5 +266,38 @@ describe('StreamManager', () => {
 
       expect(youtubeLifecycle.finalize).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('is an EventEmitter that emits statusChanged for a custom destination on pause/stop', async () => {
+    const { deps } = buildDeps();
+    const manager = new StreamManager(deps as any);
+    await manager.start('dest-1', 'playlist-1');
+    const listener = jest.fn();
+    manager.on('statusChanged', listener);
+
+    manager.pause('dest-1');
+    expect(listener).toHaveBeenCalledWith('dest-1');
+
+    await manager.stop('dest-1');
+    expect(listener).toHaveBeenCalledWith('dest-1');
+  });
+
+  it('emits statusChanged when a YouTube destination\'s lifecycle phase changes', async () => {
+    const { deps, destinationRepository, youtubeLifecycle } = buildDeps();
+    destinationRepository.findById.mockResolvedValue({ id: 'dest-1', userId: 'user-1', provider: 'youtube' });
+    const manager = new StreamManager(deps as any);
+    const listener = jest.fn();
+    manager.on('statusChanged', listener);
+
+    await manager.start('dest-1', 'playlist-1');
+
+    // youtubeLifecycle is the fakeLifecycle() from this file's existing YouTube-destination
+    // fixture — onPhaseChange must have been registered with a callback that, when invoked,
+    // emits statusChanged for this destination.
+    expect(youtubeLifecycle.onPhaseChange).toHaveBeenCalled();
+    const registeredCallback = youtubeLifecycle.onPhaseChange.mock.calls[0][0];
+    listener.mockClear();
+    registeredCallback();
+    expect(listener).toHaveBeenCalledWith('dest-1');
   });
 });

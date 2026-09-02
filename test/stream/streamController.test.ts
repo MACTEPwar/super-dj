@@ -309,4 +309,45 @@ describe('StreamController', () => {
     expect(controller.status().state).toBe('streaming');
     expect(pusher.start).toHaveBeenCalledTimes(2);
   });
+
+  it('invokes deps.onStatusChanged after start(), pause(), resume(), next(), previous(), playByName(), and stop()', async () => {
+    const { deps } = buildDeps();
+    const onStatusChanged = jest.fn();
+    deps.onStatusChanged = onStatusChanged;
+    const controller = new StreamController(deps);
+
+    await controller.start();
+    expect(onStatusChanged).toHaveBeenCalledTimes(1);
+
+    controller.pause();
+    expect(onStatusChanged).toHaveBeenCalledTimes(2);
+
+    await controller.resume();
+    expect(onStatusChanged).toHaveBeenCalledTimes(3);
+
+    await controller.next();
+    expect(onStatusChanged).toHaveBeenCalledTimes(4);
+
+    await controller.previous();
+    expect(onStatusChanged).toHaveBeenCalledTimes(5);
+
+    controller.playByName('a');
+    expect(onStatusChanged).toHaveBeenCalledTimes(6);
+
+    controller.stop();
+    expect(onStatusChanged).toHaveBeenCalledTimes(7);
+  });
+
+  it('invokes deps.onStatusChanged when a track auto-advances', async () => {
+    const { deps, children } = buildDeps();
+    const onStatusChanged = jest.fn();
+    deps.onStatusChanged = onStatusChanged;
+    const controller = new StreamController(deps);
+    await controller.start();
+    onStatusChanged.mockClear();
+
+    children[0].emitExit(0);
+
+    expect(onStatusChanged).toHaveBeenCalledTimes(1);
+  });
 });
