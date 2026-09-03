@@ -14,8 +14,7 @@ export interface LibraryLike {
 export interface StreamControllerDeps {
   library: LibraryLike;
   queue: PlaylistQueue;
-  videoFifoPath: string;
-  audioFifoPath: string;
+  fifoPath: string;
   createFifo: (path: string) => void;
   removeFifo: (path: string) => void;
   createSegmentFeeder: () => SegmentFeeder;
@@ -32,6 +31,7 @@ export class StreamController {
   private trackStartedAt: number | null = null;
   private pausedElapsedSeconds = 0;
   private segmentGeneration = 0;
+  private streamStartedAt: number | null = null;
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
@@ -50,11 +50,9 @@ export class StreamController {
     this.pusher?.stop();
     this.feeder = null;
     this.pusher = null;
-    this.deps.removeFifo(this.deps.videoFifoPath);
-    this.deps.removeFifo(this.deps.audioFifoPath);
+    this.deps.removeFifo(this.deps.fifoPath);
 
-    this.deps.createFifo(this.deps.videoFifoPath);
-    this.deps.createFifo(this.deps.audioFifoPath);
+    this.deps.createFifo(this.deps.fifoPath);
     this.pusher = this.deps.createRtmpPusher();
     this.pusher.start(() => {
       this.state = 'error';
@@ -64,6 +62,7 @@ export class StreamController {
     this.feeder = this.deps.createSegmentFeeder();
     this.pausedElapsedSeconds = 0;
     this.trackStartedAt = null;
+    this.streamStartedAt = Date.now();
 
     this.state = 'streaming';
 
@@ -80,12 +79,12 @@ export class StreamController {
     this.feeder?.stopCurrent();
     this.feeder?.close();
     this.pusher?.stop();
-    this.deps.removeFifo(this.deps.videoFifoPath);
-    this.deps.removeFifo(this.deps.audioFifoPath);
+    this.deps.removeFifo(this.deps.fifoPath);
     this.feeder = null;
     this.pusher = null;
     this.trackStartedAt = null;
     this.pausedElapsedSeconds = 0;
+    this.streamStartedAt = null;
     this.state = 'idle';
     this.deps.onStatusChanged?.();
   }
@@ -98,7 +97,7 @@ export class StreamController {
     }
     this.segmentGeneration += 1;
     this.state = 'paused';
-    this.feeder!.feedPause(this.pausedElapsedSeconds);
+    this.feeder!.feedPause(this.elapsedSessionSeconds(), this.pausedElapsedSeconds);
     this.deps.onStatusChanged?.();
   }
 
@@ -147,7 +146,7 @@ export class StreamController {
     // were awaiting the overlay — a stale overlay must never be fed.
     if (generation !== this.segmentGeneration) return;
     if (this.state !== 'streaming') return;
-    const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds);
+    const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds, this.elapsedSessionSeconds());
     this.trackStartedAt = Date.now();
     // 'close' (not 'exit') — Node's 'exit' can fire before the child's stdio streams have
     // finished flushing to their listeners. Reacting on 'exit' meant advanceToNextTrack()
@@ -161,6 +160,17 @@ export class StreamController {
       if (this.state !== 'streaming') return;
       this.advanceToNextTrack();
     });
+  }
+
+  // How many real seconds this stream session has been live for. Each segment is its own
+  // ffmpeg process (fresh PTS/DTS starting near 0), but the pusher treats the FIFO as one
+  // continuous stream and paces it with -re against real elapsed time — passed to every new
+  // segment as -output_ts_offset so its timestamps continue the running session clock
+  // instead of resetting, which is what a track switch's PTS/DTS discontinuity otherwise
+  // causes: the pusher briefly free-runs until the new segment's timestamps catch back up,
+  // showing up as a burst/stall and decode artifacts right at the switch.
+  private elapsedSessionSeconds(): number {
+    return this.streamStartedAt !== null ? (Date.now() - this.streamStartedAt) / 1000 : 0;
   }
 
   private advanceToNextTrack(): void {

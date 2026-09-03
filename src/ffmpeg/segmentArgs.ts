@@ -48,83 +48,81 @@ export function buildTrackSegmentArgs(params: VideoParams & {
   fontFile: string;
   timer?: TimerOverlay | null;
   startOffsetSeconds?: number;
-  // Bounds each output leg's length explicitly (see the -t comment below) — probed once up
-  // front (ffprobe, via getAudioDurationSeconds) and threaded all the way through from
-  // NowPlayingOverlay.durationSeconds.
-  durationSeconds: number;
-  videoFifoPath: string;
-  audioFifoPath: string;
+  outputTsOffsetSeconds?: number;
 }): string[] {
-  const { width, height, fps, audioPath, backgroundPath, overlayPngPath, fontFile, videoFifoPath, audioFifoPath } = params;
+  const { width, height, fps, audioPath, backgroundPath, overlayPngPath, fontFile } = params;
 
-  const args = ['-y', '-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', overlayPngPath];
+  const args = ['-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', overlayPngPath];
 
   if (params.startOffsetSeconds) {
     args.push('-ss', String(params.startOffsetSeconds));
   }
 
-  args.push('-i', audioPath, '-filter_complex', overlayFilterComplex(width, height, fontFile, params.timer ?? null));
-
-  // Two independent raw elementary-stream outputs (see the Stage 2 design doc) instead of one
-  // muxed MPEG-TS output, so -shortest can't be used to bound this segment's length the way it
-  // used to — -shortest only compares streams muxed into the SAME output, and ffmpeg has
-  // nothing to compare within either of these on its own. The video leg in particular is driven
-  // by an infinite `-loop 1` background/overlay image and would never end on its own without an
-  // explicit bound.
-  const remainingSeconds = Math.max(0, params.durationSeconds - (params.startOffsetSeconds ?? 0));
-
   args.push(
+    '-i', audioPath,
+    '-filter_complex', overlayFilterComplex(width, height, fontFile, params.timer ?? null),
     '-map', '[outv]',
+    '-map', '2:a',
     '-c:v', 'libx264',
     '-tune', 'stillimage',
-    '-pix_fmt', 'yuv420p',
-    '-r', String(fps),
-    '-g', String(fps * 2),
-    '-t', String(remainingSeconds),
-    '-f', 'h264', videoFifoPath,
-    '-map', '2:a',
     '-c:a', 'aac',
     '-b:a', '192k',
     '-ar', '44100',
     '-ac', '2',
-    '-t', String(remainingSeconds),
-    '-f', 'adts', audioFifoPath,
+    '-pix_fmt', 'yuv420p',
+    '-r', String(fps),
+    '-g', String(fps * 2),
+    '-shortest',
   );
+  // Every segment is its own ffmpeg process, so its muxer starts PTS/DTS back at ~0 by
+  // default — but the pusher treats the FIFO as one continuous stream and paces it with
+  // -re against real elapsed time since it started. Without carrying the running
+  // session-elapsed offset forward into each new segment, every switch reintroduces a
+  // PTS discontinuity: the pusher briefly free-runs (no real-time pacing) until the new
+  // segment's timestamps catch back up, which is what shows up as a burst/stall and
+  // decode artifacts right at the switch. See StreamController's elapsedSessionSeconds().
+  if (params.outputTsOffsetSeconds) {
+    args.push('-output_ts_offset', String(params.outputTsOffsetSeconds));
+  }
+  args.push('-f', 'mpegts', 'pipe:1');
 
   return args;
 }
 
-// Pause segments are killed externally (next/resume/stop), never by hitting an encoded-length
-// bound, so — unlike buildTrackSegmentArgs — neither output leg needs a -t here; both the
-// looped image and anullsrc are already infinite sources that just run until SegmentFeeder
-// kills this process.
+// Always takes an overlayPngPath, same as buildTrackSegmentArgs — SegmentFeeder resolves it to
+// whichever picture is already on disk (the last playing track's, or the blank fallback if
+// nothing has been rendered yet) before calling this, so pausing only ever changes the audio
+// (silence instead of the track), never the overlay, and this function never needs to know
+// whether that path holds a "real" render or the fallback. Same for `timer` — its `text` is
+// already frozen (not a live pts expression) by the time it gets here.
 export function buildPauseSegmentArgs(params: VideoParams & {
   backgroundPath: string;
   overlayPngPath: string;
   fontFile: string;
   timer?: TimerOverlay | null;
-  videoFifoPath: string;
-  audioFifoPath: string;
+  outputTsOffsetSeconds?: number;
 }): string[] {
-  const { width, height, fps, backgroundPath, overlayPngPath, fontFile, videoFifoPath, audioFifoPath } = params;
+  const { width, height, fps, backgroundPath, overlayPngPath, fontFile } = params;
 
-  return [
-    '-y',
+  const args = [
     '-loop', '1', '-i', backgroundPath,
     '-loop', '1', '-i', overlayPngPath,
     '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
     '-filter_complex', overlayFilterComplex(width, height, fontFile, params.timer ?? null),
     '-map', '[outv]',
+    '-map', '2:a',
     '-c:v', 'libx264',
     '-tune', 'stillimage',
-    '-pix_fmt', 'yuv420p',
-    '-r', String(fps),
-    '-g', String(fps * 2),
-    '-f', 'h264', videoFifoPath,
-    '-map', '2:a',
     '-c:a', 'aac',
     '-ar', '44100',
     '-ac', '2',
-    '-f', 'adts', audioFifoPath,
+    '-pix_fmt', 'yuv420p',
+    '-r', String(fps),
+    '-g', String(fps * 2),
   ];
+  if (params.outputTsOffsetSeconds) {
+    args.push('-output_ts_offset', String(params.outputTsOffsetSeconds));
+  }
+  args.push('-f', 'mpegts', 'pipe:1');
+  return args;
 }

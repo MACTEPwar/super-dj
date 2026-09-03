@@ -1,11 +1,13 @@
+import { PassThrough, Writable } from 'stream';
 import { SegmentFeeder } from '../../src/ffmpeg/segmentFeeder';
 import { Spawner, ChildProcessLike } from '../../src/ffmpeg/types';
 import { Track } from '../../src/playlist/types';
 import { NowPlayingOverlay } from '../../src/ffmpeg/segmentArgs';
 import { BLANK_OVERLAY_PNG } from '../../src/render/blankOverlay';
 
-function fakeChild(): ChildProcessLike {
-  return { pid: 123, stdout: null, stderr: null, kill: jest.fn(), once: jest.fn() };
+function fakeChild(): ChildProcessLike & { stdout: PassThrough } {
+  const stdout = new PassThrough();
+  return { pid: 123, stdout, stderr: null, kill: jest.fn(), once: jest.fn() };
 }
 
 const track: Track = { name: 'a', audioPath: '/music/a.mp3', coverPath: null };
@@ -16,18 +18,18 @@ const overlayWithTimer: NowPlayingOverlay = {
   timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff' },
 };
 
-function buildFeeder(overrides: Partial<{ spawner: Spawner; writeFileSync: jest.Mock }> = {}) {
+function buildFeeder(overrides: Partial<{ spawner: Spawner; createWriteStream: () => NodeJS.WritableStream; writeFileSync: jest.Mock }> = {}) {
   const writeFileSync = overrides.writeFileSync ?? jest.fn();
   const feeder = new SegmentFeeder({
     spawner: overrides.spawner ?? (jest.fn().mockReturnValue(fakeChild()) as Spawner),
-    videoFifoPath: '/tmp/stream-dest-1-video.fifo',
-    audioFifoPath: '/tmp/stream-dest-1-audio.fifo',
+    fifoPath: '/tmp/fifo',
     backgroundPath: '/assets/background.png',
     overlayImagePath: '/tmp/overlay-dest-1.png',
     fontFile: '/fonts/DejaVuSans-Bold.ttf',
     width: 1280,
     height: 720,
     fps: 30,
+    createWriteStream: overrides.createWriteStream ?? (() => new PassThrough()),
     writeFileSync,
   });
   return { feeder, writeFileSync };
@@ -38,16 +40,19 @@ function filterComplexArg(args: string[]): string {
 }
 
 describe('SegmentFeeder', () => {
-  it('spawns ffmpeg with track args pointed at both raw-ES fifo paths', () => {
-    const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
-    const { feeder } = buildFeeder({ spawner });
+  it('spawns ffmpeg with track args and pipes stdout into the fifo stream', () => {
+    const child = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
+    const chunks: Buffer[] = [];
+    const writeStream = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+    const { feeder } = buildFeeder({ spawner, createWriteStream: () => writeStream });
 
     feeder.feedTrack(track, overlay);
+    child.stdout.write('segment-bytes');
+    child.stdout.end();
 
     expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/music/a.mp3']));
-    const args = (spawner as jest.Mock).mock.calls[0][1] as string[];
-    expect(args).toEqual(expect.arrayContaining(['-f', 'h264', '/tmp/stream-dest-1-video.fifo']));
-    expect(args).toEqual(expect.arrayContaining(['-f', 'adts', '/tmp/stream-dest-1-audio.fifo']));
+    expect(Buffer.concat(chunks).toString()).toBe('segment-bytes');
   });
 
   it('feedTrack writes the rendered overlay PNG to the fixed overlay path before spawning ffmpeg', () => {
@@ -64,9 +69,9 @@ describe('SegmentFeeder', () => {
     const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
     const { feeder } = buildFeeder({ spawner });
 
-    feeder.feedTrack(track, overlay, 4);
+    feeder.feedTrack(track, overlay, 42);
 
-    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-ss', '4']));
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-ss', '42']));
   });
 
   it('feedTrack does not add a timer drawtext when the template has no timer element', () => {
@@ -118,7 +123,7 @@ describe('SegmentFeeder', () => {
     const { feeder } = buildFeeder({ spawner });
 
     feeder.feedTrack(track, overlayWithTimer);
-    feeder.feedPause(37);
+    feeder.feedPause(0, 37);
 
     const args = (spawner as jest.Mock).mock.calls[1][1] as string[];
     const filterComplex = filterComplexArg(args);
@@ -137,26 +142,46 @@ describe('SegmentFeeder', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
-  it('kills the outgoing process before spawning the next segment, so both never hold the fifos open for write at once', () => {
+  it('unpipes the outgoing producer so a still-draining old segment cannot interleave with the next one', () => {
+    // kill('SIGTERM') doesn't make a real ffmpeg process's stdout stop emitting data
+    // immediately — there's a window before it actually exits. Without an explicit
+    // unpipe, that leftover data and the next segment's data would both flow into the
+    // same fifo write stream at once, interleaving two MPEG-TS streams into one
+    // corrupted byte stream (the artifacts/slow-recovery a track switch used to cause).
+    const chunks: Buffer[] = [];
+    const writeStream = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
     const child1 = fakeChild();
     const child2 = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValueOnce(child1).mockReturnValueOnce(child2);
-    const { feeder } = buildFeeder({ spawner });
+    const { feeder } = buildFeeder({ spawner, createWriteStream: () => writeStream });
 
     feeder.feedTrack(track, overlay);
     feeder.feedTrack(track, overlay);
 
-    expect((child1.kill as jest.Mock).mock.invocationCallOrder[0])
-      .toBeLessThan((spawner as jest.Mock).mock.invocationCallOrder[1]);
+    child1.stdout.write('stale-bytes-from-the-dying-process');
+    child2.stdout.write('fresh-segment-bytes');
+    child2.stdout.end();
+
+    expect(Buffer.concat(chunks).toString()).toBe('fresh-segment-bytes');
   });
 
-  it('close() removes the overlay image file', () => {
-    const { feeder } = buildFeeder();
-    const unlinkSync = jest.spyOn(require('fs'), 'unlinkSync').mockImplementation(() => {});
+  it('close() ends the fifo write stream', () => {
+    const writeStream = new PassThrough();
+    const endSpy = jest.spyOn(writeStream, 'end');
+    const { feeder } = buildFeeder({ createWriteStream: () => writeStream });
 
     feeder.close();
 
-    expect(unlinkSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png');
-    unlinkSync.mockRestore();
+    expect(endSpy).toHaveBeenCalled();
+  });
+
+  it('does not crash the process when the fifo write stream errors (e.g. EPIPE after the pusher dies)', () => {
+    // A Node EventEmitter with no 'error' listener throws synchronously on emit('error', ...)
+    // — this is exactly how an unhandled EPIPE on the fifo write stream used to crash the
+    // entire server (every other user's active stream included), not just this one.
+    const writeStream = new PassThrough();
+    buildFeeder({ createWriteStream: () => writeStream });
+
+    expect(() => writeStream.emit('error', new Error('EPIPE: broken pipe, write'))).not.toThrow();
   });
 });

@@ -7,32 +7,44 @@ import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 
 export interface SegmentFeederOptions extends VideoParams {
   spawner: Spawner;
-  // ffmpeg opens both of these paths itself (as -f h264/-f adts output targets) — SegmentFeeder
-  // no longer owns a write stream onto either of them, see the Stage 2 design doc.
-  videoFifoPath: string;
-  audioFifoPath: string;
+  fifoPath: string;
   backgroundPath: string;
   // Fixed on-disk path this feeder writes the current overlay PNG to before every track
   // segment, and reuses as-is for a pause segment — see feedPause().
   overlayImagePath: string;
   // Only actually used when the template has a `timer` element — see buildTimerOverlay().
   fontFile: string;
+  createWriteStream?: (path: string) => NodeJS.WritableStream;
   writeFileSync?: (path: string, data: Buffer) => void;
 }
 
 export class SegmentFeeder {
+  private readonly fifoWriteStream: NodeJS.WritableStream;
   private readonly writeFileSync: (path: string, data: Buffer) => void;
   private activeProcess: ChildProcessLike | null = null;
+  private activeStdout: NodeJS.ReadableStream | null = null;
   private hasWrittenOverlay = false;
   // Remembered across calls so feedPause() can reuse the last track's overlay picture and timer
   // position/style without re-rendering — pausing only ever changes the audio.
   private lastOverlay: NowPlayingOverlay | null = null;
 
   constructor(private readonly options: SegmentFeederOptions) {
+    const createWriteStream = options.createWriteStream ?? ((p: string) => fs.createWriteStream(p));
+    this.fifoWriteStream = createWriteStream(options.fifoPath);
     this.writeFileSync = options.writeFileSync ?? fs.writeFileSync;
+    // Writes fail with EPIPE once the FIFO's reader (the pusher ffmpeg) has died or
+    // exited — e.g. an RTMP connection drop — which can race a producer segment still
+    // writing to it. An 'error' event with no listener is an uncaught exception in
+    // Node, which would crash the whole process (every other user's active stream
+    // included, not just this one), so this must never be left unhandled even though
+    // StreamController already reacts to the pusher's own exit via RtmpPusher's
+    // onExit callback.
+    this.fifoWriteStream.on('error', (err) => {
+      console.error('fifo write stream error', err);
+    });
   }
 
-  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0): ChildProcessLike {
+  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0, outputTsOffsetSeconds = 0): ChildProcessLike {
     this.writeFileSync(this.options.overlayImagePath, overlay.overlayPng);
     this.hasWrittenOverlay = true;
     this.lastOverlay = overlay;
@@ -41,7 +53,8 @@ export class SegmentFeeder {
       ...overlay.timer,
       // Live, ticking — pts:hms's optional offset carries the seek position forward so a
       // resumed track's displayed time continues from where it was paused instead of
-      // restarting at 0 (this segment's own pts always starts near 0). Both colons inside
+      // restarting at 0 (this segment's own pts always starts near 0, same reason
+      // -output_ts_offset exists for the video/audio timeline itself). Both colons inside
       // %{...} need escaping, not just the first one — confirmed by actually running this
       // through ffmpeg locally (`No option name near ...` otherwise), not just by reading docs.
       text: `%{pts\\:hms\\:${startOffsetSeconds}} / ${formatDurationForDrawtext(overlay.durationSeconds)}`,
@@ -57,17 +70,15 @@ export class SegmentFeeder {
       height: this.options.height,
       fps: this.options.fps,
       startOffsetSeconds,
-      durationSeconds: overlay.durationSeconds,
-      videoFifoPath: this.options.videoFifoPath,
-      audioFifoPath: this.options.audioFifoPath,
+      outputTsOffsetSeconds,
     });
-    return this.spawnNext(args);
+    return this.spawnAndPipe(args);
   }
 
-  feedPause(trackElapsedSeconds = 0): ChildProcessLike {
+  feedPause(outputTsOffsetSeconds = 0, trackElapsedSeconds = 0): ChildProcessLike {
     // Reuses whichever picture is already on disk — the last playing track's — so pausing
     // only ever changes the audio, never the overlay. If a track segment somehow never got
-    // to write one yet (defensive: shouldn't happen — start() always feeds a track before a
+    // to write one yet (defensive: shouldn't happen, start() always feeds a track before a
     // pause is reachable), fall back to the shared blank PNG so ffmpeg's -loop 1 input never
     // points at a file that doesn't exist.
     if (!this.hasWrittenOverlay) {
@@ -91,21 +102,34 @@ export class SegmentFeeder {
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
-      videoFifoPath: this.options.videoFifoPath,
-      audioFifoPath: this.options.audioFifoPath,
+      outputTsOffsetSeconds,
     });
-    return this.spawnNext(args);
+    return this.spawnAndPipe(args);
   }
 
   stopCurrent(): void {
+    if (this.activeStdout) {
+      // kill() doesn't stop the dying process's stdout from still draining into
+      // fifoWriteStream — a real ffmpeg process takes a little while to actually exit
+      // after SIGTERM, and by the time it does, spawnAndPipe() has typically already
+      // piped the *next* segment's stdout into the same destination. With both piped at
+      // once, their MPEG-TS bytes interleave unpredictably, corrupting the bitstream
+      // right at the switch point: this is what shows up as video/audio glitches and a
+      // slow-looking track change (the pusher/decoder has to resync afterwards).
+      // Unpiping immediately closes that window regardless of how long the process
+      // itself takes to die.
+      this.activeStdout.unpipe(this.fifoWriteStream);
+      this.activeStdout = null;
+    }
     if (this.activeProcess) {
       this.activeProcess.kill('SIGTERM');
       this.activeProcess = null;
     }
   }
 
-  /** Removes the overlay image file. Call once the feeder is being discarded. */
+  /** Closes the FIFO write stream and removes the overlay file. Call once the feeder is being discarded. */
   close(): void {
+    this.fifoWriteStream.end();
     try {
       fs.unlinkSync(this.options.overlayImagePath);
     } catch {
@@ -113,13 +137,13 @@ export class SegmentFeeder {
     }
   }
 
-  private spawnNext(args: string[]): ChildProcessLike {
-    // The outgoing process must be killed before the next one starts — a FIFO only supports
-    // one writer cleanly, so two producers must never both hold the video/audio FIFOs open at
-    // once. Unlike the old single-FIFO design, there's no Node-owned write stream to unpipe
-    // here: ffmpeg opens both FIFO paths itself as its own output targets.
+  private spawnAndPipe(args: string[]): ChildProcessLike {
     this.stopCurrent();
     const child = this.options.spawner('ffmpeg', args);
+    if (child.stdout) {
+      child.stdout.pipe(this.fifoWriteStream, { end: false });
+      this.activeStdout = child.stdout;
+    }
     this.activeProcess = child;
     return child;
   }

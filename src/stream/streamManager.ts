@@ -56,6 +56,10 @@ export interface StreamManagerDeps {
   trackRepository: Pick<TrackRepository, 'listByUser'>;
   templateRepository: Pick<TemplateRepository, 'findById'>;
   providers: Record<string, StreamDestinationProvider>;
+  // Optional seam for tests: SegmentFeeder opens a real fs write stream onto the
+  // FIFO by default. Left undefined in production so SegmentFeeder's own default
+  // (fs.createWriteStream) applies unchanged.
+  createWriteStream?: (path: string) => NodeJS.WritableStream;
 }
 
 export class StreamManager extends EventEmitter {
@@ -146,8 +150,7 @@ export class StreamManager extends EventEmitter {
       const session = await provider.prepareSession(destination, resolvedMeta);
 
       const queue = new PlaylistQueue(tracks);
-      const videoFifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}-video.fifo`);
-      const audioFifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}-audio.fifo`);
+      const fifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}.fifo`);
       const overlayImagePath = path.join(this.deps.fifoDir, `super-dj-overlay-${destinationId}.png`);
 
       // A timer isn't baked into the rendered PNG (see TimerElement's doc comment) — split it
@@ -204,29 +207,22 @@ export class StreamManager extends EventEmitter {
           findByName: (name: string) => allUserTracks.find((t) => t.name === name),
         },
         queue,
-        videoFifoPath,
-        audioFifoPath,
+        fifoPath,
         createFifo,
         removeFifo,
         buildOverlay,
         createSegmentFeeder: () => new SegmentFeeder({
           spawner: this.deps.spawner,
-          videoFifoPath,
-          audioFifoPath,
+          fifoPath,
           backgroundPath: this.deps.backgroundImagePath,
           overlayImagePath,
           fontFile: this.deps.fontFile,
           width: VIDEO_WIDTH,
           height: VIDEO_HEIGHT,
           fps: VIDEO_FPS,
+          createWriteStream: this.deps.createWriteStream,
         }),
-        createRtmpPusher: () => new RtmpPusher(this.deps.spawner, {
-          videoFifoPath,
-          audioFifoPath,
-          fps: VIDEO_FPS,
-          rtmpUrl: session.rtmpUrl,
-          streamKey: session.streamKey,
-        }),
+        createRtmpPusher: () => new RtmpPusher(this.deps.spawner, { fifoPath, rtmpUrl: session.rtmpUrl, streamKey: session.streamKey }),
         onError: () => {
           const entry = this.lifecycles.get(destinationId);
           this.lifecycles.delete(destinationId);

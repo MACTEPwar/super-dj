@@ -2,9 +2,7 @@ import { Spawner, ChildProcessLike } from './types';
 import { buildRtmpPusherArgs } from './rtmpPusherArgs';
 
 export interface RtmpPusherParams {
-  videoFifoPath: string;
-  audioFifoPath: string;
-  fps: number;
+  fifoPath: string;
   rtmpUrl: string;
   streamKey: string;
 }
