@@ -11,7 +11,7 @@ describe('buildPersistentEncoderArgs', () => {
       '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', '1280x720', '-r', '5', '-i', 'pipe:3',
       '-re', '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', 'pipe:4',
       '-map', '0:v', '-map', '1:a',
-      '-c:v', 'libx264', '-tune', 'stillimage', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60',
       '-c:a', 'aac', '-b:a', '192k',
       '-f', 'flv', 'rtmp://a.rtmp.youtube.com/live2/abcd-1234',
     ]);
