@@ -10,6 +10,7 @@ export function Sidebar() {
     { to: '/library', label: t('sidebar.library') },
     { to: '/playlists', label: t('sidebar.playlists') },
     { to: '/destinations', label: t('sidebar.destinations') },
+    { to: '/templates', label: t('sidebar.templates') },
     { to: '/streams', label: t('sidebar.streams') },
   ];
   return (

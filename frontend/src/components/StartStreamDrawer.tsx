@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { playlistsApi } from '../api/playlists';
@@ -89,7 +89,9 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
             <option value="">{t('startStreamDrawer.noTemplate')}</option>
             {templatesQuery.data?.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}
           </select>
-          <p className="mt-1 text-xs text-gray-500">{t('startStreamDrawer.templateHelp')}</p>
+          <p className="mt-1 text-xs text-gray-500">
+            {t('startStreamDrawer.templateHelp')} <Link to="/templates" className="underline">{t('startStreamDrawer.manageTemplates')}</Link>
+          </p>
         </div>
 
         <div>

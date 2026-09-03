@@ -12,6 +12,8 @@ import PlaylistEditor from './pages/PlaylistEditor';
 import Destinations from './pages/Destinations';
 import Streams from './pages/Streams';
 import StreamSessionPanel from './pages/StreamSessionPanel';
+import Templates from './pages/Templates';
+import TemplateEditor from './pages/TemplateEditor';
 
 const queryClient = new QueryClient();
 
@@ -33,6 +35,8 @@ export default function App() {
                 <Route path="/destinations" element={<Destinations />} />
                 <Route path="/streams" element={<Streams />} />
                 <Route path="/streams/:id" element={<StreamSessionPanel />} />
+                <Route path="/templates" element={<Templates />} />
+                <Route path="/templates/:id" element={<TemplateEditor />} />
               </Route>
             </Route>
           </Routes>
