@@ -1946,42 +1946,56 @@ EOF
 
 ---
 
-## Task 8: Remove `fifo.ts` if it's now truly dead code
+## Task 8: Remove whichever pre-Stage-2 files are now truly dead code
+
+Task 0 revived `src/ffmpeg/segmentFeeder.ts`, `src/ffmpeg/rtmpPusher.ts`, and
+`src/ffmpeg/rtmpPusherArgs.ts` (plus `src/ffmpeg/fifo.ts`, never touched by Task 0 but always
+present) purely so the codebase kept compiling between Task 0 and the new architecture landing.
+Once Task 7 lands, none of the streaming pipeline calls any of them any more — leaving them in the
+repo unreferenced would misleadingly suggest `SegmentFeeder`/`RtmpPusher` are still part of the
+live pipeline. Check each independently; not all four are guaranteed dead (e.g. if anything
+outside the streaming pipeline ever imported one of them) — verify per-file, don't assume.
 
 **Files:**
-- Possibly delete: `src/ffmpeg/fifo.ts`, `test/ffmpeg/fifo.test.ts`
+- Possibly delete: `src/ffmpeg/fifo.ts`, `src/ffmpeg/segmentFeeder.ts`, `src/ffmpeg/rtmpPusher.ts`,
+  `src/ffmpeg/rtmpPusherArgs.ts`, and their four test files.
 
-- [ ] **Step 1: Confirm nothing still imports it**
+- [ ] **Step 1: Confirm nothing still imports each one**
 
-Run: `grep -rn "ffmpeg/fifo" src/ test/`
-Expected: no matches (Task 7 removed `StreamManager`'s import; nothing else in the codebase ever
-imported it per this session's earlier investigation — confirm that's still true after all of
-Tasks 0-7's edits, not just take it on faith from before those edits landed).
+Run: `grep -rln "ffmpeg/fifo'\|ffmpeg/segmentFeeder'\|ffmpeg/rtmpPusher'\|ffmpeg/rtmpPusherArgs'" src/`
+Expected: no matches outside the four files' own test files (which import their own module under
+test — that doesn't count as "something else depends on it"). If this finds a real remaining
+import in some other `src/` file, that file is not dead — leave it and its test in place, and
+note which one and why in your report.
 
-- [ ] **Step 2: If truly unreferenced, delete it**
+- [ ] **Step 2: Delete whichever files Step 1 confirmed are unreferenced**
 
 ```bash
 git rm src/ffmpeg/fifo.ts test/ffmpeg/fifo.test.ts
+git rm src/ffmpeg/segmentFeeder.ts test/ffmpeg/segmentFeeder.test.ts
+git rm src/ffmpeg/rtmpPusher.ts test/ffmpeg/rtmpPusher.test.ts
+git rm src/ffmpeg/rtmpPusherArgs.ts test/ffmpeg/rtmpPusherArgs.test.ts
 ```
 
-If Step 1 found a real remaining reference, stop and report DONE_WITH_CONCERNS instead — don't
-delete a file something still depends on.
+(Adjust — only run `git rm` for the pairs Step 1 actually confirmed dead.)
 
 - [ ] **Step 3: Run the full suite**
 
 Run: `npm test`
-Expected: PASS, one fewer suite than before (`fifo.test.ts` gone).
+Expected: PASS, fewer suites than before (however many pairs were actually removed).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git commit -m "$(cat <<'EOF'
-chore: remove fifo.ts, unused now that nothing creates named FIFOs
+chore: remove the pre-Stage-2 files now dead after the persistent-canvas rewrite
 
-The persistent-canvas pipeline uses anonymous pipe file descriptors
-(PipeSpawner) instead of filesystem FIFOs -- see the design doc's
-"Why the two-FIFO design was abandoned" for why named FIFOs turned
-out to be the actual root problem, not just an implementation detail.
+fifo.ts (named FIFOs are gone -- PipeSpawner uses anonymous pipes
+instead), segmentFeeder.ts and rtmpPusher.ts/rtmpPusherArgs.ts
+(replaced by CanvasFeeder+AudioRelay and PersistentEncoder) were kept
+around through Task 0's revert and the tasks since purely so the
+codebase kept compiling one file at a time -- nothing in the
+streaming pipeline calls any of them any more as of the previous task.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J9KpK2UY7XGtFAxYJPFkzP
