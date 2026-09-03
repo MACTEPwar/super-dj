@@ -1,13 +1,10 @@
-jest.mock('../../src/render/sceneRenderer', () => ({ renderScene: jest.fn().mockResolvedValue(Buffer.from('fake-png')) }));
-jest.mock('../../src/render/imageDataUri', () => ({ readImageAsDataUri: jest.fn().mockResolvedValue('data:image/png;base64,ZmFrZQ==') }));
-jest.mock('fs/promises', () => ({ readFile: jest.fn().mockResolvedValue(Buffer.from('fake-font-bytes')) }));
+jest.mock('../../src/render/renderOverlay', () => ({ renderTemplatePng: jest.fn().mockResolvedValue(Buffer.from('fake-png')) }));
 
 import express from 'express';
 import request from 'supertest';
 import { createTemplateRouter } from '../../src/templates/templateRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
-import { renderScene } from '../../src/render/sceneRenderer';
-import { readImageAsDataUri } from '../../src/render/imageDataUri';
+import { renderTemplatePng } from '../../src/render/renderOverlay';
 
 const rendererDeps = { fontPath: '/fonts/test.ttf', fontFamily: 'Test', defaultCoverPath: '/assets/default-cover.png' };
 const validElements = [{ type: 'cover', x: 0, y: 0, width: 100, height: 100 }];
@@ -98,12 +95,16 @@ describe('template routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('image/png');
-      expect(readImageAsDataUri).toHaveBeenCalledWith('/assets/default-cover.png');
-      expect(renderScene).toHaveBeenCalledWith(
-        validElements,
-        { title: 'Sample Track', playlistLines: ['▶ Sample Track', '  Next Track'], coverDataUri: 'data:image/png;base64,ZmFrZQ==' },
-        { width: 1280, height: 720, fontData: expect.any(Buffer), fontFamily: 'Test' },
-      );
+      expect(renderTemplatePng).toHaveBeenCalledWith({
+        elements: validElements,
+        title: 'Sample Track',
+        playlistLines: ['▶ Sample Track', '  Next Track'],
+        coverPath: '/assets/default-cover.png',
+        width: 1280,
+        height: 720,
+        fontPath: '/fonts/test.ttf',
+        fontFamily: 'Test',
+      });
     });
 
     it('uses a draft elements array from the body instead of the saved one, without persisting it', async () => {
@@ -112,7 +113,7 @@ describe('template routes', () => {
       const res = await request(buildApp(templateRepository)).post('/templates/t1/preview').send({ elements: draftElements });
 
       expect(res.status).toBe(200);
-      expect(renderScene).toHaveBeenCalledWith(draftElements, expect.anything(), expect.anything());
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ elements: draftElements }));
     });
 
     it('looks up a track\'s own cover when trackId is given, enforcing ownership', async () => {
@@ -121,7 +122,7 @@ describe('template routes', () => {
       const res = await request(buildApp(templateRepository, trackRepository)).post('/templates/t1/preview').send({ trackId: 'tr1' });
 
       expect(res.status).toBe(200);
-      expect(readImageAsDataUri).toHaveBeenCalledWith('/uploads/u1/tr1/cover.png');
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ coverPath: '/uploads/u1/tr1/cover.png' }));
     });
 
     it('403s when trackId belongs to another user', async () => {
@@ -130,7 +131,7 @@ describe('template routes', () => {
       const res = await request(buildApp(templateRepository, trackRepository)).post('/templates/t1/preview').send({ trackId: 'tr1' });
 
       expect(res.status).toBe(403);
-      expect(renderScene).not.toHaveBeenCalled();
+      expect(renderTemplatePng).not.toHaveBeenCalled();
     });
 
     it('rejects invalid draft elements', async () => {
@@ -138,7 +139,16 @@ describe('template routes', () => {
       const res = await request(buildApp(templateRepository)).post('/templates/t1/preview').send({ elements: [{ type: 'cover' }] });
 
       expect(res.status).toBe(400);
-      expect(renderScene).not.toHaveBeenCalled();
+      expect(renderTemplatePng).not.toHaveBeenCalled();
+    });
+
+    it('propagates a render failure as a real HTTP error instead of silently falling back', async () => {
+      const templateRepository: any = ownedTemplateRepo();
+      (renderTemplatePng as jest.Mock).mockRejectedValueOnce(new Error('render pipeline unavailable'));
+
+      const res = await request(buildApp(templateRepository)).post('/templates/t1/preview').send({});
+
+      expect(res.status).toBe(500);
     });
   });
 });

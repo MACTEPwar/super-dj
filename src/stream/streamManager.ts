@@ -15,6 +15,11 @@ import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository } from '../tracks/trackRepository';
+import { TemplateRepository } from '../templates/templateRepository';
+import { TemplateElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
+import { renderTemplatePng } from '../render/renderOverlay';
+import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
+import { SessionOverlayCache } from './sessionOverlayCache';
 import { BroadcastMeta, DestinationLifecycle, StreamDestinationProvider } from '../destinations/streamDestinationProvider';
 
 // Also declared (as '1280x720'/'30fps'-shaped strings) in src/destinations/youtubeApiClient.ts's
@@ -25,15 +30,31 @@ const VIDEO_FPS = 30;
 const PLAYLIST_WINDOW_BEFORE = 2;
 const PLAYLIST_WINDOW_AFTER = 7;
 
+// Extra, optional per-start() options beyond the existing (destinationId, playlistId, meta)
+// shape — kept as a trailing object rather than reworking the whole signature, since playlistId/
+// meta are unaffected and every existing call site stays valid as-is.
+export interface StreamStartOptions {
+  // No template selected -> DEFAULT_TEMPLATE_ELEMENTS is used, not an error; see the "Overlay
+  // templates" section of CLAUDE.md for why templateId is optional rather than required.
+  templateId?: string;
+  // Set by StreamSessionManager when this destination is part of a multi-destination session,
+  // so sibling destinations rendering the identical (track, template) pair can share one render
+  // instead of each paying for their own. Absent for a standalone single-destination stream.
+  overlayCache?: SessionOverlayCache;
+  sessionId?: string;
+}
+
 export interface StreamManagerDeps {
   spawner: Spawner;
   fifoDir: string;
   defaultCoverPath: string;
   backgroundImagePath: string;
   fontFile: string;
+  fontFamily: string;
   playlistRepository: Pick<PlaylistRepository, 'listTracks' | 'findById'>;
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   trackRepository: Pick<TrackRepository, 'listByUser'>;
+  templateRepository: Pick<TemplateRepository, 'findById'>;
   providers: Record<string, StreamDestinationProvider>;
   // Optional seam for tests: SegmentFeeder opens a real fs write stream onto the
   // FIFO by default. Left undefined in production so SegmentFeeder's own default
@@ -60,7 +81,7 @@ export class StreamManager extends EventEmitter {
     return this.controllers.get(destinationId);
   }
 
-  async start(destinationId: string, playlistId: string, meta?: Partial<BroadcastMeta>): Promise<void> {
+  async start(destinationId: string, playlistId: string, meta?: Partial<BroadcastMeta>, options?: StreamStartOptions): Promise<void> {
     // Synchronous, id-keyed re-entrancy guard: two overlapping start() calls for the same
     // destination must not both pass the (also synchronous) "already active" check below
     // before either has registered a controller — that race would leak the loser's
@@ -102,6 +123,16 @@ export class StreamManager extends EventEmitter {
       if (!playlist) throw new ApiError(404, 'playlist not found');
       if (playlist.userId !== destination.userId) throw new ApiError(403, 'not your playlist');
 
+      // Same ownership rule as the playlist above. No templateId at all is valid — it just
+      // means the built-in default layout is used instead of a user-authored one.
+      let templateElements: TemplateElement[] = DEFAULT_TEMPLATE_ELEMENTS;
+      if (options?.templateId) {
+        const template = await this.deps.templateRepository.findById(options.templateId);
+        if (!template) throw new ApiError(404, 'template not found');
+        if (template.userId !== destination.userId) throw new ApiError(403, 'not your template');
+        templateElements = template.elements as unknown as TemplateElement[];
+      }
+
       const tracks: Track[] = await this.deps.playlistRepository.listTracks(playlistId);
       if (tracks.length === 0) throw new ApiError(409, 'playlist is empty');
 
@@ -120,14 +151,42 @@ export class StreamManager extends EventEmitter {
 
       const queue = new PlaylistQueue(tracks);
       const fifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}.fifo`);
+      const overlayImagePath = path.join(this.deps.fifoDir, `super-dj-overlay-${destinationId}.png`);
 
       const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
         const currentIndex = tracks.findIndex((t) => t.name === track.name);
-        return {
+        const playlistLines = buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
+        const durationSeconds = await getAudioDurationSeconds(track.audioPath);
+
+        const render = () => renderTemplatePng({
+          elements: templateElements,
           title: track.name,
-          playlistLines: buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER),
-          durationSeconds: await getAudioDurationSeconds(track.audioPath),
-        };
+          playlistLines,
+          coverPath: track.coverPath ?? this.deps.defaultCoverPath,
+          width: VIDEO_WIDTH,
+          height: VIDEO_HEIGHT,
+          fontPath: this.deps.fontFile,
+          fontFamily: this.deps.fontFamily,
+        });
+
+        let overlayPng: Buffer;
+        try {
+          overlayPng = options?.overlayCache && options.sessionId
+            ? await options.overlayCache.getOrRender(
+              { sessionId: options.sessionId, trackName: track.name, templateId: options.templateId ?? null },
+              render,
+            )
+            : await render();
+        } catch (err) {
+          // The RTMP connection staying up matters more than any one segment's picture — see
+          // CLAUDE.md's overlay-templates notes. /templates/{id}/preview (an interactive,
+          // synchronous request) deliberately does NOT catch the same failure; only the live
+          // pipeline falls back silently.
+          console.error('template render failed for a live segment, falling back to a blank overlay', err);
+          overlayPng = BLANK_OVERLAY_PNG;
+        }
+
+        return { durationSeconds, overlayPng };
       };
 
       const controller = new StreamController({
@@ -143,9 +202,8 @@ export class StreamManager extends EventEmitter {
         createSegmentFeeder: () => new SegmentFeeder({
           spawner: this.deps.spawner,
           fifoPath,
-          defaultCoverPath: this.deps.defaultCoverPath,
           backgroundPath: this.deps.backgroundImagePath,
-          fontFile: this.deps.fontFile,
+          overlayImagePath,
           width: VIDEO_WIDTH,
           height: VIDEO_HEIGHT,
           fps: VIDEO_FPS,

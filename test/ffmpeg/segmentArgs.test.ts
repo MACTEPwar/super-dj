@@ -3,28 +3,26 @@ import { buildTrackSegmentArgs, buildPauseSegmentArgs } from '../../src/ffmpeg/s
 describe('buildTrackSegmentArgs', () => {
   const base = {
     audioPath: '/music/a.mp3',
-    coverPath: '/music/a.png',
     backgroundPath: '/assets/background.png',
-    fontFile: '/fonts/DejaVuSans-Bold.ttf',
+    overlayPngPath: '/tmp/super-dj-overlay-dest-1.png',
     width: 1280,
     height: 720,
     fps: 30,
-    overlay: { title: 'Song A', playlistLines: ['▶ Song A', '  Song B'], durationSeconds: 65 },
   };
 
-  it('builds ffmpeg args with the composited filter graph and no seek by default', () => {
+  it('builds ffmpeg args compositing the background and the overlay PNG, with no seek by default', () => {
     const args = buildTrackSegmentArgs(base);
 
-    expect(args.slice(0, 4)).toEqual(['-loop', '1', '-i', '/assets/background.png']);
-    expect(args).toEqual(expect.arrayContaining(['-loop', '1', '-i', '/music/a.png']));
+    expect(args.slice(0, 8)).toEqual([
+      '-loop', '1', '-i', '/assets/background.png',
+      '-loop', '1', '-i', '/tmp/super-dj-overlay-dest-1.png',
+    ]);
     expect(args).toEqual(expect.arrayContaining(['-i', '/music/a.mp3']));
     expect(args).not.toEqual(expect.arrayContaining(['-ss']));
 
     const filterComplexIndex = args.indexOf('-filter_complex');
     const filterComplex = args[filterComplexIndex + 1];
-    expect(filterComplex).toContain("drawtext=fontfile=/fonts/DejaVuSans-Bold.ttf:text='Song A'");
-    expect(filterComplex).toContain('%{pts\\:hms} / 1\\:05');
-    expect(filterComplex).toContain('▶ Song A\n  Song B');
+    expect(filterComplex).toBe('[0:v]scale=1280:720[bg];[1:v]scale=1280:720[ov];[bg][ov]overlay=0:0[outv]');
 
     // Assert the encoder tail exactly so a missing pin cannot slip through.
     expect(args.slice(filterComplexIndex + 2)).toEqual([
@@ -70,14 +68,24 @@ describe('buildTrackSegmentArgs', () => {
 });
 
 describe('buildPauseSegmentArgs', () => {
-  it('builds ffmpeg args for an unbounded silence + background segment', () => {
-    const args = buildPauseSegmentArgs({ backgroundPath: '/assets/background.png', width: 1280, height: 720, fps: 30 });
+  const base = {
+    backgroundPath: '/assets/background.png',
+    overlayPngPath: '/tmp/super-dj-overlay-dest-1.png',
+    width: 1280,
+    height: 720,
+    fps: 30,
+  };
+
+  it('builds ffmpeg args compositing the background, the reused overlay PNG, and silence', () => {
+    const args = buildPauseSegmentArgs(base);
 
     expect(args).toEqual([
-      '-loop', '1',
-      '-i', '/assets/background.png',
-      '-f', 'lavfi',
-      '-i', 'anullsrc=r=44100:cl=stereo',
+      '-loop', '1', '-i', '/assets/background.png',
+      '-loop', '1', '-i', '/tmp/super-dj-overlay-dest-1.png',
+      '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+      '-filter_complex', '[0:v]scale=1280:720[bg];[1:v]scale=1280:720[ov];[bg][ov]overlay=0:0[outv]',
+      '-map', '[outv]',
+      '-map', '2:a',
       '-c:v', 'libx264',
       '-tune', 'stillimage',
       '-c:a', 'aac',
@@ -86,14 +94,13 @@ describe('buildPauseSegmentArgs', () => {
       '-pix_fmt', 'yuv420p',
       '-r', '30',
       '-g', '60',
-      '-vf', 'scale=1280:720',
       '-f', 'mpegts',
       'pipe:1',
     ]);
   });
 
   it('adds -output_ts_offset before the mpegts output when carrying the session clock forward', () => {
-    const args = buildPauseSegmentArgs({ backgroundPath: '/assets/background.png', width: 1280, height: 720, fps: 30, outputTsOffsetSeconds: 42 });
+    const args = buildPauseSegmentArgs({ ...base, outputTsOffsetSeconds: 42 });
 
     expect(args.slice(-5)).toEqual(['-output_ts_offset', '42', '-f', 'mpegts', 'pipe:1']);
   });

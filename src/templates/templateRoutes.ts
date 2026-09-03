@@ -1,10 +1,8 @@
 import { Router } from 'express';
-import * as fs from 'fs/promises';
 import { TemplateRepository } from './templateRepository';
 import { isValidTemplateElements, TemplateElement, CANVAS_WIDTH, CANVAS_HEIGHT } from './templateTypes';
 import { TrackRepository } from '../tracks/trackRepository';
-import { renderScene } from '../render/sceneRenderer';
-import { readImageAsDataUri } from '../render/imageDataUri';
+import { renderTemplatePng } from '../render/renderOverlay';
 import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
@@ -15,10 +13,6 @@ function toPublicTemplate(t: { id: string; name: string; elements: unknown; crea
 }
 
 export interface TemplateRendererDeps {
-  // A path, not pre-read bytes: reading only happens lazily, on the first actual preview
-  // request — buildServer() itself must stay a safe, side-effect-free construction (it's
-  // called by tests with no real filesystem/font present), matching how the ffmpeg pipeline's
-  // own font path is also only ever opened when a segment is actually rendered, never at boot.
   fontPath: string;
   fontFamily: string;
   defaultCoverPath: string;
@@ -33,14 +27,6 @@ export function createTemplateRouter(
   const router = Router();
   const auth = requireAuth(authService);
   const userId = (req: AuthenticatedRequest) => req.user!.id;
-
-  // Cached after the first read — the font file never changes at runtime, no need to re-read
-  // it on every preview request.
-  let fontData: Buffer | null = null;
-  async function loadFontData(): Promise<Buffer> {
-    if (!fontData) fontData = await fs.readFile(rendererDeps.fontPath);
-    return fontData;
-  }
 
   async function requireOwnedTemplate(id: string, ownerId: string) {
     const template = await templateRepository.findById(id);
@@ -85,7 +71,10 @@ export function createTemplateRouter(
 
   // Renders the template (either the saved one, or a draft passed in the body — so the editor
   // can preview unsaved changes) against sample scene data and returns the PNG directly, so the
-  // frontend can point an <img> straight at this endpoint.
+  // frontend can point an <img> straight at this endpoint. Unlike the live stream pipeline
+  // (StreamManager.buildOverlay), a render failure here is NOT caught — it propagates as a real
+  // HTTP error, because this is an interactive request from someone testing a template layout,
+  // who needs to see that something broke rather than a silently blank picture.
   router.post('/:id/preview', auth, wrapAsync(async (req, res) => {
     const owner = userId(req as AuthenticatedRequest);
     const template = await requireOwnedTemplate(req.params.id, owner);
@@ -110,16 +99,16 @@ export function createTemplateRouter(
       coverPath = track.coverPath ?? rendererDeps.defaultCoverPath;
     }
 
-    const [coverDataUri, font] = await Promise.all([readImageAsDataUri(coverPath), loadFontData()]);
-    const png = await renderScene(
-      previewElements,
-      {
-        title: title ?? 'Sample Track',
-        playlistLines: playlistLines ?? ['▶ Sample Track', '  Next Track'],
-        coverDataUri,
-      },
-      { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, fontData: font, fontFamily: rendererDeps.fontFamily },
-    );
+    const png = await renderTemplatePng({
+      elements: previewElements,
+      title: title ?? 'Sample Track',
+      playlistLines: playlistLines ?? ['▶ Sample Track', '  Next Track'],
+      coverPath,
+      width: CANVAS_WIDTH,
+      height: CANVAS_HEIGHT,
+      fontPath: rendererDeps.fontPath,
+      fontFamily: rendererDeps.fontFamily,
+    });
 
     res.status(200).contentType('image/png').send(png);
   }));

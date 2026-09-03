@@ -72,15 +72,19 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     youtube: new YoutubeProvider({ client: youtubeApiClient, encryptionKey: config.streamKeyEncryptionKey, oauthConnectionRepository }),
   };
 
+  const templateRepository = new TemplateRepository(prisma);
+
   const streamManager = new StreamManager({
     spawner,
     fifoDir: config.fifoDir,
     defaultCoverPath: config.defaultCoverPath,
     backgroundImagePath: config.backgroundImagePath,
     fontFile: FONT_FILE,
+    fontFamily: OVERLAY_FONT_FAMILY,
     playlistRepository,
     destinationRepository,
     trackRepository,
+    templateRepository,
     providers: streamDestinationProviders,
   });
 
@@ -90,9 +94,9 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     streamSessionRepository,
     destinationRepository,
     playlistRepository,
+    templateRepository,
   });
 
-  const templateRepository = new TemplateRepository(prisma);
   const templateRendererDeps = {
     fontPath: FONT_FILE,
     fontFamily: OVERLAY_FONT_FAMILY,

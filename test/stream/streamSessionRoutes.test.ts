@@ -44,25 +44,43 @@ describe('stream session routes', () => {
 
   it('POST / creates a session and returns its status', async () => {
     const streamSessionManager: any = {
-      create: jest.fn().mockResolvedValue({ id: 's1', playlistId: 'p1', destinations: [{ destinationId: 'd1', status: { state: 'streaming', currentTrack: 'a', nextTrack: null } }] }),
+      create: jest.fn().mockResolvedValue({ id: 's1', playlistId: 'p1', templateId: null, destinations: [{ destinationId: 'd1', status: { state: 'streaming', currentTrack: 'a', nextTrack: null } }] }),
     };
     const res = await request(buildApp(streamSessionManager))
       .post('/stream-sessions')
       .send({ playlistId: 'p1', destinationIds: ['d1'], title: 'My Stream' });
     expect(res.status).toBe(200);
-    expect(streamSessionManager.create).toHaveBeenCalledWith('user-1', 'p1', ['d1'], { title: 'My Stream', description: undefined, privacyStatus: undefined, latencyPreference: undefined });
+    expect(streamSessionManager.create).toHaveBeenCalledWith('user-1', 'p1', undefined, ['d1'], { title: 'My Stream', description: undefined, privacyStatus: undefined, latencyPreference: undefined });
     expect(res.body.id).toBe('s1');
+  });
+
+  it('POST / rejects an empty-string templateId', async () => {
+    const streamSessionManager: any = { create: jest.fn() };
+    const res = await request(buildApp(streamSessionManager)).post('/stream-sessions').send({ playlistId: 'p1', destinationIds: ['d1'], templateId: '' });
+    expect(res.status).toBe(400);
+    expect(streamSessionManager.create).not.toHaveBeenCalled();
+  });
+
+  it('POST / passes a templateId through when given', async () => {
+    const streamSessionManager: any = {
+      create: jest.fn().mockResolvedValue({ id: 's1', playlistId: 'p1', templateId: 'tpl-1', destinations: [] }),
+    };
+    const res = await request(buildApp(streamSessionManager))
+      .post('/stream-sessions')
+      .send({ playlistId: 'p1', destinationIds: ['d1'], templateId: 'tpl-1' });
+    expect(res.status).toBe(200);
+    expect(streamSessionManager.create).toHaveBeenCalledWith('user-1', 'p1', 'tpl-1', ['d1'], expect.anything());
   });
 
   it('POST / passes a valid latencyPreference through', async () => {
     const streamSessionManager: any = {
-      create: jest.fn().mockResolvedValue({ id: 's1', playlistId: 'p1', destinations: [] }),
+      create: jest.fn().mockResolvedValue({ id: 's1', playlistId: 'p1', templateId: null, destinations: [] }),
     };
     const res = await request(buildApp(streamSessionManager))
       .post('/stream-sessions')
       .send({ playlistId: 'p1', destinationIds: ['d1'], latencyPreference: 'low' });
     expect(res.status).toBe(200);
-    expect(streamSessionManager.create).toHaveBeenCalledWith('user-1', 'p1', ['d1'], expect.objectContaining({ latencyPreference: 'low' }));
+    expect(streamSessionManager.create).toHaveBeenCalledWith('user-1', 'p1', undefined, ['d1'], expect.objectContaining({ latencyPreference: 'low' }));
   });
 
   it('GET / lists sessions for the authenticated user', async () => {

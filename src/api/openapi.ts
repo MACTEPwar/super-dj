@@ -191,6 +191,7 @@ export const openApiSpec = {
                 required: ['playlistId'],
                 properties: {
                   playlistId: { type: 'string' },
+                  templateId: { type: 'string', description: 'Optional overlay template id (see /templates). When omitted, a built-in default layout is used instead of erroring — no visual editor exists yet, so most streams will start without one.' },
                   title: { type: 'string', description: 'Optional broadcast title override (providers that create a live broadcast, e.g. YouTube); defaults to the playlist name' },
                   description: { type: 'string', description: 'Optional broadcast description (providers that create a live broadcast, e.g. YouTube)' },
                   privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Optional broadcast privacy (providers that create a live broadcast, e.g. YouTube); defaults to private' },
@@ -202,10 +203,10 @@ export const openApiSpec = {
         },
         responses: {
           '200': { description: 'Stream started', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamStatus' } } } },
-          '400': { description: 'Missing body.playlistId' },
+          '400': { description: 'Missing body.playlistId, or an empty-string body.templateId' },
           '401': { description: 'Not authenticated' },
-          '403': { description: 'Not your destination' },
-          '404': { description: 'Destination not found' },
+          '403': { description: 'Not your destination, or not your template' },
+          '404': { description: 'Destination not found, or templateId given but not found' },
           '409': { description: 'Stream already active for this destination, or playlist is empty' },
         },
       },
@@ -329,6 +330,7 @@ export const openApiSpec = {
                 required: ['playlistId', 'destinationIds'],
                 properties: {
                   playlistId: { type: 'string' },
+                  templateId: { type: 'string', description: 'Optional overlay template id (see /templates), shared by every destination in the session. Omitted -> the built-in default layout is used for all of them.' },
                   destinationIds: { type: 'array', items: { type: 'string' }, description: 'Must be non-empty and contain no duplicates' },
                   title: { type: 'string', description: 'Optional broadcast title override (providers that create a live broadcast, e.g. YouTube); defaults to the playlist name' },
                   description: { type: 'string', description: 'Optional broadcast description (providers that create a live broadcast, e.g. YouTube)' },
@@ -341,10 +343,10 @@ export const openApiSpec = {
         },
         responses: {
           '200': { description: 'Session created; each destination started independently — a per-destination `error` field means that one destination failed to start, not the whole session', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamSessionStatus' } } } },
-          '400': { description: 'Missing/invalid playlistId or destinationIds' },
+          '400': { description: 'Missing/invalid playlistId or destinationIds, or an empty-string templateId' },
           '401': { description: 'Not authenticated' },
-          '403': { description: 'Not your playlist, or not your destination' },
-          '404': { description: 'Playlist not found, or a destination not found' },
+          '403': { description: 'Not your playlist, not your destination, or not your template' },
+          '404': { description: 'Playlist not found, a destination not found, or templateId given but not found' },
         },
       },
       get: {
@@ -667,6 +669,7 @@ export const openApiSpec = {
         properties: {
           id: { type: 'string' },
           playlistId: { type: 'string' },
+          templateId: { type: 'string', nullable: true },
           destinations: {
             type: 'array',
             items: {

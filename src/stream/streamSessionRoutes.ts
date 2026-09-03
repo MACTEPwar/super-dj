@@ -16,8 +16,11 @@ export function createStreamSessionRouter(
   const userId = (req: AuthenticatedRequest) => req.user!.id;
 
   router.post('/', auth, wrapAsync(async (req, res) => {
-    const { playlistId, destinationIds, title, description, privacyStatus, latencyPreference } = req.body ?? {};
+    const { playlistId, templateId, destinationIds, title, description, privacyStatus, latencyPreference } = req.body ?? {};
     if (typeof playlistId !== 'string' || playlistId.length === 0) throw new ApiError(400, 'body.playlistId is required');
+    if (templateId !== undefined && (typeof templateId !== 'string' || templateId.length === 0)) {
+      throw new ApiError(400, 'body.templateId must be a non-empty string');
+    }
     if (!Array.isArray(destinationIds) || destinationIds.some((id: unknown) => typeof id !== 'string')) {
       throw new ApiError(400, 'body.destinationIds must be an array of strings');
     }
@@ -30,7 +33,7 @@ export function createStreamSessionRouter(
       throw new ApiError(400, "body.latencyPreference must be 'normal', 'low', or 'ultraLow'");
     }
     const result = await streamSessionManager.create(
-      userId(req as AuthenticatedRequest), playlistId, destinationIds, { title, description, privacyStatus, latencyPreference },
+      userId(req as AuthenticatedRequest), playlistId, templateId, destinationIds, { title, description, privacyStatus, latencyPreference },
     );
     res.status(200).json(result);
   }));
@@ -91,6 +94,7 @@ export function createStreamSessionRouter(
     const buildStatus = (): StreamSessionStatus => ({
       id: sessionId,
       playlistId: initial.playlistId,
+      templateId: initial.templateId,
       destinations: destinationIds.map((destinationId) => ({ destinationId, status: streamManager.status(destinationId) })),
     });
 

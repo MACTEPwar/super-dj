@@ -1,7 +1,9 @@
 import { StreamManager } from './streamManager';
 import { StreamSessionRepository, StreamSessionRecord } from './streamSessionRepository';
+import { SessionOverlayCache } from './sessionOverlayCache';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { PlaylistRepository } from '../playlists/playlistRepository';
+import { TemplateRepository } from '../templates/templateRepository';
 import { BroadcastMeta } from '../destinations/streamDestinationProvider';
 import { DestinationStreamStatus } from './types';
 import { ApiError } from '../errors';
@@ -15,6 +17,7 @@ export interface StreamSessionDestinationStatus {
 export interface StreamSessionStatus {
   id: string;
   playlistId: string;
+  templateId: string | null;
   destinations: StreamSessionDestinationStatus[];
 }
 
@@ -23,6 +26,7 @@ export interface StreamSessionManagerDeps {
   streamSessionRepository: Pick<StreamSessionRepository, 'create' | 'findById' | 'listByUser' | 'deleteById'>;
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   playlistRepository: Pick<PlaylistRepository, 'findById'>;
+  templateRepository: Pick<TemplateRepository, 'findById'>;
 }
 
 // Thin fan-out orchestrator over the existing, already-independent per-destination
@@ -37,6 +41,7 @@ export class StreamSessionManager {
   async create(
     userId: string,
     playlistId: string,
+    templateId: string | undefined,
     destinationIds: string[],
     meta?: Partial<BroadcastMeta>,
   ): Promise<StreamSessionStatus> {
@@ -52,6 +57,12 @@ export class StreamSessionManager {
     if (!playlist) throw new ApiError(404, 'playlist not found');
     if (playlist.userId !== userId) throw new ApiError(403, 'not your playlist');
 
+    if (templateId !== undefined) {
+      const template = await this.deps.templateRepository.findById(templateId);
+      if (!template) throw new ApiError(404, 'template not found');
+      if (template.userId !== userId) throw new ApiError(403, 'not your template');
+    }
+
     for (const destinationId of uniqueIds) {
       const destination = await this.deps.destinationRepository.findById(destinationId);
       if (!destination) throw new ApiError(404, `destination not found: ${destinationId}`);
@@ -61,14 +72,19 @@ export class StreamSessionManager {
     const session = await this.deps.streamSessionRepository.create({
       userId,
       playlistId,
+      templateId: templateId ?? null,
       destinationIds: uniqueIds,
       title: meta?.title ?? null,
       description: meta?.description ?? null,
       privacyStatus: meta?.privacyStatus ?? null,
     });
 
-    const destinations = await this.fanOut(session, (destinationId) => this.deps.streamManager.start(destinationId, playlistId, meta));
-    return { id: session.id, playlistId: session.playlistId, destinations };
+    // Shared by every destination in this session — see SessionOverlayCache's own doc for why
+    // this is safe even when destinations drift onto different tracks.
+    const overlayCache = new SessionOverlayCache();
+    const destinations = await this.fanOut(session, (destinationId) =>
+      this.deps.streamManager.start(destinationId, playlistId, meta, { templateId, overlayCache, sessionId: session.id }));
+    return { id: session.id, playlistId: session.playlistId, templateId: session.templateId, destinations };
   }
 
   async status(userId: string, sessionId: string): Promise<StreamSessionStatus> {
@@ -76,6 +92,7 @@ export class StreamSessionManager {
     return {
       id: session.id,
       playlistId: session.playlistId,
+      templateId: session.templateId,
       destinations: session.destinationIds.map((destinationId) => ({
         destinationId,
         status: this.deps.streamManager.status(destinationId),
@@ -88,6 +105,7 @@ export class StreamSessionManager {
     return sessions.map((session) => ({
       id: session.id,
       playlistId: session.playlistId,
+      templateId: session.templateId,
       destinations: session.destinationIds.map((destinationId) => ({
         destinationId,
         status: this.deps.streamManager.status(destinationId),
@@ -98,31 +116,31 @@ export class StreamSessionManager {
   async pause(userId: string, sessionId: string): Promise<StreamSessionStatus> {
     const session = await this.requireOwnedSession(sessionId, userId);
     const destinations = await this.fanOut(session, (destinationId) => this.deps.streamManager.pause(destinationId));
-    return { id: session.id, playlistId: session.playlistId, destinations };
+    return { id: session.id, playlistId: session.playlistId, templateId: session.templateId, destinations };
   }
 
   async resume(userId: string, sessionId: string): Promise<StreamSessionStatus> {
     const session = await this.requireOwnedSession(sessionId, userId);
     const destinations = await this.fanOut(session, (destinationId) => this.deps.streamManager.resume(destinationId));
-    return { id: session.id, playlistId: session.playlistId, destinations };
+    return { id: session.id, playlistId: session.playlistId, templateId: session.templateId, destinations };
   }
 
   async next(userId: string, sessionId: string): Promise<StreamSessionStatus> {
     const session = await this.requireOwnedSession(sessionId, userId);
     const destinations = await this.fanOut(session, (destinationId) => this.deps.streamManager.next(destinationId));
-    return { id: session.id, playlistId: session.playlistId, destinations };
+    return { id: session.id, playlistId: session.playlistId, templateId: session.templateId, destinations };
   }
 
   async previous(userId: string, sessionId: string): Promise<StreamSessionStatus> {
     const session = await this.requireOwnedSession(sessionId, userId);
     const destinations = await this.fanOut(session, (destinationId) => this.deps.streamManager.previous(destinationId));
-    return { id: session.id, playlistId: session.playlistId, destinations };
+    return { id: session.id, playlistId: session.playlistId, templateId: session.templateId, destinations };
   }
 
   async stop(userId: string, sessionId: string): Promise<StreamSessionStatus> {
     const session = await this.requireOwnedSession(sessionId, userId);
     const destinations = await this.fanOut(session, (destinationId) => this.deps.streamManager.stop(destinationId));
-    return { id: session.id, playlistId: session.playlistId, destinations };
+    return { id: session.id, playlistId: session.playlistId, templateId: session.templateId, destinations };
   }
 
   async deleteById(userId: string, sessionId: string): Promise<void> {

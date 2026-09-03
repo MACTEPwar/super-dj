@@ -24,9 +24,16 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
   const position = { position: 'absolute' as const, left: el.x, top: el.y };
   switch (el.type) {
     case 'cover':
-      // satori throws if an <img> has no src — omit the element rather than guess a fallback
-      // image here; the caller (which already knows about default-cover.png) decides that.
-      if (!scene.coverDataUri) return null;
+      // satori throws if an <img> has no src. The caller normally always resolves a real cover
+      // (the track's own, or default-cover.png) before getting here, so this is a last-resort
+      // guard, not the common path — draw a plain black rect instead of silently omitting the
+      // slot, so a broken cover read doesn't look like a broken template.
+      if (!scene.coverDataUri) {
+        return {
+          type: 'div',
+          props: { style: { ...position, width: el.width, height: el.height, backgroundColor: '#000000' } },
+        };
+      }
       return {
         type: 'img',
         props: {

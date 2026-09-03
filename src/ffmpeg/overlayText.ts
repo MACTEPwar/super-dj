@@ -13,14 +13,6 @@ export function formatDuration(totalSeconds: number): string {
   return `${minutes}:${paddedSeconds}`;
 }
 
-export function escapeDrawtext(text: string): string {
-  return text
-    .replace(/\\/g, '\\\\')
-    .replace(/:/g, '\\:')
-    .replace(/'/g, "\\'")
-    .replace(/%/g, '\\%');
-}
-
 export function buildPlaylistWindowLines(
   tracks: Track[],
   currentIndex: number,

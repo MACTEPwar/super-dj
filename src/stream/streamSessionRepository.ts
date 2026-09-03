@@ -4,6 +4,7 @@ export interface StreamSessionRecord {
   id: string;
   userId: string;
   playlistId: string;
+  templateId: string | null;
   title: string | null;
   description: string | null;
   privacyStatus: string | null;
@@ -15,6 +16,7 @@ type PrismaStreamSession = {
   id: string;
   userId: string;
   playlistId: string;
+  templateId: string | null;
   title: string | null;
   description: string | null;
   privacyStatus: string | null;
@@ -27,6 +29,7 @@ function toRecord(session: PrismaStreamSession): StreamSessionRecord {
     id: session.id,
     userId: session.userId,
     playlistId: session.playlistId,
+    templateId: session.templateId,
     title: session.title,
     description: session.description,
     privacyStatus: session.privacyStatus,
@@ -41,6 +44,7 @@ export class StreamSessionRepository {
   async create(data: {
     userId: string;
     playlistId: string;
+    templateId: string | null;
     destinationIds: string[];
     title: string | null;
     description: string | null;
@@ -50,6 +54,7 @@ export class StreamSessionRepository {
       data: {
         userId: data.userId,
         playlistId: data.playlistId,
+        templateId: data.templateId,
         title: data.title,
         description: data.description,
         privacyStatus: data.privacyStatus,

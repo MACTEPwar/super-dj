@@ -24,11 +24,13 @@ export interface StreamSessionDestinationStatus {
 export interface StreamSessionStatus {
   id: string;
   playlistId: string;
+  templateId?: string | null;
   destinations: StreamSessionDestinationStatus[];
 }
 
 export interface StartStreamSessionOptions {
   playlistId: string;
+  templateId?: string;
   destinationIds: string[];
   title?: string;
   description?: string;

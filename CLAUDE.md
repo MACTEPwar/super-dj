@@ -52,11 +52,11 @@ independent pipeline per destination:
   during the probe (next/previous/pause/stop, or the pusher dying) could feed a stale/superseded
   track. A track's `durationSeconds` is also probed once at upload time and cached on the `Track`
   row, so playlist listings don't need to re-probe.
-- **Overlay.** Each track segment composites background + cover art + drawtext (title, elapsed/
-  total, a playlist window) via `-filter_complex`. This is Stage 1+ of an in-progress rework
-  (see "Overlay templates" below) — the plan is to replace this hand-built drawtext approach
-  with a pre-rendered PNG once the render pipeline is wired into `SegmentFeeder`; not done yet,
-  drawtext is still what actually ships to a live stream today.
+- **Overlay.** Each track segment composites background + a pre-rendered overlay PNG (cover art,
+  title, playlist window — from the selected `StreamTemplate`, or a built-in default layout when
+  none is selected) via ffmpeg's `overlay` filter — see "Overlay templates" below for the full
+  rework this landed as part of. The elapsed/total counter that used to be part of this drawtext
+  is temporarily gone (Stage 1b — a `timer` overlay element — replaces it; not done yet).
 - **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected pusher exit sets
   `error`, from which `start()` recovers (it cleans up leftovers and recreates the FIFO).
 - **Stream keys at rest.** `StreamDestination.streamKeyEncrypted` is AES-256-GCM-encrypted
@@ -116,10 +116,52 @@ lands:
   sample scene data and returns the PNG directly, for the future visual editor's live preview.
   `CustomRtmpProvider`/`YoutubeProvider`/the ffmpeg pipeline do not consume templates yet — this
   stage is renderer + CRUD only.
-- **Stage 1 (not started):** wire `renderScene()`'s output into `SegmentFeeder` in place of the
-  hand-built `drawtext` filter graph in `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping
-  goes away with it) — still one ffmpeg process per segment, architecture otherwise untouched.
-  `StreamSession`/`.../stream/start` gain a `templateId` the user picks alongside the playlist.
+- **Stage 1a (done):** `renderScene()`'s output replaces the hand-built `drawtext` filter graph in
+  `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping went away with it — `formatDuration`/
+  `buildPlaylistWindowLines` are all that's left there). Still one ffmpeg process per segment,
+  architecture otherwise untouched. Notable decisions from this stage, since they're easy to
+  second-guess without the context:
+  - **`templateId` is optional, not required**, on both `.../stream/start` and
+    `POST /stream-sessions` — deliberately, since no visual editor exists yet (Stage 3) and a
+    template can currently only be authored via a direct API call. Omitting it uses
+    `DEFAULT_TEMPLATE_ELEMENTS` (`src/templates/templateTypes.ts`), a built-in layout that
+    approximates the old drawtext positions, so a user who never configures a template doesn't
+    lose cover/title/playlist entirely.
+  - **Rendering runs in a `piscina` worker-thread pool** (`src/render/renderWorkerPool.ts` +
+    `renderWorker.ts`), not inline — Resvg's SVG→PNG rasterization is synchronous native CPU
+    work, and this pipeline re-renders on the order of once per track switch *per active stream*,
+    multi-tenant; running it on the main thread would stall every other stream's ffmpeg feeding
+    and every other in-flight HTTP request while it runs. `renderTemplatePng()`
+    (`src/render/renderOverlay.ts`) is the one shared entry point both `/templates/{id}/preview`
+    and the live pipeline call — but each owns a **different failure policy**: preview lets a
+    render error propagate as a real 500 (someone testing a template needs to see it broke);
+    `StreamManager.buildOverlay` catches it and falls back to `BLANK_OVERLAY_PNG`
+    (`src/render/blankOverlay.ts` — a hand-built-via-`zlib` transparent 1×1 PNG, deliberately
+    *not* generated through Satori/resvg, so the fallback still works even if that pipeline
+    itself is what's broken) — keeping the RTMP connection up matters more than one segment's
+    picture.
+  - **`SegmentFeeder` writes the rendered PNG to a fixed per-destination path** and reuses that
+    same file, unmodified, for a pause segment (`feedPause()` never re-renders — pausing only
+    changes the audio, never the overlay). If nothing has been rendered yet when a pause segment
+    is built (shouldn't happen — `start()` always feeds a track first — but defensive), it writes
+    `BLANK_OVERLAY_PNG` there first rather than pointing ffmpeg's `-loop 1` input at a missing
+    file. The file is cleaned up in `close()` (full teardown), not on every segment switch.
+  - **`SessionOverlayCache`** (`src/stream/sessionOverlayCache.ts`) lets destinations in the same
+    `StreamSession` that are showing the identical `(track, template)` share one render instead of
+    each paying for their own — keyed so a destination that's drifted onto a different track
+    (the session fan-out is best-effort per destination, not atomic) always renders its own,
+    correct picture rather than inheriting another destination's. Only successful renders are
+    cached, and concurrent callers for the same not-yet-resolved key share the in-flight promise.
+  - **`StreamSession.templateId`** is a nullable FK, persisted like `playlistId` (migration
+    `add_stream_session_template_id`), so a session remembers its template choice across restarts.
+- **Stage 1b (not started):** a `timer` overlay element — position/font/color configurable like
+  `title`/`playlist` — restoring the elapsed/total counter Stage 1a dropped. Unlike the other
+  element types it won't be baked into the PNG (it needs to tick every second, and re-rendering
+  through Satori/resvg once a second per stream is wasteful) — it's drawn natively via a small
+  `drawtext` layered on top of the PNG instead: a live `%{pts\:hms}`-driven expression for a
+  playing track, and a static (non-ticking) string for a pause segment computed from a per-track
+  elapsed offset cached in `StreamController` (reusing the same `elapsedSessionSeconds()`-based
+  bookkeeping `-output_ts_offset` already needs — not a new subsystem).
 - **Stage 2 (not started, riskiest):** move each destination's whole session to a single
   persistent ffmpeg process (concat-demuxer-with-rewritten-playlist, or filter-graph input
   switching via zmq/sendcmd — not yet decided, wants a spike before committing) instead of one
@@ -172,16 +214,25 @@ src/
                             streamRoutes.ts (mounted at /destinations/:destinationId/stream),
                             streamSessionRepository.ts (Prisma), streamSessionManager.ts
                             (fan-out orchestration over StreamManager), streamSessionRoutes.ts
-                            (mounted at /stream-sessions), types.ts
+                            (mounted at /stream-sessions), sessionOverlayCache.ts (shared-render
+                            cache for same-session destinations), types.ts
   playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
   ffmpeg/                   segmentArgs.ts / segmentFeeder.ts (producer), rtmpPusherArgs.ts /
                             rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
-                            overlayText.ts (drawtext escaping), types.ts (Spawner, ChildProcessLike)
+                            overlayText.ts (formatDuration, playlist-window text),
+                            types.ts (Spawner, ChildProcessLike)
   templates/                templateRepository.ts (Prisma), templateRoutes.ts (mounted at
                             /templates, incl. POST /:id/preview), templateTypes.ts
-                            (TemplateElement union + isValidTemplateElement(s))
+                            (TemplateElement union + isValidTemplateElement(s) +
+                            DEFAULT_TEMPLATE_ELEMENTS)
   render/                   sceneRenderer.ts (template + scene data -> PNG via satori + resvg),
-                            imageDataUri.ts (local image file -> data: URI, for satori's <img>)
+                            imageDataUri.ts (local image file -> data: URI, for satori's <img>),
+                            fontCache.ts (shared lazy-loaded font bytes), renderWorker.ts /
+                            renderWorkerPool.ts (piscina pool renderScene runs in, off the main
+                            thread), renderOverlay.ts (renderTemplatePng() — the one shared,
+                            happy-path-only entry point both /templates/{id}/preview and the live
+                            pipeline call), blankOverlay.ts (hand-built transparent-PNG fallback,
+                            independent of satori/resvg)
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
                             StreamDestination, OAuthConnection, OAuthState, StreamSession,
                             StreamSessionDestination, StreamTemplate) + migrations/
@@ -248,18 +299,22 @@ and creates the destination) — the OAuth2 connect flow for a provider-backed d
 `POST /destinations/{id}/stream/{start,stop,pause,resume,next,previous,play}`,
 `GET /destinations/{id}/stream/status`, `GET /destinations/{id}/stream/events` — all scoped to the
 destination's owner.
-`POST .../stream/start` also accepts optional `title`/`description`/`privacyStatus`/
+`POST .../stream/start` also accepts optional `templateId`/`title`/`description`/`privacyStatus`/
 `latencyPreference` fields, used by providers that create a live broadcast (e.g. YouTube) —
-ignored by `custom` destinations; it 400s on a missing/invalid `body.playlistId` as well as a
-non-string `title`/`description`, a `privacyStatus` outside `'public'`/`'unlisted'`/`'private'`,
-or a `latencyPreference` outside `'normal'`/`'low'`/`'ultraLow'`. `latencyPreference` maps
-straight to YouTube's own broadcast `contentDetails.latencyPreference` and defaults to `'normal'`
-when omitted — YouTube's own default, and its highest end-to-end latency (its ingest→transcode→
-CDN→player pipeline typically adds ~20-40s regardless of how fast this app reacts to a command);
-`'low'`/`'ultraLow'` trade some playback-buffering resilience for viewers on slow connections for
-a much snappier feel.
+ignored by `custom` destinations; it 400s on a missing/invalid `body.playlistId`, an empty-string
+`body.templateId`, a non-string `title`/`description`, a `privacyStatus` outside
+`'public'`/`'unlisted'`/`'private'`, or a `latencyPreference` outside `'normal'`/`'low'`/
+`'ultraLow'`. `templateId` is optional — a stream can start with no overlay template selected
+(falls back to a built-in default layout; see the "Overlay templates" Stage 1a notes above for
+why it isn't required) — but 404s/403s if given and not found/not owned by the caller.
+`latencyPreference` maps straight to YouTube's own broadcast `contentDetails.latencyPreference`
+and defaults to `'normal'` when omitted — YouTube's own default, and its highest end-to-end
+latency (its ingest→transcode→CDN→player pipeline typically adds ~20-40s regardless of how fast
+this app reacts to a command); `'low'`/`'ultraLow'` trade some playback-buffering resilience for
+viewers on slow connections for a much snappier feel.
 
-`POST /stream-sessions` (`playlistId`, `destinationIds[]`, plus optional `title`/`description`/
+`POST /stream-sessions` (`playlistId`, `destinationIds[]`, plus optional `templateId` — shared by
+every destination in the session and persisted on the session row — and `title`/`description`/
 `privacyStatus`/`latencyPreference` — same semantics as `.../stream/start`) creates a session and starts every listed
 destination independently; a per-destination `error` field on the response means only that one
 destination failed, not the whole call. `GET /stream-sessions`,
@@ -270,11 +325,13 @@ destination, then deletes the session row) — all scoped to the session's owner
 
 `POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
 `PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout
-(positioned `cover`/`title`/`playlist` elements); not yet consumed by the actual stream pipeline
-(Stage 0 of the overlay rework — see Architecture). `POST /templates/{id}/preview` (optional
-`elements[]` to preview an unsaved draft instead of the saved template, optional `title`/
-`playlistLines`/`trackId` sample scene data) renders and returns the PNG directly
-(`image/png`), not persisted.
+(positioned `cover`/`title`/`playlist` elements), selected by id when starting a stream (see
+above) — Stage 1a of the overlay rework wired this into the actual ffmpeg pipeline; there's still
+no visual editor to create one with (Stage 3), only this CRUD API. `POST /templates/{id}/preview`
+(optional `elements[]` to preview an unsaved draft instead of the saved template, optional
+`title`/`playlistLines`/`trackId` sample scene data) renders and returns the PNG directly
+(`image/png`), not persisted — a render failure here is a real HTTP error (500), unlike the live
+stream pipeline which falls back to a blank overlay instead of failing the request.
 
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
@@ -330,7 +387,9 @@ registrable domain.
 
 ## Known follow-ups (deliberately deferred)
 
-`PORT` parsing is unvalidated; overlay elapsed time drifts from true playout position;
+`PORT` parsing is unvalidated; the overlay's elapsed/total counter is missing entirely until
+Stage 1b (the `timer` element) lands — Stage 1a deliberately dropped the old drawtext-based one
+without a replacement, see "Overlay templates" above;
 `stopCurrent()` SIGTERMs mid-TS-packet; the Docker image runs as root; `assets/` holds 1×1
 placeholder PNGs; uploaded files are never cleaned up on track deletion (`DELETE /tracks/{id}`
 removes the DB row but not `{UPLOADS_DIR}/{userId}/{trackId}/`); no per-user storage quota. Real-

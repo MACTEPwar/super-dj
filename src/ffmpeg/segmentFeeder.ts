@@ -2,24 +2,30 @@ import * as fs from 'fs';
 import { Track } from '../playlist/types';
 import { Spawner, ChildProcessLike, VideoParams } from './types';
 import { buildTrackSegmentArgs, buildPauseSegmentArgs, NowPlayingOverlay } from './segmentArgs';
+import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 
 export interface SegmentFeederOptions extends VideoParams {
   spawner: Spawner;
   fifoPath: string;
-  defaultCoverPath: string;
   backgroundPath: string;
-  fontFile: string;
+  // Fixed on-disk path this feeder writes the current overlay PNG to before every track
+  // segment, and reuses as-is for a pause segment — see feedPause().
+  overlayImagePath: string;
   createWriteStream?: (path: string) => NodeJS.WritableStream;
+  writeFileSync?: (path: string, data: Buffer) => void;
 }
 
 export class SegmentFeeder {
   private readonly fifoWriteStream: NodeJS.WritableStream;
+  private readonly writeFileSync: (path: string, data: Buffer) => void;
   private activeProcess: ChildProcessLike | null = null;
   private activeStdout: NodeJS.ReadableStream | null = null;
+  private hasWrittenOverlay = false;
 
   constructor(private readonly options: SegmentFeederOptions) {
     const createWriteStream = options.createWriteStream ?? ((p: string) => fs.createWriteStream(p));
     this.fifoWriteStream = createWriteStream(options.fifoPath);
+    this.writeFileSync = options.writeFileSync ?? fs.writeFileSync;
     // Writes fail with EPIPE once the FIFO's reader (the pusher ffmpeg) has died or
     // exited — e.g. an RTMP connection drop — which can race a producer segment still
     // writing to it. An 'error' event with no listener is an uncaught exception in
@@ -33,15 +39,15 @@ export class SegmentFeeder {
   }
 
   feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0, outputTsOffsetSeconds = 0): ChildProcessLike {
+    this.writeFileSync(this.options.overlayImagePath, overlay.overlayPng);
+    this.hasWrittenOverlay = true;
     const args = buildTrackSegmentArgs({
       audioPath: track.audioPath,
-      coverPath: track.coverPath ?? this.options.defaultCoverPath,
       backgroundPath: this.options.backgroundPath,
-      fontFile: this.options.fontFile,
+      overlayPngPath: this.options.overlayImagePath,
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
-      overlay,
       startOffsetSeconds,
       outputTsOffsetSeconds,
     });
@@ -49,8 +55,18 @@ export class SegmentFeeder {
   }
 
   feedPause(outputTsOffsetSeconds = 0): ChildProcessLike {
+    // Reuses whichever picture is already on disk — the last playing track's — so pausing
+    // only ever changes the audio, never the overlay. If a track segment somehow never got
+    // to write one yet (defensive: shouldn't happen, start() always feeds a track before a
+    // pause is reachable), fall back to the shared blank PNG so ffmpeg's -loop 1 input never
+    // points at a file that doesn't exist.
+    if (!this.hasWrittenOverlay) {
+      this.writeFileSync(this.options.overlayImagePath, BLANK_OVERLAY_PNG);
+      this.hasWrittenOverlay = true;
+    }
     const args = buildPauseSegmentArgs({
       backgroundPath: this.options.backgroundPath,
+      overlayPngPath: this.options.overlayImagePath,
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
@@ -79,9 +95,14 @@ export class SegmentFeeder {
     }
   }
 
-  /** Closes the FIFO write stream. Call once the feeder is being discarded. */
+  /** Closes the FIFO write stream and removes the overlay file. Call once the feeder is being discarded. */
   close(): void {
     this.fifoWriteStream.end();
+    try {
+      fs.unlinkSync(this.options.overlayImagePath);
+    } catch {
+      // Never written, or already gone — either way there's nothing left to clean up.
+    }
   }
 
   private spawnAndPipe(args: string[]): ChildProcessLike {

@@ -1,4 +1,4 @@
-import { formatDuration, escapeDrawtext, buildPlaylistWindowLines } from '../../src/ffmpeg/overlayText';
+import { formatDuration, buildPlaylistWindowLines } from '../../src/ffmpeg/overlayText';
 import { Track } from '../../src/playlist/types';
 
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
@@ -15,12 +15,6 @@ describe('formatDuration', () => {
 
   it('clamps negative input to zero', () => {
     expect(formatDuration(-10)).toBe('0:00');
-  });
-});
-
-describe('escapeDrawtext', () => {
-  it('escapes backslash, colon, quote and percent for ffmpeg drawtext syntax', () => {
-    expect(escapeDrawtext(`a:b'c%d\\e`)).toBe(`a\\:b\\'c\\%d\\\\e`);
   });
 });
 

@@ -2,6 +2,7 @@ import { PassThrough, Writable } from 'stream';
 import { SegmentFeeder } from '../../src/ffmpeg/segmentFeeder';
 import { Spawner, ChildProcessLike } from '../../src/ffmpeg/types';
 import { Track } from '../../src/playlist/types';
+import { BLANK_OVERLAY_PNG } from '../../src/render/blankOverlay';
 
 function fakeChild(): ChildProcessLike & { stdout: PassThrough } {
   const stdout = new PassThrough();
@@ -9,20 +10,22 @@ function fakeChild(): ChildProcessLike & { stdout: PassThrough } {
 }
 
 const track: Track = { name: 'a', audioPath: '/music/a.mp3', coverPath: null };
-const overlay = { title: 'a', playlistLines: ['▶ a'], durationSeconds: 10 };
+const overlay = { durationSeconds: 10, overlayPng: Buffer.from('fake-png-bytes') };
 
-function buildFeeder(overrides: Partial<{ spawner: Spawner; createWriteStream: () => NodeJS.WritableStream }> = {}) {
-  return new SegmentFeeder({
+function buildFeeder(overrides: Partial<{ spawner: Spawner; createWriteStream: () => NodeJS.WritableStream; writeFileSync: jest.Mock }> = {}) {
+  const writeFileSync = overrides.writeFileSync ?? jest.fn();
+  const feeder = new SegmentFeeder({
     spawner: overrides.spawner ?? (jest.fn().mockReturnValue(fakeChild()) as Spawner),
     fifoPath: '/tmp/fifo',
-    defaultCoverPath: '/assets/default.png',
     backgroundPath: '/assets/background.png',
-    fontFile: '/fonts/DejaVuSans-Bold.ttf',
+    overlayImagePath: '/tmp/overlay-dest-1.png',
     width: 1280,
     height: 720,
     fps: 30,
     createWriteStream: overrides.createWriteStream ?? (() => new PassThrough()),
+    writeFileSync,
   });
+  return { feeder, writeFileSync };
 }
 
 describe('SegmentFeeder', () => {
@@ -31,7 +34,7 @@ describe('SegmentFeeder', () => {
     const spawner: Spawner = jest.fn().mockReturnValue(child);
     const chunks: Buffer[] = [];
     const writeStream = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
-    const feeder = buildFeeder({ spawner, createWriteStream: () => writeStream });
+    const { feeder } = buildFeeder({ spawner, createWriteStream: () => writeStream });
 
     feeder.feedTrack(track, overlay);
     child.stdout.write('segment-bytes');
@@ -41,37 +44,50 @@ describe('SegmentFeeder', () => {
     expect(Buffer.concat(chunks).toString()).toBe('segment-bytes');
   });
 
-  it('feedTrack falls back to the default cover when the track has none', () => {
+  it('feedTrack writes the rendered overlay PNG to the fixed overlay path before spawning ffmpeg', () => {
     const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
-    const feeder = buildFeeder({ spawner });
+    const { feeder, writeFileSync } = buildFeeder({ spawner });
 
     feeder.feedTrack(track, overlay);
 
-    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/assets/default.png']));
+    expect(writeFileSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png', overlay.overlayPng);
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-loop', '1', '-i', '/tmp/overlay-dest-1.png']));
   });
 
   it('feedTrack passes the start offset through for a resumed track', () => {
     const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
-    const feeder = buildFeeder({ spawner });
+    const { feeder } = buildFeeder({ spawner });
 
     feeder.feedTrack(track, overlay, 42);
 
     expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-ss', '42']));
   });
 
-  it('feedPause spawns the background+silence args', () => {
+  it('feedPause reuses the overlay PNG already written by the last feedTrack, without rewriting it', () => {
     const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
-    const feeder = buildFeeder({ spawner });
+    const { feeder, writeFileSync } = buildFeeder({ spawner });
+
+    feeder.feedTrack(track, overlay);
+    writeFileSync.mockClear();
+    feeder.feedPause();
+
+    expect(writeFileSync).not.toHaveBeenCalled();
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/assets/background.png', '-loop', '1', '-i', '/tmp/overlay-dest-1.png', '-f', 'lavfi']));
+  });
+
+  it('feedPause writes the shared blank overlay when no track has ever been fed yet, instead of pointing ffmpeg at a missing file', () => {
+    const spawner: Spawner = jest.fn().mockReturnValue(fakeChild());
+    const { feeder, writeFileSync } = buildFeeder({ spawner });
 
     feeder.feedPause();
 
-    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/assets/background.png', '-f', 'lavfi']));
+    expect(writeFileSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png', BLANK_OVERLAY_PNG);
   });
 
   it('stopCurrent kills the active process', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const feeder = buildFeeder({ spawner });
+    const { feeder } = buildFeeder({ spawner });
 
     feeder.feedTrack(track, overlay);
     feeder.stopCurrent();
@@ -90,7 +106,7 @@ describe('SegmentFeeder', () => {
     const child1 = fakeChild();
     const child2 = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValueOnce(child1).mockReturnValueOnce(child2);
-    const feeder = buildFeeder({ spawner, createWriteStream: () => writeStream });
+    const { feeder } = buildFeeder({ spawner, createWriteStream: () => writeStream });
 
     feeder.feedTrack(track, overlay);
     feeder.feedTrack(track, overlay);
@@ -105,7 +121,7 @@ describe('SegmentFeeder', () => {
   it('close() ends the fifo write stream', () => {
     const writeStream = new PassThrough();
     const endSpy = jest.spyOn(writeStream, 'end');
-    const feeder = buildFeeder({ createWriteStream: () => writeStream });
+    const { feeder } = buildFeeder({ createWriteStream: () => writeStream });
 
     feeder.close();
 

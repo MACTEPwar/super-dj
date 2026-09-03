@@ -1,38 +1,31 @@
 import { VideoParams } from './types';
-import { escapeDrawtext, formatDuration } from './overlayText';
 
 export interface NowPlayingOverlay {
-  title: string;
-  playlistLines: string[];
   durationSeconds: number;
+  // The rendered picture (cover/title/playlist, per the selected template) for this segment —
+  // SegmentFeeder writes it to a fixed on-disk path and composites it via ffmpeg's own `overlay`
+  // filter, replacing the hand-built drawtext filter graph this used to be.
+  overlayPng: Buffer;
+}
+
+function overlayFilterComplex(width: number, height: number): string {
+  return [
+    `[0:v]scale=${width}:${height}[bg]`,
+    `[1:v]scale=${width}:${height}[ov]`,
+    `[bg][ov]overlay=0:0[outv]`,
+  ].join(';');
 }
 
 export function buildTrackSegmentArgs(params: VideoParams & {
   audioPath: string;
-  coverPath: string;
   backgroundPath: string;
-  fontFile: string;
-  overlay: NowPlayingOverlay;
+  overlayPngPath: string;
   startOffsetSeconds?: number;
   outputTsOffsetSeconds?: number;
 }): string[] {
-  const { width, height, fps, audioPath, coverPath, backgroundPath, fontFile, overlay } = params;
-  const coverSize = Math.round(height * 0.6);
-  const panelX = coverSize + 80;
-  const title = escapeDrawtext(overlay.title);
-  const duration = escapeDrawtext(formatDuration(overlay.durationSeconds));
-  const playlist = escapeDrawtext(overlay.playlistLines.join('\n'));
+  const { width, height, fps, audioPath, backgroundPath, overlayPngPath } = params;
 
-  const filterComplex = [
-    `[1:v]scale=${coverSize}:${coverSize}[cover]`,
-    `[0:v]scale=${width}:${height}[bg]`,
-    `[bg][cover]overlay=40:40[bg1]`,
-    `[bg1]drawtext=fontfile=${fontFile}:text='${title}':x=${panelX}:y=40:fontsize=42:fontcolor=white[bg2]`,
-    `[bg2]drawtext=fontfile=${fontFile}:text='%{pts\\:hms} / ${duration}':x=${panelX}:y=100:fontsize=28:fontcolor=white[bg3]`,
-    `[bg3]drawtext=fontfile=${fontFile}:text='${playlist}':x=${panelX}:y=160:fontsize=22:fontcolor=white:line_spacing=8[outv]`,
-  ].join(';');
-
-  const args = ['-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', coverPath];
+  const args = ['-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', overlayPngPath];
 
   if (params.startOffsetSeconds) {
     args.push('-ss', String(params.startOffsetSeconds));
@@ -40,7 +33,7 @@ export function buildTrackSegmentArgs(params: VideoParams & {
 
   args.push(
     '-i', audioPath,
-    '-filter_complex', filterComplex,
+    '-filter_complex', overlayFilterComplex(width, height),
     '-map', '[outv]',
     '-map', '2:a',
     '-c:v', 'libx264',
@@ -69,21 +62,33 @@ export function buildTrackSegmentArgs(params: VideoParams & {
   return args;
 }
 
-export function buildPauseSegmentArgs(params: VideoParams & { backgroundPath: string; outputTsOffsetSeconds?: number }): string[] {
+// Always takes an overlayPngPath, same as buildTrackSegmentArgs — SegmentFeeder resolves it to
+// whichever picture is already on disk (the last playing track's, or the blank fallback if
+// nothing has been rendered yet) before calling this, so pausing only ever changes the audio
+// (silence instead of the track), never the overlay, and this function never needs to know
+// whether that path holds a "real" render or the fallback.
+export function buildPauseSegmentArgs(params: VideoParams & {
+  backgroundPath: string;
+  overlayPngPath: string;
+  outputTsOffsetSeconds?: number;
+}): string[] {
+  const { width, height, fps, backgroundPath, overlayPngPath } = params;
+
   const args = [
-    '-loop', '1',
-    '-i', params.backgroundPath,
-    '-f', 'lavfi',
-    '-i', 'anullsrc=r=44100:cl=stereo',
+    '-loop', '1', '-i', backgroundPath,
+    '-loop', '1', '-i', overlayPngPath,
+    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+    '-filter_complex', overlayFilterComplex(width, height),
+    '-map', '[outv]',
+    '-map', '2:a',
     '-c:v', 'libx264',
     '-tune', 'stillimage',
     '-c:a', 'aac',
     '-ar', '44100',
     '-ac', '2',
     '-pix_fmt', 'yuv420p',
-    '-r', String(params.fps),
-    '-g', String(params.fps * 2),
-    '-vf', `scale=${params.width}:${params.height}`,
+    '-r', String(fps),
+    '-g', String(fps * 2),
   ];
   if (params.outputTsOffsetSeconds) {
     args.push('-output_ts_offset', String(params.outputTsOffsetSeconds));

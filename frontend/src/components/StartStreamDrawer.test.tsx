@@ -6,11 +6,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { StartStreamDrawer } from './StartStreamDrawer';
 import { playlistsApi } from '../api/playlists';
 import { destinationsApi } from '../api/destinations';
+import { templatesApi } from '../api/templates';
 import { streamSessionsApi } from '../api/streamSessions';
 import { ApiError } from '../api/client';
 
 vi.mock('../api/playlists');
 vi.mock('../api/destinations');
+vi.mock('../api/templates');
 vi.mock('../api/streamSessions');
 const navigateMock = vi.fn();
 vi.mock('react-router-dom', async (importOriginal) => ({
@@ -39,6 +41,7 @@ describe('StartStreamDrawer', () => {
       { id: 'd1', name: 'My YouTube', rtmpUrl: null, provider: 'youtube' },
       { id: 'd2', name: 'My Twitch', rtmpUrl: 'rtmp://x', provider: 'custom' },
     ]);
+    vi.mocked(templatesApi.list).mockResolvedValue([]);
   });
 
   it('disables Start until a playlist and at least one destination are selected', async () => {
@@ -58,9 +61,26 @@ describe('StartStreamDrawer', () => {
     await userEvent.click(screen.getByRole('button', { name: /Start stream/ }));
 
     await waitFor(() => expect(streamSessionsApi.create).toHaveBeenCalledWith({
-      playlistId: 'p1', destinationIds: ['d2'], title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined,
+      playlistId: 'p1', templateId: undefined, destinationIds: ['d2'], title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined,
     }));
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith('/streams/s1'));
+  });
+
+  it('passes the selected templateId through when a template is chosen', async () => {
+    vi.mocked(templatesApi.list).mockResolvedValue([{ id: 'tpl-1', name: 'My Theme' }]);
+    vi.mocked(streamSessionsApi.create).mockResolvedValue({ id: 's1', playlistId: 'p1', destinations: [] });
+    render();
+    await screen.findByText('Friday Mix');
+    await screen.findByText('My Theme');
+
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.selectOptions(screen.getByLabelText('Overlay template'), 'tpl-1');
+    await userEvent.click(screen.getByLabelText('My Twitch (custom)'));
+    await userEvent.click(screen.getByRole('button', { name: /Start stream/ }));
+
+    await waitFor(() => expect(streamSessionsApi.create).toHaveBeenCalledWith(
+      expect.objectContaining({ templateId: 'tpl-1' }),
+    ));
   });
 
   it('shows YouTube broadcast fields (including latency) only when a YouTube destination is selected', async () => {

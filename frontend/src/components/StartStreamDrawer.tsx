@@ -4,6 +4,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { playlistsApi } from '../api/playlists';
 import { destinationsApi } from '../api/destinations';
+import { templatesApi } from '../api/templates';
 import { streamSessionsApi } from '../api/streamSessions';
 import { ApiError } from '../api/client';
 import { Drawer } from './Drawer';
@@ -18,8 +19,10 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
   const { t } = useTranslation();
   const playlistsQuery = useQuery({ queryKey: ['playlists'], queryFn: playlistsApi.list });
   const destinationsQuery = useQuery({ queryKey: ['destinations'], queryFn: destinationsApi.list });
+  const templatesQuery = useQuery({ queryKey: ['templates'], queryFn: templatesApi.list });
 
   const [playlistId, setPlaylistId] = useState('');
+  const [templateId, setTemplateId] = useState('');
   const [destinationIds, setDestinationIds] = useState<string[]>([]);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -33,6 +36,7 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
   const createMutation = useMutation({
     mutationFn: () => streamSessionsApi.create({
       playlistId,
+      templateId: templateId || undefined,
       destinationIds,
       title: title || undefined,
       description: description || undefined,
@@ -72,6 +76,20 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
             <option value="">{t('startStreamDrawer.selectPlaylist')}</option>
             {playlistsQuery.data?.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
+        </div>
+
+        <div>
+          <label htmlFor="stream-template" className="block text-sm font-medium">{t('startStreamDrawer.templateLabel')}</label>
+          <select
+            id="stream-template"
+            className="mt-1 w-full rounded border px-3 py-2"
+            value={templateId}
+            onChange={(e) => setTemplateId(e.target.value)}
+          >
+            <option value="">{t('startStreamDrawer.noTemplate')}</option>
+            {templatesQuery.data?.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}
+          </select>
+          <p className="mt-1 text-xs text-gray-500">{t('startStreamDrawer.templateHelp')}</p>
         </div>
 
         <div>

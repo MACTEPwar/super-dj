@@ -104,6 +104,12 @@ model StreamSession {
   user          User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
   playlistId    String
   playlist      Playlist                   @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  // Optional — a session can start with no template selected (falls back to a built-in default
+  // layout, see StreamManager.start()). SetNull rather than Cascade: deleting a template that's
+  // referenced by a past/running session should not take the session down with it, just make it
+  // fall back to that same default the next time it (re)starts.
+  templateId    String?
+  template      StreamTemplate?            @relation(fields: [templateId], references: [id], onDelete: SetNull)
   title         String?
   description   String?
   privacyStatus String?
@@ -128,11 +134,12 @@ model StreamSessionDestination {
 // deliberately since the set of element types/style fields is expected to grow as the visual
 // editor (Stage 3 of the overlay rework) adds more of them — see CLAUDE.md.
 model StreamTemplate {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name      String
-  elements  Json
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String          @id @default(uuid())
+  userId         String
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  elements       Json
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  streamSessions StreamSession[]
 }
