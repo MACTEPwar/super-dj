@@ -3,26 +3,14 @@ import { ApiError } from '../../src/errors';
 import { Track } from '../../src/playlist/types';
 
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
-const overlayFor = (t: Track) => ({ title: t.name, playlistLines: [`▶ ${t.name}`], durationSeconds: 100 });
+const overlayFor = (t: Track) => ({ title: t.name, playlistLines: [`▶ ${t.name}`], durationSeconds: 100, overlayPng: Buffer.from('png'), timer: null });
 
-type FakeChild = {
-  pid: number;
-  stdout: null;
-  stderr: null;
-  kill: jest.Mock;
-  once: jest.Mock;
-  // Named for the 'close' event StreamController actually listens on for auto-advance
-  // (not 'exit' — see streamController.ts for why that distinction matters).
-  emitClose: (code?: number | null) => void;
-};
+type FakeChild = { pid: number; stdout: null; stderr: null; kill: jest.Mock; once: jest.Mock; emitClose: (code?: number | null) => void };
 
 function fakeChild(): FakeChild {
   let closeListener: ((code: number | null) => void) | null = null;
   return {
-    pid: 1,
-    stdout: null,
-    stderr: null,
-    kill: jest.fn(),
+    pid: 1, stdout: null, stderr: null, kill: jest.fn(),
     once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
       if (event === 'close') closeListener = listener as (code: number | null) => void;
     }),
@@ -44,42 +32,44 @@ function buildDeps() {
     peekNext: jest.fn().mockReturnValue(tracks[1]),
   };
   const children: FakeChild[] = [];
-  const feeder = {
-    feedTrack: jest.fn(() => {
+  const audioRelay = {
+    attach: jest.fn(),
+    switchTrack: jest.fn(() => {
       const child = fakeChild();
       children.push(child);
       return child;
     }),
-    feedPause: jest.fn(() => fakeChild()),
+    switchToSilence: jest.fn(() => fakeChild()),
     stopCurrent: jest.fn(),
     close: jest.fn(),
   };
-  const pusher = { start: jest.fn(), stop: jest.fn() };
+  const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
+  const encoderChild = { videoPipe: {}, audioPipe: {} };
+  const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const deps: any = {
-    library, queue, fifoPath: '/tmp/fifo',
-    createFifo: jest.fn(), removeFifo: jest.fn(),
-    createSegmentFeeder: jest.fn().mockReturnValue(feeder),
-    createRtmpPusher: jest.fn().mockReturnValue(pusher),
+    library, queue,
+    createCanvasFeeder: jest.fn().mockReturnValue(canvasFeeder),
+    createAudioRelay: jest.fn().mockReturnValue(audioRelay),
+    createPersistentEncoder: jest.fn().mockReturnValue(encoder),
     buildOverlay: jest.fn((t: Track) => Promise.resolve(overlayFor(t))),
   };
-  return { deps, library, queue, feeder, pusher, children };
+  return { deps, library, queue, canvasFeeder, audioRelay, encoder, encoderChild, children };
 }
 
 describe('StreamController', () => {
-  it('start() creates the fifo, starts the pusher and feeds the current track with no offset', async () => {
-    const { deps, feeder, pusher } = buildDeps();
+  it('start() creates the persistent encoder, attaches the canvas feeder and audio relay to its pipes, and feeds the current track', async () => {
+    const { deps, encoder, encoderChild, canvasFeeder, audioRelay } = buildDeps();
     const controller = new StreamController(deps);
 
     await controller.start();
 
-    expect(deps.createFifo).toHaveBeenCalledWith('/tmp/fifo');
-    expect(pusher.start).toHaveBeenCalled();
-    expect(feeder.feedTrack).toHaveBeenCalledWith(
-      { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
-      overlayFor(track('a')),
-      0,
-      expect.any(Number),
-    );
+    expect(encoder.start).toHaveBeenCalled();
+    expect(canvasFeeder.attach).toHaveBeenCalledWith(encoderChild.videoPipe);
+    expect(audioRelay.attach).toHaveBeenCalledWith(encoderChild.audioPipe);
+    expect(audioRelay.switchTrack).toHaveBeenCalledWith('/music/a.mp3', 0);
+    // overlayFor()'s tracks have no timer element, so timerText() is null, not a formatted
+    // string — see the timer-specific tests further down for the non-null case.
+    expect(canvasFeeder.render).toHaveBeenCalledWith(overlayFor(track('a')), null);
     expect(controller.status().state).toBe('streaming');
   });
 
@@ -98,121 +88,111 @@ describe('StreamController', () => {
   });
 
   it('start() flips state to streaming synchronously, before awaiting buildOverlay (regression: must not block the event loop on ffprobe)', async () => {
-    const { deps, feeder } = buildDeps();
+    const { deps, audioRelay } = buildDeps();
     let resolveOverlay!: (overlay: unknown) => void;
     deps.buildOverlay = jest.fn(() => new Promise((resolve) => { resolveOverlay = resolve; }));
     const controller = new StreamController(deps);
 
     const startPromise = controller.start();
 
-    // Other synchronous work (e.g. a concurrent GET /stream/status handler)
-    // must be able to run immediately, without waiting for the duration probe.
     expect(controller.status().state).toBe('streaming');
-    expect(feeder.feedTrack).not.toHaveBeenCalled();
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
 
     resolveOverlay(overlayFor(track('a')));
     await startPromise;
 
-    expect(feeder.feedTrack).toHaveBeenCalled();
+    expect(audioRelay.switchTrack).toHaveBeenCalled();
   });
 
-  it('does not feed a track if the pusher dies while the overlay is still being probed', async () => {
-    const { deps, feeder, pusher } = buildDeps();
+  it('does not feed a track if the encoder dies while the overlay is still being probed', async () => {
+    const { deps, audioRelay, encoder } = buildDeps();
     let resolveOverlay!: (overlay: unknown) => void;
     deps.buildOverlay = jest.fn(() => new Promise((resolve) => { resolveOverlay = resolve; }));
     const controller = new StreamController(deps);
 
     const startPromise = controller.start();
-    const onExit = pusher.start.mock.calls[0][0] as (code: number | null) => void;
-    onExit(1); // pusher crashes while we're still awaiting the duration probe
+    const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+    onExit(1);
 
     resolveOverlay(overlayFor(track('a')));
     await startPromise;
 
-    expect(feeder.feedTrack).not.toHaveBeenCalled();
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
     expect(controller.status().state).toBe('error');
   });
 
-  it('invokes deps.onError when the pusher exits unexpectedly', async () => {
-    const { deps, pusher } = buildDeps();
+  it('invokes deps.onError when the encoder exits unexpectedly', async () => {
+    const { deps, encoder } = buildDeps();
     const onError = jest.fn();
     deps.onError = onError;
     const controller = new StreamController(deps);
     await controller.start();
 
-    const onExit = pusher.start.mock.calls[0][0] as (code: number | null) => void;
+    const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
     onExit(1);
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(controller.status().state).toBe('error');
   });
 
-  it('pause() then resume() seeks feedTrack to the elapsed position', async () => {
-    const { deps, feeder } = buildDeps();
+  it('pause() switches the audio relay to silence and renders a frozen timer text, then resume() seeks the audio relay back', async () => {
+    const { deps, audioRelay, canvasFeeder } = buildDeps();
     const nowSpy = jest.spyOn(Date, 'now');
     nowSpy.mockReturnValue(1_000);
     const controller = new StreamController(deps);
     await controller.start();
+    canvasFeeder.render.mockClear();
 
     nowSpy.mockReturnValue(1_000 + 12_345);
     controller.pause();
-    // Both args happen to be 12.345 here since this is the track's first pause of the session
-    // (session-elapsed and track-elapsed coincide) — see the "multiple pause/resume cycles"
-    // test below for a case where they diverge.
-    expect(feeder.feedPause).toHaveBeenCalledWith(12.345, 12.345);
+
+    expect(audioRelay.switchToSilence).toHaveBeenCalled();
+    expect(canvasFeeder.render).toHaveBeenCalledWith(overlayFor(track('a')), null);
     expect(controller.status().state).toBe('paused');
 
     nowSpy.mockReturnValue(1_000 + 20_000);
     await controller.resume();
 
-    expect(feeder.feedTrack).toHaveBeenLastCalledWith(
-      { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
-      overlayFor(track('a')),
-      12.345,
-      20,
-    );
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 12.345);
     expect(controller.status().state).toBe('streaming');
 
     nowSpy.mockRestore();
   });
 
   it('accumulates track-elapsed time across multiple pause/resume cycles, for a frozen timer to show while paused', async () => {
-    const { deps, feeder } = buildDeps();
+    const { deps, audioRelay } = buildDeps();
     const nowSpy = jest.spyOn(Date, 'now');
     nowSpy.mockReturnValue(0);
     const controller = new StreamController(deps);
     await controller.start();
 
-    nowSpy.mockReturnValue(5_000); // 5s played
+    nowSpy.mockReturnValue(5_000);
     controller.pause();
-    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 5);
 
-    nowSpy.mockReturnValue(8_000); // resumed at t=5s, "resume" itself doesn't advance the clock
+    nowSpy.mockReturnValue(8_000);
     await controller.resume();
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 5);
 
-    nowSpy.mockReturnValue(11_000); // 3 more seconds played since resume
+    nowSpy.mockReturnValue(11_000);
     controller.pause();
-    // Second pause's track-elapsed is the FIRST pause's 5s plus these 3 more, not just the 3 —
-    // otherwise a frozen timer would visibly jump backwards on a second pause.
-    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 8);
+
+    nowSpy.mockReturnValue(14_000);
+    await controller.resume();
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 8);
 
     nowSpy.mockRestore();
   });
 
   it('next() advances the queue, resets elapsed time and feeds the new track while streaming', async () => {
-    const { deps, queue, feeder } = buildDeps();
+    const { deps, queue, audioRelay, canvasFeeder } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
 
     await controller.next();
 
     expect(queue.next).toHaveBeenCalled();
-    expect(feeder.feedTrack).toHaveBeenLastCalledWith(
-      { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
-      overlayFor(track('b')),
-      0,
-      expect.any(Number),
-    );
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/b.mp3', 0);
+    expect(canvasFeeder.render).toHaveBeenLastCalledWith(overlayFor(track('b')), null);
   });
 
   it('next() throws 409 when idle', async () => {
@@ -222,15 +202,15 @@ describe('StreamController', () => {
   });
 
   it('playByName() inserts into the queue without switching immediately', async () => {
-    const { deps, queue, feeder } = buildDeps();
+    const { deps, queue, audioRelay } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
-    feeder.feedTrack.mockClear();
+    audioRelay.switchTrack.mockClear();
 
     controller.playByName('b');
 
     expect(queue.insertNext).toHaveBeenCalledWith({ name: 'b', audioPath: '/music/b.mp3', coverPath: null });
-    expect(feeder.feedTrack).not.toHaveBeenCalled();
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
   });
 
   it('playByName() throws 404 for an unknown track', () => {
@@ -239,33 +219,21 @@ describe('StreamController', () => {
     expect(() => controller.playByName('missing')).toThrow(ApiError);
   });
 
-  it('stop() tears down the feeder, pusher and fifo', async () => {
-    const { deps, feeder, pusher } = buildDeps();
+  it('stop() tears down the audio relay, canvas feeder and encoder', async () => {
+    const { deps, audioRelay, canvasFeeder, encoder } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
 
     controller.stop();
 
-    expect(feeder.stopCurrent).toHaveBeenCalled();
-    expect(feeder.close).toHaveBeenCalled();
-    expect(pusher.stop).toHaveBeenCalled();
-    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/fifo');
+    expect(audioRelay.close).toHaveBeenCalled();
+    expect(canvasFeeder.close).toHaveBeenCalled();
+    expect(encoder.stop).toHaveBeenCalled();
     expect(controller.status().state).toBe('idle');
   });
 
-  it('start() removes any stale fifo before creating it', async () => {
-    const { deps } = buildDeps();
-    const controller = new StreamController(deps);
-
-    await controller.start();
-
-    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/fifo');
-    expect(deps.removeFifo.mock.invocationCallOrder[0])
-      .toBeLessThan(deps.createFifo.mock.invocationCallOrder[0]);
-  });
-
-  it('auto-advances to the next track when the current segment exits naturally', async () => {
-    const { deps, queue, feeder, children } = buildDeps();
+  it('auto-advances to the next track when the current decode process closes naturally', async () => {
+    const { deps, queue, audioRelay, children } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
 
@@ -275,35 +243,29 @@ describe('StreamController', () => {
     await Promise.resolve();
 
     expect(queue.next).toHaveBeenCalled();
-    expect(feeder.feedTrack).toHaveBeenLastCalledWith(
-      { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
-      overlayFor(track('b')),
-      0,
-      expect.any(Number),
-    );
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/b.mp3', 0);
     expect(controller.status().state).toBe('streaming');
   });
 
-  it('does not double-advance when a superseded segment exits late after next()', async () => {
-    const { deps, queue, feeder, children } = buildDeps();
+  it('does not double-advance when a superseded decode process closes late after next()', async () => {
+    const { deps, queue, audioRelay, children } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
 
     await controller.next();
     expect(queue.next).toHaveBeenCalledTimes(1);
-    expect(feeder.feedTrack).toHaveBeenCalledTimes(2);
+    expect(audioRelay.switchTrack).toHaveBeenCalledTimes(2);
 
-    // The killed first segment's ffmpeg exits asynchronously afterwards.
     children[0].emitClose(null);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(queue.next).toHaveBeenCalledTimes(1);
-    expect(feeder.feedTrack).toHaveBeenCalledTimes(2);
+    expect(audioRelay.switchTrack).toHaveBeenCalledTimes(2);
   });
 
-  it('does not advance when a segment exits after stop()', async () => {
-    const { deps, queue, feeder, children } = buildDeps();
+  it('does not advance when a decode process closes after stop()', async () => {
+    const { deps, queue, audioRelay, children } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
 
@@ -313,17 +275,16 @@ describe('StreamController', () => {
     await Promise.resolve();
 
     expect(queue.next).not.toHaveBeenCalled();
-    expect(feeder.feedTrack).toHaveBeenCalledTimes(1);
+    expect(audioRelay.switchTrack).toHaveBeenCalledTimes(1);
     expect(controller.status().state).toBe('idle');
   });
 
   it('start() recovers from the error state instead of rejecting with 409', async () => {
-    const { deps, pusher } = buildDeps();
+    const { deps, encoder } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
 
-    // Simulate the pusher dying unexpectedly.
-    const onExit = pusher.start.mock.calls[0][0] as (code: number | null) => void;
+    const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
     onExit(1);
     expect(controller.status().state).toBe('error');
 
@@ -333,16 +294,15 @@ describe('StreamController', () => {
   });
 
   it('supports a full start() -> stop() -> start() cycle without getting stuck in error', async () => {
-    const { deps, pusher } = buildDeps();
+    const { deps, encoder } = buildDeps();
     const controller = new StreamController(deps);
 
     await controller.start();
     controller.stop();
-    // RtmpPusher swallows the post-stop exit, so no onExit fires here.
     await controller.start();
 
     expect(controller.status().state).toBe('streaming');
-    expect(pusher.start).toHaveBeenCalledTimes(2);
+    expect(encoder.start).toHaveBeenCalledTimes(2);
   });
 
   it('invokes deps.onStatusChanged after start(), pause(), resume(), next(), previous(), playByName(), and stop()', async () => {
@@ -353,36 +313,17 @@ describe('StreamController', () => {
 
     await controller.start();
     expect(onStatusChanged).toHaveBeenCalledTimes(1);
-
     controller.pause();
     expect(onStatusChanged).toHaveBeenCalledTimes(2);
-
     await controller.resume();
     expect(onStatusChanged).toHaveBeenCalledTimes(3);
-
     await controller.next();
     expect(onStatusChanged).toHaveBeenCalledTimes(4);
-
     await controller.previous();
     expect(onStatusChanged).toHaveBeenCalledTimes(5);
-
     controller.playByName('a');
     expect(onStatusChanged).toHaveBeenCalledTimes(6);
-
     controller.stop();
     expect(onStatusChanged).toHaveBeenCalledTimes(7);
-  });
-
-  it('invokes deps.onStatusChanged when a track auto-advances', async () => {
-    const { deps, children } = buildDeps();
-    const onStatusChanged = jest.fn();
-    deps.onStatusChanged = onStatusChanged;
-    const controller = new StreamController(deps);
-    await controller.start();
-    onStatusChanged.mockClear();
-
-    children[0].emitClose(0);
-
-    expect(onStatusChanged).toHaveBeenCalledTimes(1);
   });
 });
