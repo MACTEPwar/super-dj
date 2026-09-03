@@ -20,7 +20,7 @@ import { StreamManager } from './stream/streamManager';
 import { StreamSessionRepository } from './stream/streamSessionRepository';
 import { StreamSessionManager } from './stream/streamSessionManager';
 import { TemplateRepository } from './templates/templateRepository';
-import { Spawner, ChildProcessLike } from './ffmpeg/types';
+import { Spawner, ChildProcessLike, ChildProcessWithPipes, PipeSpawner } from './ffmpeg/types';
 import { createApp } from './api/app';
 
 const FONT_FILE = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
@@ -41,6 +41,22 @@ export function createSpawner(): Spawner {
       process.stderr.write(chunk);
     });
     return child as unknown as ChildProcessLike;
+  };
+}
+
+export function createPipeSpawner(): PipeSpawner {
+  return (command: string, args: string[]): ChildProcessWithPipes => {
+    // fd0 (stdin) unused, fd1 (stdout) unused — this process's real output is the RTMP push, not
+    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4 are the
+    // video/audio pipes ffmpeg's own args reference as pipe:3/pipe:4.
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      process.stderr.write(chunk);
+    });
+    return Object.assign(child as unknown as ChildProcessLike, {
+      videoPipe: child.stdio[3] as unknown as NodeJS.WritableStream,
+      audioPipe: child.stdio[4] as unknown as NodeJS.WritableStream,
+    }) as ChildProcessWithPipes;
   };
 }
 
