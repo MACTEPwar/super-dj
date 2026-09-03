@@ -929,17 +929,29 @@ import { CanvasFeeder } from '../../src/ffmpeg/canvasFeeder';
 import { Spawner, ChildProcessLike } from '../../src/ffmpeg/types';
 import { NowPlayingOverlay } from '../../src/ffmpeg/segmentArgs';
 
-function fakeChild(outputChunks: string[] = ['fake-frame-bytes']): ChildProcessLike & { stdout: PassThrough } {
+type FakeChild = ChildProcessLike & { stdout: PassThrough; emitClose: (code: number | null) => void };
+
+// Exposes an explicit emitClose() the test calls itself, synchronously, instead of scheduling
+// the fake completion via process.nextTick/setTimeout — this keeps the test correct whether or
+// not jest.useFakeTimers() is active (some fake-timer configurations also intercept
+// process.nextTick, which silently hangs a test relying on it to eventually fire on its own).
+function fakeChild(outputChunks: string[] = ['fake-frame-bytes']): FakeChild {
   const stdout = new PassThrough();
-  const child = { pid: 1, stdout, stderr: null, kill: jest.fn(), once: jest.fn() };
-  // Simulate a real one-shot ffmpeg: writes its output, then closes.
-  process.nextTick(() => {
-    for (const chunk of outputChunks) stdout.write(chunk);
-    stdout.end();
-    const closeListener = (child.once as jest.Mock).mock.calls.find(([e]) => e === 'close')?.[1];
-    closeListener?.(0);
-  });
-  return child;
+  let closeListener: ((code: number | null) => void) | null = null;
+  return {
+    pid: 1,
+    stdout,
+    stderr: null,
+    kill: jest.fn(),
+    once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
+      if (event === 'close') closeListener = listener as (code: number | null) => void;
+    }),
+    emitClose: (code = 0) => {
+      for (const chunk of outputChunks) stdout.write(chunk);
+      stdout.end();
+      closeListener?.(code);
+    },
+  };
 }
 
 const overlay: NowPlayingOverlay = { durationSeconds: 65, overlayPng: Buffer.from('fake-png-bytes'), timer: null };
@@ -952,7 +964,7 @@ const overlayWithTimer: NowPlayingOverlay = {
 function buildFeeder(overrides: Partial<{ spawner: Spawner; writeFileSync: jest.Mock; heartbeatMs: number }> = {}) {
   const writeFileSync = overrides.writeFileSync ?? jest.fn();
   const feeder = new CanvasFeeder({
-    spawner: overrides.spawner ?? (jest.fn().mockImplementation(() => fakeChild()) as Spawner),
+    spawner: overrides.spawner ?? (jest.fn().mockReturnValue(fakeChild()) as Spawner),
     backgroundPath: '/assets/background.png',
     overlayImagePath: '/tmp/overlay-dest-1.png',
     fontFile: '/fonts/DejaVuSans-Bold.ttf',
@@ -964,15 +976,25 @@ function buildFeeder(overrides: Partial<{ spawner: Spawner; writeFileSync: jest.
   return { feeder, writeFileSync };
 }
 
+// render()'s synchronous portion (spawn + attach listeners) runs to completion before it hits
+// its first real await, so the fake child is ready to have its close event emitted immediately
+// after calling render() and before awaiting the promise it returned.
+async function renderAndClose(feeder: CanvasFeeder, child: FakeChild, overlay: NowPlayingOverlay, timerText: string | null): Promise<void> {
+  const promise = feeder.render(overlay, timerText);
+  child.emitClose(0);
+  await promise;
+}
+
 describe('CanvasFeeder', () => {
   it('render() writes the overlay PNG to the fixed path, spawns a one-shot canvas-frame render, and writes the resulting bytes to the attached video pipe', async () => {
-    const spawner: Spawner = jest.fn().mockImplementation(() => fakeChild(['frame-one']));
+    const child = fakeChild(['frame-one']);
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
     const { feeder, writeFileSync } = buildFeeder({ spawner });
     const chunks: Buffer[] = [];
     const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
     feeder.attach(videoPipe);
 
-    await feeder.render(overlay, null);
+    await renderAndClose(feeder, child, overlay, null);
 
     expect(writeFileSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png', overlay.overlayPng);
     expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/tmp/overlay-dest-1.png']));
@@ -980,11 +1002,12 @@ describe('CanvasFeeder', () => {
   });
 
   it('render() with a timer element passes the given plain text through as a static drawtext, not a live pts expression', async () => {
-    const spawner: Spawner = jest.fn().mockImplementation(() => fakeChild());
+    const child = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
     const { feeder } = buildFeeder({ spawner });
     feeder.attach(new PassThrough());
 
-    await feeder.render(overlayWithTimer, '0:37 / 1:05');
+    await renderAndClose(feeder, child, overlayWithTimer, '0:37 / 1:05');
 
     const args = (spawner as jest.Mock).mock.calls[0][1] as string[];
     const filterComplex = args[args.indexOf('-filter_complex') + 1];
@@ -993,11 +1016,12 @@ describe('CanvasFeeder', () => {
   });
 
   it('render() with a timer element but null timerText omits the drawtext (used when the caller has no live/frozen text yet)', async () => {
-    const spawner: Spawner = jest.fn().mockImplementation(() => fakeChild());
+    const child = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
     const { feeder } = buildFeeder({ spawner });
     feeder.attach(new PassThrough());
 
-    await feeder.render(overlayWithTimer, null);
+    await renderAndClose(feeder, child, overlayWithTimer, null);
 
     const args = (spawner as jest.Mock).mock.calls[0][1] as string[];
     const filterComplex = args[args.indexOf('-filter_complex') + 1];
@@ -1007,13 +1031,14 @@ describe('CanvasFeeder', () => {
   it('attach() starts a heartbeat that resends the last rendered frame at the configured interval', async () => {
     jest.useFakeTimers();
     try {
-      const spawner: Spawner = jest.fn().mockImplementation(() => fakeChild(['frame-a']));
+      const child = fakeChild(['frame-a']);
+      const spawner: Spawner = jest.fn().mockReturnValue(child);
       const { feeder } = buildFeeder({ spawner, heartbeatMs: 200 });
       const chunks: Buffer[] = [];
       const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
       feeder.attach(videoPipe);
 
-      await feeder.render(overlay, null);
+      await renderAndClose(feeder, child, overlay, null);
       chunks.length = 0; // clear the initial render's own write, isolate the heartbeat's writes
 
       jest.advanceTimersByTime(600); // 3 heartbeat ticks at 200ms
