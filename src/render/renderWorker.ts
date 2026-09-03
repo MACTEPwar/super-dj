@@ -13,5 +13,14 @@ export interface RenderTask {
 // other active stream's ffmpeg feeding and every other in-flight HTTP request on the same
 // process. See renderWorkerPool.ts for the pool this feeds into.
 export default function render(task: RenderTask): Promise<Buffer> {
-  return renderScene(task.elements, task.scene, task.options);
+  // Structured clone (what postMessage uses to hand task data INTO the worker, same as it does
+  // for the return value on the way OUT — see renderWorkerPool.ts) has no concept of Node's
+  // Buffer subclass, only the standard Uint8Array: fontData arrives here a plain Uint8Array even
+  // though it was read via fs.readFile() (a real Buffer) on the main thread. Satori's font
+  // parsing silently produces missing-glyph boxes for anything outside ASCII (discovered via a
+  // live smoke test with real Cyrillic text — a plain Uint8Array-vs-Buffer bug like this doesn't
+  // throw, it just quietly mis-renders) unless it's rewrapped as a real Buffer here first.
+  const raw = task.options.fontData;
+  const fontData = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+  return renderScene(task.elements, task.scene, { ...task.options, fontData });
 }
