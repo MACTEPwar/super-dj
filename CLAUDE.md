@@ -136,8 +136,10 @@ lands:
   architecture otherwise untouched. Notable decisions from this stage, since they're easy to
   second-guess without the context:
   - **`templateId` is optional, not required**, on both `.../stream/start` and
-    `POST /stream-sessions` — deliberately, since no visual editor exists yet (Stage 3) and a
-    template can currently only be authored via a direct API call. Omitting it uses
+    `POST /stream-sessions` — deliberately, so a stream can go out with no template configured at
+    all rather than 400ing. At the time this stage landed, no visual editor existed yet (Stage 3,
+    now done — see below) and a template could only be authored via a direct API call; the
+    optionality itself remains the right default now that the editor exists too. Omitting it uses
     `DEFAULT_TEMPLATE_ELEMENTS` (`src/templates/templateTypes.ts`), a built-in layout that
     approximates the old drawtext positions, so a user who never configures a template doesn't
     lose cover/title/playlist entirely.
@@ -205,12 +207,19 @@ lands:
   split-encode-from-mux design that deadlocked and hit a FIFO EOF-on-last-writer-close bug against
   real ffmpeg binaries — see `docs/superpowers/specs/2026-09-03-obs-style-persistent-canvas-design.md`
   for the full story of why those were abandoned.
-- **Stage 3 (not started):** drag-and-drop visual canvas editor in the frontend (full editor from
-  the start, not a simpler form-based v1 — user's explicit call), backed by the Stage 0 CRUD +
-  preview endpoint.
-- **Stage 4 (not started):** wire the editor's saved template into the real per-user stream
-  start flow as the actual selected `templateId`, replacing the sample scene data Stage 0's
-  preview endpoint uses.
+- **Stage 3 (done):** drag-and-drop visual canvas editor in the frontend
+  (`frontend/src/pages/Templates.tsx` — list/create/delete; `TemplateEditor.tsx` — the editor
+  itself), a full editor from the start as originally decided, not a simpler form-based v1: click
+  to select an element, pointer-driven drag to move and a resize handle to resize (both clamped
+  in-editor to the same bounds the backend validates, so the editor can never produce a draft the
+  backend would reject), add/remove `cover`/`title`/`playlist`/`timer` elements, and a debounced
+  live preview that renders through the real Satori+resvg pipeline (Stage 0's preview endpoint) —
+  what's shown while editing is what will actually appear on stream, not an approximation. Routed
+  at `/templates` and `/templates/:id`, linked from the sidebar.
+- **Stage 4 (done):** `StartStreamDrawer` (`frontend/src/components/StartStreamDrawer.tsx`) has a
+  template picker wired to the real `POST /stream-sessions`/`.../stream/start` calls, passing the
+  selected `templateId` through — the sample scene data Stage 0's preview endpoint uses is still
+  only for the editor's own live preview, not the real stream start flow.
 
 **Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
 the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
@@ -283,10 +292,13 @@ frontend/                   React + Vite SPA
   src/
     api/                    typed API client (fetch wrappers + type definitions)
     pages/                  route page components (incl. Streams.tsx list, StreamSessionPanel.tsx
-                            multi-destination dashboard)
+                            multi-destination dashboard, Templates.tsx list/create/delete,
+                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
                             AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal,
-                            StartStreamDrawer)
+                            StartStreamDrawer — has the Stage 4 template picker, ConfirmDialog,
+                            LanguageSwitcher)
+    i18n/                   react-i18next setup + en/ru/uk locale files
     hooks/                  custom React hooks
 ```
 
@@ -367,8 +379,9 @@ destination, then deletes the session row) — all scoped to the session's owner
 `POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
 `PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout
 (positioned `cover`/`title`/`playlist` elements), selected by id when starting a stream (see
-above) — Stage 1a of the overlay rework wired this into the actual ffmpeg pipeline; there's still
-no visual editor to create one with (Stage 3), only this CRUD API. `POST /templates/{id}/preview`
+above) — Stage 1a of the overlay rework wired this into the actual ffmpeg pipeline; the
+drag-and-drop visual editor to create one with (Stage 3) is at `/templates` in the frontend, on
+top of this same CRUD API. `POST /templates/{id}/preview`
 (optional `elements[]` to preview an unsaved draft instead of the saved template, optional
 `title`/`playlistLines`/`trackId` sample scene data) renders and returns the PNG directly
 (`image/png`), not persisted — a render failure here is a real HTTP error (500), unlike the live
