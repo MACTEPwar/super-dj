@@ -19,17 +19,17 @@ describe('RtmpPusher', () => {
   it('starts ffmpeg with the rtmp pusher args', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const pusher = new RtmpPusher(spawner, { fifoPath: '/tmp/fifo', rtmpUrl: 'rtmp://x', streamKey: 'k' });
+    const pusher = new RtmpPusher(spawner, { videoFifoPath: '/tmp/video.fifo', audioFifoPath: '/tmp/audio.fifo', fps: 30, rtmpUrl: 'rtmp://x', streamKey: 'k' });
 
     pusher.start(() => {});
 
-    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/tmp/fifo', 'rtmp://x/k']));
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/tmp/video.fifo', 'rtmp://x/k']));
   });
 
   it('invokes onExit when the process exits', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const pusher = new RtmpPusher(spawner, { fifoPath: '/tmp/fifo', rtmpUrl: 'rtmp://x', streamKey: 'k' });
+    const pusher = new RtmpPusher(spawner, { videoFifoPath: '/tmp/video.fifo', audioFifoPath: '/tmp/audio.fifo', fps: 30, rtmpUrl: 'rtmp://x', streamKey: 'k' });
     const onExit = jest.fn();
 
     pusher.start(onExit);
@@ -41,7 +41,7 @@ describe('RtmpPusher', () => {
   it('stop kills the running process', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const pusher = new RtmpPusher(spawner, { fifoPath: '/tmp/fifo', rtmpUrl: 'rtmp://x', streamKey: 'k' });
+    const pusher = new RtmpPusher(spawner, { videoFifoPath: '/tmp/video.fifo', audioFifoPath: '/tmp/audio.fifo', fps: 30, rtmpUrl: 'rtmp://x', streamKey: 'k' });
 
     pusher.start(() => {});
     pusher.stop();
@@ -52,7 +52,7 @@ describe('RtmpPusher', () => {
   it('does not invoke onExit for the exit that follows an intentional stop', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const pusher = new RtmpPusher(spawner, { fifoPath: '/tmp/fifo', rtmpUrl: 'rtmp://x', streamKey: 'k' });
+    const pusher = new RtmpPusher(spawner, { videoFifoPath: '/tmp/video.fifo', audioFifoPath: '/tmp/audio.fifo', fps: 30, rtmpUrl: 'rtmp://x', streamKey: 'k' });
     const onExit = jest.fn();
 
     pusher.start(onExit);
@@ -65,7 +65,7 @@ describe('RtmpPusher', () => {
   it('reports unexpected exits again after a stop/start cycle', () => {
     const child = fakeChild();
     const spawner: Spawner = jest.fn().mockReturnValue(child);
-    const pusher = new RtmpPusher(spawner, { fifoPath: '/tmp/fifo', rtmpUrl: 'rtmp://x', streamKey: 'k' });
+    const pusher = new RtmpPusher(spawner, { videoFifoPath: '/tmp/video.fifo', audioFifoPath: '/tmp/audio.fifo', fps: 30, rtmpUrl: 'rtmp://x', streamKey: 'k' });
     const onExit = jest.fn();
 
     pusher.start(() => {});
