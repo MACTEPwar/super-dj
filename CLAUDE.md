@@ -140,6 +140,19 @@ lands:
     *not* generated through Satori/resvg, so the fallback still works even if that pipeline
     itself is what's broken) — keeping the RTMP connection up matters more than one segment's
     picture.
+  - **`Buffer`s crossing the piscina worker boundary need rewrapping, in both directions.**
+    `postMessage` structured clone (what piscina uses to hand data to/from a worker) has no
+    concept of Node's `Buffer` subclass, only the plain `Uint8Array` it's built on — a value that
+    was a real `Buffer` on one side of the boundary arrives a plain `Uint8Array` on the other.
+    Found live (not by a unit test — every unit test mocks the pool boundary, and the one real
+    end-to-end render test, `sceneRenderer.test.ts`, doesn't go through the pool at all) in two
+    separate spots, both fixed by re-wrapping with `Buffer.from(x.buffer, x.byteOffset,
+    x.byteLength)`: (1) `renderViaPool()`'s return value — Express's `res.send()` silently
+    JSON-serializes anything that isn't `Buffer.isBuffer() === true` instead of erroring, so
+    `/templates/{id}/preview` was returning a `{"0":137,"1":80,...}` body with a 200 and an
+    `image/png` content-type; (2) `fontData` on the way *into* `renderWorker.ts` — Satori's font
+    parsing doesn't throw on a plain `Uint8Array`, it just silently produces missing-glyph boxes
+    for anything outside ASCII, which only showed up when previewing real Cyrillic text.
   - **`SegmentFeeder` writes the rendered PNG to a fixed per-destination path** and reuses that
     same file, unmodified, for a pause segment (`feedPause()` never re-renders — pausing only
     changes the audio, never the overlay). If nothing has been rendered yet when a pause segment
