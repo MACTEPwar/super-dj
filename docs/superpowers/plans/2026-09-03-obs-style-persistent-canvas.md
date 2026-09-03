@@ -1427,30 +1427,35 @@ describe('StreamController', () => {
     const { deps, canvasFeeder } = buildDeps();
     const overlayWithTimer = { ...overlayFor(track('a')), timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff' } };
     deps.buildOverlay = jest.fn(() => Promise.resolve(overlayWithTimer));
-    const nowSpy = jest.spyOn(Date, 'now');
+    // jest.useFakeTimers() (modern, this project's default) replaces the global Date binding
+    // itself — jest.spyOn(Date, 'now') is silently inert once it's active, whichever order
+    // they're called in. jest.setSystemTime() is the correct way to control "now" here, and
+    // jest.advanceTimersByTime() moves that same fake clock forward together with any timers
+    // it fires, so a single advance both fires the ticker AND advances what Date.now() reads
+    // inside it.
     jest.useFakeTimers();
     try {
-      nowSpy.mockReturnValue(0);
+      jest.setSystemTime(0);
       const controller = new StreamController(deps);
       await controller.start();
 
-      nowSpy.mockReturnValue(5_000); // played 5s before pausing
+      jest.setSystemTime(5_000); // played 5s before pausing
       controller.pause();
 
-      nowSpy.mockReturnValue(5_000); // resumed immediately at t=5s
+      // resumed immediately — system time unchanged at 5s
       await controller.resume();
       canvasFeeder.render.mockClear();
 
-      nowSpy.mockReturnValue(6_000); // 1s of real time passes after resume
-      jest.advanceTimersByTime(1000); // one ticker tick fires
+      jest.advanceTimersByTime(1000); // fires one ticker tick; also moves Date.now() to 6_000
 
       // 5s (the paused position) + 1s (live since resume) = 6s — NOT 1s, which is what a ticker
       // that only measured time since the resume's own feedCurrentTrack() call would show
       // instead, visibly resetting the on-stream timer every time someone resumes.
-      expect(canvasFeeder.render).toHaveBeenCalledWith(overlayWithTimer, '0:06 / 1:40');
+      // formatDurationForDrawtext escapes every ':' as '\:' for ffmpeg's drawtext filter syntax
+      // (see overlayText.ts) — the expected string carries that escaping too, not plain "0:06".
+      expect(canvasFeeder.render).toHaveBeenCalledWith(overlayWithTimer, '0\\:06 / 1\\:40');
     } finally {
       jest.useRealTimers();
-      nowSpy.mockRestore();
     }
   });
 
