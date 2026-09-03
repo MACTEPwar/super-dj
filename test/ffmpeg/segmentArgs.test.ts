@@ -1,16 +1,19 @@
-import { buildTrackSegmentArgs, buildPauseSegmentArgs } from '../../src/ffmpeg/segmentArgs';
+import { buildTrackSegmentArgs, buildPauseSegmentArgs, TimerOverlay } from '../../src/ffmpeg/segmentArgs';
+
+const timer: TimerOverlay = { x: 10, y: 660, fontSize: 20, color: '#ffffff', text: '%{pts\\:hms:0} / 1\\:05' };
 
 describe('buildTrackSegmentArgs', () => {
   const base = {
     audioPath: '/music/a.mp3',
     backgroundPath: '/assets/background.png',
     overlayPngPath: '/tmp/super-dj-overlay-dest-1.png',
+    fontFile: '/fonts/DejaVuSans-Bold.ttf',
     width: 1280,
     height: 720,
     fps: 30,
   };
 
-  it('builds ffmpeg args compositing the background and the overlay PNG, with no seek by default', () => {
+  it('builds ffmpeg args compositing the background and the overlay PNG, with no seek or timer by default', () => {
     const args = buildTrackSegmentArgs(base);
 
     expect(args.slice(0, 8)).toEqual([
@@ -65,12 +68,23 @@ describe('buildTrackSegmentArgs', () => {
 
     expect(args).not.toEqual(expect.arrayContaining(['-output_ts_offset']));
   });
+
+  it('layers a drawtext for the timer on top of the overlay when the template has one', () => {
+    const args = buildTrackSegmentArgs({ ...base, timer });
+
+    const filterComplex = args[args.indexOf('-filter_complex') + 1];
+    expect(filterComplex).toBe(
+      "[0:v]scale=1280:720[bg];[1:v]scale=1280:720[ov];[bg][ov]overlay=0:0[base];"
+      + "[base]drawtext=fontfile=/fonts/DejaVuSans-Bold.ttf:text='%{pts\\:hms:0} / 1\\:05':x=10:y=660:fontsize=20:fontcolor=#ffffff[outv]",
+    );
+  });
 });
 
 describe('buildPauseSegmentArgs', () => {
   const base = {
     backgroundPath: '/assets/background.png',
     overlayPngPath: '/tmp/super-dj-overlay-dest-1.png',
+    fontFile: '/fonts/DejaVuSans-Bold.ttf',
     width: 1280,
     height: 720,
     fps: 30,
@@ -103,5 +117,13 @@ describe('buildPauseSegmentArgs', () => {
     const args = buildPauseSegmentArgs({ ...base, outputTsOffsetSeconds: 42 });
 
     expect(args.slice(-5)).toEqual(['-output_ts_offset', '42', '-f', 'mpegts', 'pipe:1']);
+  });
+
+  it('layers a (frozen) drawtext for the timer on top of the overlay when the template has one', () => {
+    const frozenTimer: TimerOverlay = { ...timer, text: '0\\:05 / 1\\:05' };
+    const args = buildPauseSegmentArgs({ ...base, timer: frozenTimer });
+
+    const filterComplex = args[args.indexOf('-filter_complex') + 1];
+    expect(filterComplex).toContain("drawtext=fontfile=/fonts/DejaVuSans-Bold.ttf:text='0\\:05 / 1\\:05'");
   });
 });

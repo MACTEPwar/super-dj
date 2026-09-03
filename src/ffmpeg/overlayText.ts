@@ -13,6 +13,14 @@ export function formatDuration(totalSeconds: number): string {
   return `${minutes}:${paddedSeconds}`;
 }
 
+// formatDuration()'s output is digits and colons only (never arbitrary text), but ffmpeg's
+// drawtext filter treats ':' as a parameter separator inside its own filter string — this is
+// the one place that still needs escaping now that title/playlist no longer flow through
+// drawtext at all (see the timer element in segmentFeeder.ts).
+export function formatDurationForDrawtext(totalSeconds: number): string {
+  return formatDuration(totalSeconds).replace(/:/g, '\\:');
+}
+
 export function buildPlaylistWindowLines(
   tracks: Track[],
   currentIndex: number,

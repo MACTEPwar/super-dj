@@ -29,9 +29,22 @@ export interface PlaylistElement {
   color: string;
 }
 
-export type TemplateElement = CoverElement | TitleElement | PlaylistElement;
+// Unlike cover/title/playlist, a timer isn't baked into the rendered PNG — it ticks every
+// second, and re-rendering through Satori/resvg that often per active stream would be wasteful.
+// It's drawn natively via a small ffmpeg drawtext layered on top of the PNG instead (see
+// src/ffmpeg/segmentFeeder.ts) — no `width`, since drawtext sizes itself to its own text rather
+// than wrapping inside a fixed box the way a Satori flex div does.
+export interface TimerElement {
+  type: 'timer';
+  x: number;
+  y: number;
+  fontSize: number;
+  color: string;
+}
 
-const ELEMENT_TYPES = ['cover', 'title', 'playlist'] as const;
+export type TemplateElement = CoverElement | TitleElement | PlaylistElement | TimerElement;
+
+const ELEMENT_TYPES = ['cover', 'title', 'playlist', 'timer'] as const;
 
 // #RGB / #RGBA / #RRGGBB / #RRGGBBAA only — this value can reach an ffmpeg drawtext filter
 // string (a future 'timer' element's fontcolor), so it's validated strictly rather than
@@ -67,6 +80,9 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
   if (!isValidPosition(el.x, el.y)) return false;
   if (el.type === 'cover') {
     return isValidSize(el.width, CANVAS_WIDTH) && isValidSize(el.height, CANVAS_HEIGHT);
+  }
+  if (el.type === 'timer') {
+    return isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidColor(el.color);
   }
   // title / playlist
   return isValidSize(el.width, CANVAS_WIDTH) && isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidColor(el.color);

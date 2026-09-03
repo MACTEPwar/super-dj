@@ -1,29 +1,56 @@
 import { VideoParams } from './types';
 
+export interface TimerElementPosition {
+  x: number;
+  y: number;
+  fontSize: number;
+  color: string;
+}
+
 export interface NowPlayingOverlay {
   durationSeconds: number;
   // The rendered picture (cover/title/playlist, per the selected template) for this segment —
   // SegmentFeeder writes it to a fixed on-disk path and composites it via ffmpeg's own `overlay`
   // filter, replacing the hand-built drawtext filter graph this used to be.
   overlayPng: Buffer;
+  // Position/style for the template's timer element, if it has one — null if not. Unlike
+  // overlayPng, this isn't baked into a picture: SegmentFeeder turns it into a native ffmpeg
+  // drawtext (ticking live on a track segment, frozen on a pause segment).
+  timer: TimerElementPosition | null;
 }
 
-function overlayFilterComplex(width: number, height: number): string {
-  return [
+// A fully-composed drawtext overlay: position/style plus the already-built `text` (either a
+// live `%{pts\:hms:OFFSET}` expression for a playing track, or a static frozen string for a
+// pause segment) — segmentArgs.ts just plugs it into the filter graph, it doesn't need to know
+// which case produced it. See SegmentFeeder.feedTrack()/feedPause().
+export interface TimerOverlay extends TimerElementPosition {
+  text: string;
+}
+
+function overlayFilterComplex(width: number, height: number, fontFile: string, timer: TimerOverlay | null): string {
+  const parts = [
     `[0:v]scale=${width}:${height}[bg]`,
     `[1:v]scale=${width}:${height}[ov]`,
-    `[bg][ov]overlay=0:0[outv]`,
-  ].join(';');
+  ];
+  if (!timer) {
+    parts.push('[bg][ov]overlay=0:0[outv]');
+    return parts.join(';');
+  }
+  parts.push('[bg][ov]overlay=0:0[base]');
+  parts.push(`[base]drawtext=fontfile=${fontFile}:text='${timer.text}':x=${timer.x}:y=${timer.y}:fontsize=${timer.fontSize}:fontcolor=${timer.color}[outv]`);
+  return parts.join(';');
 }
 
 export function buildTrackSegmentArgs(params: VideoParams & {
   audioPath: string;
   backgroundPath: string;
   overlayPngPath: string;
+  fontFile: string;
+  timer?: TimerOverlay | null;
   startOffsetSeconds?: number;
   outputTsOffsetSeconds?: number;
 }): string[] {
-  const { width, height, fps, audioPath, backgroundPath, overlayPngPath } = params;
+  const { width, height, fps, audioPath, backgroundPath, overlayPngPath, fontFile } = params;
 
   const args = ['-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', overlayPngPath];
 
@@ -33,7 +60,7 @@ export function buildTrackSegmentArgs(params: VideoParams & {
 
   args.push(
     '-i', audioPath,
-    '-filter_complex', overlayFilterComplex(width, height),
+    '-filter_complex', overlayFilterComplex(width, height, fontFile, params.timer ?? null),
     '-map', '[outv]',
     '-map', '2:a',
     '-c:v', 'libx264',
@@ -66,19 +93,22 @@ export function buildTrackSegmentArgs(params: VideoParams & {
 // whichever picture is already on disk (the last playing track's, or the blank fallback if
 // nothing has been rendered yet) before calling this, so pausing only ever changes the audio
 // (silence instead of the track), never the overlay, and this function never needs to know
-// whether that path holds a "real" render or the fallback.
+// whether that path holds a "real" render or the fallback. Same for `timer` — its `text` is
+// already frozen (not a live pts expression) by the time it gets here.
 export function buildPauseSegmentArgs(params: VideoParams & {
   backgroundPath: string;
   overlayPngPath: string;
+  fontFile: string;
+  timer?: TimerOverlay | null;
   outputTsOffsetSeconds?: number;
 }): string[] {
-  const { width, height, fps, backgroundPath, overlayPngPath } = params;
+  const { width, height, fps, backgroundPath, overlayPngPath, fontFile } = params;
 
   const args = [
     '-loop', '1', '-i', backgroundPath,
     '-loop', '1', '-i', overlayPngPath,
     '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-    '-filter_complex', overlayFilterComplex(width, height),
+    '-filter_complex', overlayFilterComplex(width, height, fontFile, params.timer ?? null),
     '-map', '[outv]',
     '-map', '2:a',
     '-c:v', 'libx264',

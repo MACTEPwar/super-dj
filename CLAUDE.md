@@ -54,9 +54,9 @@ independent pipeline per destination:
   row, so playlist listings don't need to re-probe.
 - **Overlay.** Each track segment composites background + a pre-rendered overlay PNG (cover art,
   title, playlist window — from the selected `StreamTemplate`, or a built-in default layout when
-  none is selected) via ffmpeg's `overlay` filter — see "Overlay templates" below for the full
-  rework this landed as part of. The elapsed/total counter that used to be part of this drawtext
-  is temporarily gone (Stage 1b — a `timer` overlay element — replaces it; not done yet).
+  none is selected) via ffmpeg's `overlay` filter, plus an optional native `drawtext` for the
+  template's `timer` element (ticking elapsed/total) layered on top — see "Overlay templates"
+  below for the full rework this landed as part of.
 - **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected pusher exit sets
   `error`, from which `start()` recovers (it cleans up leftovers and recreates the FIFO).
 - **Stream keys at rest.** `StreamDestination.streamKeyEncrypted` is AES-256-GCM-encrypted
@@ -167,14 +167,26 @@ lands:
     cached, and concurrent callers for the same not-yet-resolved key share the in-flight promise.
   - **`StreamSession.templateId`** is a nullable FK, persisted like `playlistId` (migration
     `add_stream_session_template_id`), so a session remembers its template choice across restarts.
-- **Stage 1b (not started):** a `timer` overlay element — position/font/color configurable like
-  `title`/`playlist` — restoring the elapsed/total counter Stage 1a dropped. Unlike the other
-  element types it won't be baked into the PNG (it needs to tick every second, and re-rendering
-  through Satori/resvg once a second per stream is wasteful) — it's drawn natively via a small
-  `drawtext` layered on top of the PNG instead: a live `%{pts\:hms}`-driven expression for a
-  playing track, and a static (non-ticking) string for a pause segment computed from a per-track
-  elapsed offset cached in `StreamController` (reusing the same `elapsedSessionSeconds()`-based
-  bookkeeping `-output_ts_offset` already needs — not a new subsystem).
+- **Stage 1b (done):** a `timer` overlay element — position/font/color configurable like
+  `title`/`playlist` (no `width`, unlike them — drawtext sizes itself to its own text) —
+  restoring the elapsed/total counter Stage 1a dropped. Unlike the other element types it isn't
+  baked into the PNG (it needs to tick every second, and re-rendering through Satori/resvg once a
+  second per stream would be wasteful): `StreamManager.buildOverlay` splits a `timer` element out
+  of what gets rendered before calling `renderTemplatePng()`, and `SegmentFeeder` turns it into a
+  native `drawtext` layered on top of the composited PNG — live (`%{pts\:hms\:OFFSET}`, ticking)
+  on a track segment, frozen (a plain formatted string) on a pause segment, reusing
+  `StreamController`'s existing `pausedElapsedSeconds` bookkeeping (already tracked for pause/
+  resume — no new subsystem needed) as the frozen value and as the live expression's OFFSET on a
+  resumed track (so the displayed time continues from where it was paused instead of restarting
+  at 0 — the segment's own pts always starts near 0, same reason `-output_ts_offset` exists for
+  the audio/video timeline).
+  - **Both colons inside `%{...}` need escaping, not just the one between `pts` and `hms`** —
+    `%{pts\:hms\:OFFSET}`, not `%{pts\:hms:OFFSET}`. Found by actually running the generated
+    filter string through a real local `ffmpeg` process (`No option name near ...`), not by
+    reading ffmpeg's docs or by unit tests (which only assert the string shape, not that ffmpeg
+    itself accepts it) — worth doing this kind of check again for any future drawtext-adjacent
+    change, the failure mode here is silent/confusing (ffmpeg just refuses to start that segment)
+    rather than a clear error surfaced anywhere obvious.
 - **Stage 2 (not started, riskiest):** move each destination's whole session to a single
   persistent ffmpeg process (concat-demuxer-with-rewritten-playlist, or filter-graph input
   switching via zmq/sendcmd — not yet decided, wants a spike before committing) instead of one
@@ -400,9 +412,7 @@ registrable domain.
 
 ## Known follow-ups (deliberately deferred)
 
-`PORT` parsing is unvalidated; the overlay's elapsed/total counter is missing entirely until
-Stage 1b (the `timer` element) lands — Stage 1a deliberately dropped the old drawtext-based one
-without a replacement, see "Overlay templates" above;
+`PORT` parsing is unvalidated;
 `stopCurrent()` SIGTERMs mid-TS-packet; the Docker image runs as root; `assets/` holds 1×1
 placeholder PNGs; uploaded files are never cleaned up on track deletion (`DELETE /tracks/{id}`
 removes the DB row but not `{UPLOADS_DIR}/{userId}/{trackId}/`); no per-user storage quota. Real-

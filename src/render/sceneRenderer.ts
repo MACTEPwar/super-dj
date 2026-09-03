@@ -63,6 +63,11 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
           })),
         },
       };
+    case 'timer':
+      // Native element (a ticking value ffmpeg draws per-frame, not a static picture) — the
+      // caller (StreamManager) filters these out before calling renderScene at all; this is a
+      // defensive no-op, not the expected path. See src/ffmpeg/segmentFeeder.ts.
+      return null;
   }
 }
 

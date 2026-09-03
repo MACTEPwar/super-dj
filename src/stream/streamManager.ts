@@ -16,7 +16,7 @@ import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
-import { TemplateElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
+import { TemplateElement, TimerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 import { SessionOverlayCache } from './sessionOverlayCache';
@@ -153,13 +153,19 @@ export class StreamManager extends EventEmitter {
       const fifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}.fifo`);
       const overlayImagePath = path.join(this.deps.fifoDir, `super-dj-overlay-${destinationId}.png`);
 
+      // A timer isn't baked into the rendered PNG (see TimerElement's doc comment) — split it
+      // out once here, since the template is fixed for the life of this session, rather than on
+      // every buildOverlay() call.
+      const bakedElements = templateElements.filter((e) => e.type !== 'timer');
+      const timerElement = templateElements.find((e): e is TimerElement => e.type === 'timer') ?? null;
+
       const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
         const currentIndex = tracks.findIndex((t) => t.name === track.name);
         const playlistLines = buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
         const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
         const render = () => renderTemplatePng({
-          elements: templateElements,
+          elements: bakedElements,
           title: track.name,
           playlistLines,
           coverPath: track.coverPath ?? this.deps.defaultCoverPath,
@@ -186,7 +192,13 @@ export class StreamManager extends EventEmitter {
           overlayPng = BLANK_OVERLAY_PNG;
         }
 
-        return { durationSeconds, overlayPng };
+        return {
+          durationSeconds,
+          overlayPng,
+          timer: timerElement
+            ? { x: timerElement.x, y: timerElement.y, fontSize: timerElement.fontSize, color: timerElement.color }
+            : null,
+        };
       };
 
       const controller = new StreamController({
@@ -204,6 +216,7 @@ export class StreamManager extends EventEmitter {
           fifoPath,
           backgroundPath: this.deps.backgroundImagePath,
           overlayImagePath,
+          fontFile: this.deps.fontFile,
           width: VIDEO_WIDTH,
           height: VIDEO_HEIGHT,
           fps: VIDEO_FPS,

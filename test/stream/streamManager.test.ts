@@ -5,10 +5,15 @@ jest.mock('../../src/ffmpeg/fifo', () => ({
 jest.mock('../../src/ffmpeg/duration', () => ({
   getAudioDurationSeconds: jest.fn().mockResolvedValue(100),
 }));
+jest.mock('../../src/render/renderOverlay', () => ({
+  renderTemplatePng: jest.fn().mockResolvedValue(Buffer.from('fake-png')),
+}));
 
 import { PassThrough } from 'stream';
 import { StreamManager } from '../../src/stream/streamManager';
 import { ApiError } from '../../src/errors';
+import { renderTemplatePng } from '../../src/render/renderOverlay';
+import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
 
 function fakeChild() {
   return { pid: 1, stdout: null, stderr: null, kill: jest.fn(), once: jest.fn() };
@@ -51,13 +56,14 @@ function buildDeps() {
   // fake it so start()/tests never touch the real filesystem (same rationale as the
   // fifo/duration module mocks above — no real fs/subprocess touches in a unit test).
   const createWriteStream = jest.fn().mockImplementation(() => new PassThrough());
+  const templateRepository = { findById: jest.fn() };
   return {
     deps: {
       spawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
-      fontFile: '/fonts/x.ttf', playlistRepository, destinationRepository, trackRepository,
-      providers: { custom: customProvider, youtube: youtubeProvider }, createWriteStream,
+      fontFile: '/fonts/x.ttf', fontFamily: 'DejaVu Sans', playlistRepository, destinationRepository, trackRepository,
+      templateRepository, providers: { custom: customProvider, youtube: youtubeProvider }, createWriteStream,
     },
-    destinationRepository, playlistRepository, trackRepository, createWriteStream, customProvider, youtubeProvider, youtubeLifecycle, spawner,
+    destinationRepository, playlistRepository, trackRepository, templateRepository, createWriteStream, customProvider, youtubeProvider, youtubeLifecycle, spawner,
   };
 }
 
@@ -219,6 +225,65 @@ describe('StreamManager', () => {
 
     expect(manager.get('dest-1')).toBeUndefined();
     expect(manager.status('dest-1')).toEqual({ state: 'idle', currentTrack: null, nextTrack: null });
+  });
+
+  describe('overlay template selection', () => {
+    beforeEach(() => jest.clearAllMocks());
+
+    it('renders with DEFAULT_TEMPLATE_ELEMENTS and never touches templateRepository when no templateId is given', async () => {
+      const { deps, templateRepository } = buildDeps();
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1');
+
+      expect(templateRepository.findById).not.toHaveBeenCalled();
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ elements: DEFAULT_TEMPLATE_ELEMENTS }));
+    });
+
+    it('404s when the given templateId does not exist', async () => {
+      const { deps, templateRepository } = buildDeps();
+      templateRepository.findById.mockResolvedValue(null);
+      const manager = new StreamManager(deps as any);
+
+      await expect(manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' }))
+        .rejects.toMatchObject({ status: 404, message: 'template not found' });
+    });
+
+    it('403s when the given templateId belongs to another user than the destination owner', async () => {
+      const { deps, templateRepository } = buildDeps();
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'someone-else', elements: [] });
+      const manager = new StreamManager(deps as any);
+
+      await expect(manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' }))
+        .rejects.toMatchObject({ status: 403, message: 'not your template' });
+    });
+
+    it('splits a timer element out of what gets rendered into the PNG, and surfaces it separately on the overlay', async () => {
+      const { deps, templateRepository, spawner } = buildDeps();
+      const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+      const timerEl = { type: 'timer', x: 5, y: 5, fontSize: 20, color: '#ffffff' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, timerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ elements: [coverEl] }));
+      // The timer isn't baked into the PNG — it reaches ffmpeg as a native drawtext, which only
+      // this test suite can observe indirectly via the spawned producer's filter_complex arg.
+      const producerCall = (spawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
+      expect(filterComplex).toContain('drawtext');
+      expect(filterComplex).toContain('x=5:y=5:fontsize=20:fontcolor=#ffffff');
+    });
+
+    it('falls back to a blank overlay, without throwing, when the render pool rejects', async () => {
+      const { deps } = buildDeps();
+      (renderTemplatePng as jest.Mock).mockRejectedValueOnce(new Error('pool exploded'));
+      const manager = new StreamManager(deps as any);
+
+      await expect(manager.start('dest-1', 'playlist-1')).resolves.toBeUndefined();
+      expect(manager.status('dest-1').state).toBe('streaming');
+    });
   });
 
   it('playByName() finds a track across ALL of the owning user\'s tracks, not just the current playlist', async () => {

@@ -1,4 +1,4 @@
-import { isValidTemplateElement, isValidTemplateElements } from '../../src/templates/templateTypes';
+import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
 
 describe('isValidTemplateElement', () => {
   it('accepts a valid cover element', () => {
@@ -11,6 +11,24 @@ describe('isValidTemplateElement', () => {
 
   it('accepts a valid playlist element', () => {
     expect(isValidTemplateElement({ type: 'playlist', x: 0, y: 0, width: 100, fontSize: 18, color: '#fff' })).toBe(true);
+  });
+
+  it('accepts a valid timer element (no width, unlike title/playlist)', () => {
+    expect(isValidTemplateElement({ type: 'timer', x: 0, y: 0, fontSize: 18, color: '#fff' })).toBe(true);
+  });
+
+  it('rejects a timer element missing color', () => {
+    expect(isValidTemplateElement({ type: 'timer', x: 0, y: 0, fontSize: 18 })).toBe(false);
+  });
+
+  it('rejects a non-hex color', () => {
+    expect(isValidTemplateElement({ type: 'title', x: 0, y: 0, width: 100, fontSize: 24, color: 'red' })).toBe(false);
+    expect(isValidTemplateElement({ type: 'title', x: 0, y: 0, width: 100, fontSize: 24, color: '#gggggg' })).toBe(false);
+  });
+
+  it('rejects a position outside the canvas', () => {
+    expect(isValidTemplateElement({ type: 'cover', x: 99999, y: 0, width: 100, height: 100 })).toBe(false);
+    expect(isValidTemplateElement({ type: 'cover', x: -1, y: 0, width: 100, height: 100 })).toBe(false);
   });
 
   it('rejects an unknown type', () => {
@@ -52,5 +70,9 @@ describe('isValidTemplateElements', () => {
       { type: 'cover', x: 0, y: 0, width: 10, height: 10 },
       { type: 'cover', x: 0, y: 0 },
     ])).toBe(false);
+  });
+
+  it('DEFAULT_TEMPLATE_ELEMENTS (used when a stream starts with no templateId) is itself valid', () => {
+    expect(isValidTemplateElements(DEFAULT_TEMPLATE_ELEMENTS)).toBe(true);
   });
 });

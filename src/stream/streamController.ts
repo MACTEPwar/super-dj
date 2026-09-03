@@ -97,7 +97,7 @@ export class StreamController {
     }
     this.segmentGeneration += 1;
     this.state = 'paused';
-    this.feeder!.feedPause(this.elapsedSessionSeconds());
+    this.feeder!.feedPause(this.elapsedSessionSeconds(), this.pausedElapsedSeconds);
     this.deps.onStatusChanged?.();
   }
 

@@ -156,7 +156,10 @@ describe('StreamController', () => {
 
     nowSpy.mockReturnValue(1_000 + 12_345);
     controller.pause();
-    expect(feeder.feedPause).toHaveBeenCalledWith(12.345);
+    // Both args happen to be 12.345 here since this is the track's first pause of the session
+    // (session-elapsed and track-elapsed coincide) — see the "multiple pause/resume cycles"
+    // test below for a case where they diverge.
+    expect(feeder.feedPause).toHaveBeenCalledWith(12.345, 12.345);
     expect(controller.status().state).toBe('paused');
 
     nowSpy.mockReturnValue(1_000 + 20_000);
@@ -169,6 +172,29 @@ describe('StreamController', () => {
       20,
     );
     expect(controller.status().state).toBe('streaming');
+
+    nowSpy.mockRestore();
+  });
+
+  it('accumulates track-elapsed time across multiple pause/resume cycles, for a frozen timer to show while paused', async () => {
+    const { deps, feeder } = buildDeps();
+    const nowSpy = jest.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(0);
+    const controller = new StreamController(deps);
+    await controller.start();
+
+    nowSpy.mockReturnValue(5_000); // 5s played
+    controller.pause();
+    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 5);
+
+    nowSpy.mockReturnValue(8_000); // resumed at t=5s, "resume" itself doesn't advance the clock
+    await controller.resume();
+
+    nowSpy.mockReturnValue(11_000); // 3 more seconds played since resume
+    controller.pause();
+    // Second pause's track-elapsed is the FIRST pause's 5s plus these 3 more, not just the 3 —
+    // otherwise a frozen timer would visibly jump backwards on a second pause.
+    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 8);
 
     nowSpy.mockRestore();
   });
