@@ -868,12 +868,21 @@ in place.
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `npx jest test/render/sceneRenderer.test.ts test/render/renderOverlay.test.ts`
-Expected: PASS. If a real-render assertion fails because Satori doesn't
-actually support one of `backgroundClip:'text'`/`WebkitTextStroke*`/
-`textShadow` the way the spec assumed, **stop and report this as a
-BLOCKED/NEEDS_CONTEXT status** — this is exactly the risk the spec flagged
-and needs a ruling (drop the unsupported trick, or find Satori's actual
-supported equivalent), not a silent workaround.
+Expected: PASS. **This risk is already resolved, not open:** during
+planning, a throwaway script ran all three CSS tricks through the real
+installed `satori@^0.33.4` + `@resvg/resvg-js@^2.6.2` pair (this project's
+actual pinned versions, not just satori's docs) and confirmed all three
+work — gradient text produces a real `<linearGradient>` def with the text
+filled via `fill="url(#...)"`, `WebkitTextStrokeWidth`/`Color` produce real
+`stroke`/`stroke-width` SVG attributes, and `textShadow` produces a real
+`feDropShadow`/`feGaussianBlur` SVG filter — verified both structurally
+(regex over the SVG output) and visually (rendered PNGs inspected by eye:
+gradient text visibly red-to-blue, shadow visibly offset). If this task's
+own tests still somehow fail on one of these, that means something is
+different between the spike's minimal repro and this task's actual
+integration (e.g. an interaction with `position:absolute` or the
+multi-font `fonts:[...]` array) — treat that as a real regression to debug,
+not evidence the trick itself doesn't work.
 
 - [ ] **Step 6: Run the full suite**
 
@@ -1306,12 +1315,27 @@ git commit -m "feat: GET /templates/fonts"
 
 ---
 
-### Task 8: `Track.overlayOverride` — migration + repository + route
+### Task 8: `Track.overlayOverride` — migration + repository + route + read-path plumbing
 
 **Files:**
-- Modify: `prisma/schema.prisma`, `src/tracks/trackRepository.ts`, `src/tracks/trackRoutes.ts`
-- Test: extend `test/tracks/trackRoutes.test.ts`
+- Modify: `prisma/schema.prisma`, `src/tracks/trackRepository.ts`, `src/tracks/trackRoutes.ts`,
+  `src/playlists/playlistRepository.ts`, `src/playlist/types.ts`
+- Test: extend `test/tracks/trackRoutes.test.ts`, extend `test/playlists/playlistRepository.test.ts` if one exists (check)
 - Create: `prisma/migrations/<timestamp>_track_overlay_override/migration.sql` (generated, not hand-written)
+
+**Confirmed by reading the current files (this is not a hypothetical
+risk — it is a real, necessary step, verified against the real code):**
+`StreamManager.buildOverlay` only ever sees a `Track` (from
+`src/playlist/types.ts`, today `{ name, audioPath, coverPath }`) sourced
+from `PlaylistRepository.listTracks()` — never a full Prisma `Track` row.
+`listTracks()` (`src/playlists/playlistRepository.ts`) does `include:
+{ track: true }` (which *would* pull the new `overlayOverride` column once
+the migration lands) but then manually re-maps each row into
+`PlaylistTrackView { id, name, audioPath, coverPath }` — `overlayOverride`
+is silently dropped right there. Task 9 cannot read a track's override at
+all unless this task closes that gap. This is not "check whether the Track
+type already carries this field" (that phrasing in an earlier draft of
+this plan was too hedgy) — it does not, and this task adds it.
 
 **Interfaces:**
 - Consumes: `ColorValue`, `isValidColorValue` (both Task 1) for defining
@@ -1433,16 +1457,66 @@ router.patch('/:id', requireAuth, async (req, res, next) => {
 });
 ```
 
-- [ ] **Step 7: Run tests, then the full suite**
+- [ ] **Step 7: Thread `overlayOverride` through the read path Task 9 depends on**
+
+```typescript
+// src/playlist/types.ts
+import { TrackOverlayOverride } from '../tracks/trackRepository';
+
+export interface Track {
+  name: string;
+  audioPath: string;
+  coverPath: string | null;
+  overlayOverride?: TrackOverlayOverride | null;
+}
+```
+
+```typescript
+// src/playlists/playlistRepository.ts
+import { TrackOverlayOverride } from '../tracks/trackRepository';
+
+export interface PlaylistTrackView {
+  id: string;
+  name: string;
+  audioPath: string;
+  coverPath: string | null;
+  overlayOverride: TrackOverlayOverride | null;
+}
+// ...
+  async listTracks(playlistId: string): Promise<PlaylistTrackView[]> {
+    const rows = await this.prisma.playlistTrack.findMany({
+      where: { playlistId },
+      orderBy: { position: 'asc' },
+      include: { track: true },
+    });
+    return rows.map((row) => ({
+      id: row.track.id,
+      name: row.track.name,
+      audioPath: row.track.audioPath,
+      coverPath: row.track.coverPath,
+      overlayOverride: row.track.overlayOverride as TrackOverlayOverride | null,
+    }));
+  }
+```
+
+Write a test for `listTracks` asserting `overlayOverride` round-trips
+through — match whatever this repository's existing test file does today
+(per CLAUDE.md, `PlaylistRepository` is a thin Prisma wrapper normally
+verified by manual smoke test with a real Postgres, not unit tests against
+a fake — follow that same convention here rather than introducing a new
+one; check `test/playlists/playlistRepository.test.ts` for whether one
+already exists before assuming its shape).
+
+- [ ] **Step 8: Run tests, then the full suite**
 
 Run: `npx jest`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add prisma/schema.prisma prisma/migrations src/tracks/trackRepository.ts src/tracks/trackRoutes.ts test/tracks/trackRoutes.test.ts
-git commit -m "feat: per-track overlayOverride (PATCH /tracks/:id)"
+git add prisma/schema.prisma prisma/migrations src/tracks/trackRepository.ts src/tracks/trackRoutes.ts src/playlist/types.ts src/playlists/playlistRepository.ts test/tracks/trackRoutes.test.ts
+git commit -m "feat: per-track overlayOverride (PATCH /tracks/:id), threaded through to StreamManager's read path"
 ```
 
 ---
@@ -1454,12 +1528,11 @@ git commit -m "feat: per-track overlayOverride (PATCH /tracks/:id)"
 - Test: extend `test/stream/streamManager.test.ts`, extend `test/render/sceneRenderer.test.ts`
 
 **Interfaces:**
-- Consumes: `Track.overlayOverride` (Task 8, read via whatever the track
-  object `buildOverlay` already has in scope — check whether the `Track`
-  type passed in already carries this field or needs a repository read
-  added), `imageDataUris` scene field (Task 4), `TemplateImageService.resolvePath`
-  + `imageDataUri.ts` (Task 6, for resolving each `image` element's file
-  to a data URI before rendering).
+- Consumes: `Track.overlayOverride` (Task 8 Step 7 — already present on
+  the `track: Track` parameter `buildOverlay` receives, no additional
+  repository read needed), `imageDataUris` scene field (Task 4),
+  `TemplateImageService.resolvePath` + `imageDataUri.ts` (Task 6, for
+  resolving each `image` element's file to a data URI before rendering).
 - Produces: no new exported interface — this task closes the loop the
   spec left open ("which element(s) the override patches onto").
 
@@ -1467,7 +1540,10 @@ git commit -m "feat: per-track overlayOverride (PATCH /tracks/:id)"
 
 Read `src/stream/streamManager.ts`'s `buildOverlay` (already read once
 during brainstorming — re-confirm against the file, not memory, since
-Tasks 1-8 changed several of the types it touches).
+Tasks 1-8 changed several of the types it touches). By this point in the
+plan, the `track: Track` parameter `buildOverlay` receives already carries
+`overlayOverride?: TrackOverlayOverride | null` (Task 8, Step 7) — no
+additional repository read is needed here.
 
 - [ ] **Step 2: Pin down the override's target — decision made here, not deferred further**
 
@@ -1616,14 +1692,19 @@ git commit -m "feat: frontend API client for template images, fonts, track overl
 
 **Files:**
 - Modify: `frontend/src/pages/TemplateEditor.tsx`
+- Create: `frontend/src/components/TemplateFormFields.tsx`
 - Modify: `frontend/src/i18n/locales/{en,ru,uk}.json` (new keys for every
   new label this task introduces — add them in all three files in the
   same commit, matching the existing key-naming convention already used
   for `templateEditor.*` keys)
-- Test: extend `frontend/src/pages/TemplateEditor.test.tsx`
+- Test: extend `frontend/src/pages/TemplateEditor.test.tsx`, add
+  `frontend/src/components/TemplateFormFields.test.tsx`
 
 **Interfaces:**
-- Consumes: `templatesApi` (Task 10), `TemplateElement` union (Task 10).
+- Consumes: `templatesApi` (Task 10), `TemplateElement`/`ColorValue` union (Task 10).
+- Produces: `NumberField`/`ColorField`/`ColorValueField` exported from
+  `frontend/src/components/TemplateFormFields.tsx` — Task 12 imports
+  `ColorValueField` from here directly, does not reimplement it.
 
 - [ ] **Step 1: Read the current file completely (already read once during
   brainstorming — re-read now, several things below assume its exact
@@ -1699,16 +1780,74 @@ reduced version for `timer` — see below), add:
       <button onClick={() => updateElement(selectedIndex!, { style: { ...selected.style, bold: !selected.style.bold } })} className={selected.style.bold ? 'font-bold underline' : ''}>{t('templateEditor.bold')}</button>
       <button onClick={() => updateElement(selectedIndex!, { style: { ...selected.style, italic: !selected.style.italic } })} className={selected.style.italic ? 'italic underline' : ''}>{t('templateEditor.italic')}</button>
     </div>
-    {/* stroke toggle+fields, shadow toggle+fields — same checkbox-reveals-fields pattern,
-        omitted here for brevity but required: a checkbox bound to `selected.style.stroke !== undefined`
-        that sets/clears the whole stroke object, revealing ColorField+NumberField when checked;
-        same shape for shadow with an extra offsetX/offsetY pair */}
+    <label className="flex items-center gap-2 text-xs text-gray-600">
+      <input
+        type="checkbox"
+        checked={selected.style.stroke !== undefined}
+        onChange={(e) => updateElement(selectedIndex!, {
+          style: { ...selected.style, stroke: e.target.checked ? { color: '#000000', width: 2 } : undefined },
+        })}
+      />
+      {t('templateEditor.fieldStroke')}
+    </label>
+    {selected.style.stroke && (
+      <>
+        <ColorField label={t('templateEditor.fieldColor')} value={selected.style.stroke.color} onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, stroke: { ...selected.style.stroke!, color: v } } })} />
+        <NumberField label={t('templateEditor.fieldStrokeWidth')} value={selected.style.stroke.width} min={1} max={20} onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, stroke: { ...selected.style.stroke!, width: v } } })} />
+      </>
+    )}
+    <label className="flex items-center gap-2 text-xs text-gray-600">
+      <input
+        type="checkbox"
+        checked={selected.style.shadow !== undefined}
+        onChange={(e) => updateElement(selectedIndex!, {
+          style: { ...selected.style, shadow: e.target.checked ? { color: '#000000', blur: 4, offsetX: 2, offsetY: 2 } : undefined },
+        })}
+      />
+      {t('templateEditor.fieldShadow')}
+    </label>
+    {selected.style.shadow && (
+      <>
+        <ColorField label={t('templateEditor.fieldColor')} value={selected.style.shadow.color} onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, color: v } } })} />
+        <NumberField label={t('templateEditor.fieldShadowBlur')} value={selected.style.shadow.blur} min={0} max={50} onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, blur: v } } })} />
+        <NumberField label={t('templateEditor.fieldShadowOffsetX')} value={selected.style.shadow.offsetX} min={-50} max={50} onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, offsetX: v } } })} />
+        <NumberField label={t('templateEditor.fieldShadowOffsetY')} value={selected.style.shadow.offsetY} min={-50} max={50} onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, offsetY: v } } })} />
+      </>
+    )}
   </>
 )}
-{selected.type !== 'timer' && 'color' in selected && (
+{(selected.type === 'title' || selected.type === 'playlist' || selected.type === 'text') && (
   <>
-    {/* solid/gradient mode toggle; solid reveals the existing ColorField; gradient reveals
-        2-3 ColorFields for stops + a NumberField (0-360) for angleDeg */}
+    <div className="flex gap-2 text-xs">
+      <button
+        onClick={() => updateElement(selectedIndex!, { color: { mode: 'solid', color: selected.color.mode === 'solid' ? selected.color.color : '#ffffff' } })}
+        className={selected.color.mode === 'solid' ? 'font-semibold underline' : ''}
+      >{t('templateEditor.colorModeSolid')}</button>
+      <button
+        onClick={() => updateElement(selectedIndex!, { color: { mode: 'gradient', stops: selected.color.mode === 'gradient' ? selected.color.stops : ['#ffffff', '#000000'], angleDeg: selected.color.mode === 'gradient' ? selected.color.angleDeg : 0 } })}
+        className={selected.color.mode === 'gradient' ? 'font-semibold underline' : ''}
+      >{t('templateEditor.colorModeGradient')}</button>
+    </div>
+    {selected.color.mode === 'solid' && (
+      <ColorField label={t('templateEditor.fieldColor')} value={selected.color.color} onChange={(v) => updateElement(selectedIndex!, { color: { mode: 'solid', color: v } })} />
+    )}
+    {selected.color.mode === 'gradient' && (
+      <>
+        {selected.color.stops.map((stop, i) => (
+          <ColorField
+            key={i}
+            label={t('templateEditor.fieldGradientStop', { n: i + 1 })}
+            value={stop}
+            onChange={(v) => {
+              const stops = [...selected.color.stops] as [string, string] | [string, string, string];
+              stops[i] = v;
+              updateElement(selectedIndex!, { color: { mode: 'gradient', stops, angleDeg: (selected.color as { angleDeg: number }).angleDeg } });
+            }}
+          />
+        ))}
+        <NumberField label={t('templateEditor.fieldGradientAngle')} value={(selected.color as { angleDeg: number }).angleDeg} max={360} onChange={(v) => updateElement(selectedIndex!, { color: { ...selected.color, angleDeg: v } as ColorValue })} />
+      </>
+    )}
   </>
 )}
 {selected.type === 'timer' && (
@@ -1720,6 +1859,35 @@ Write this out in full in the actual file (the plan gives the mechanism
 and the exact conditions; the implementer writes the complete JSX,
 following this file's existing `NumberField`/`ColorField` component
 patterns for every new field rather than inventing new input components).
+
+**Extract the solid/gradient toggle block above into a shared component,
+not a `TemplateEditor.tsx`-local one.** Today, `NumberField` and
+`ColorField` are plain function components declared locally at the top of
+`TemplateEditor.tsx` (module-private, not exported) — read the file's
+current top section to confirm this before proceeding. Move both of them,
+plus the new `ColorValueField`, into a new
+`frontend/src/components/TemplateFormFields.tsx`:
+
+```typescript
+export function NumberField(/* exact current signature/body from TemplateEditor.tsx, moved as-is */) { /* ... */ }
+export function ColorField(/* exact current signature/body from TemplateEditor.tsx, moved as-is */) { /* ... */ }
+export function ColorValueField({ label, value, onChange }: { label: string; value: ColorValue; onChange: (v: ColorValue) => void }) {
+  // exactly the solid/gradient toggle + fields JSX shown above (the button pair, the solid
+  // ColorField, the gradient stops + angle), built on the ColorField/NumberField in this same file
+}
+```
+
+`TemplateEditor.tsx` then imports all three from
+`../components/TemplateFormFields` instead of defining `NumberField`/
+`ColorField` itself. This is required, not optional polish — Task 12 (the
+per-track override UI) needs the identical solid/gradient picker for
+`overlayOverride.color`/`.backgroundColor`, and duplicating ~30 lines of
+gradient-picker JSX (plus its two supporting field components) across two
+files instead of sharing one module would be exactly the kind of
+avoidable duplication this codebase's conventions argue against
+elsewhere. Update `TemplateEditor.test.tsx` for the moved import path if
+any test imports `NumberField`/`ColorField` directly rather than only
+through the page component.
 
 - [ ] **Step 6: `text` element's textarea for its literal content**
 
@@ -1751,9 +1919,12 @@ patterns for every new field rather than inventing new input components).
 - [ ] **Step 8: Add every new i18n key used above to all three locale files**
 
 `templateEditor.defaultText`, `fieldFontFamily`, `bold`, `italic`,
-`fieldStroke`, `fieldShadow`, `fieldText`, `replaceImage`,
+`fieldStroke`, `fieldStrokeWidth`, `fieldShadow`, `fieldShadowBlur`,
+`fieldShadowOffsetX`, `fieldShadowOffsetY`, `fieldText`, `replaceImage`,
 `imageUploadFailed`, `elementType.text`, `elementType.image`,
-`fieldGradientAngle`, `colorModeSolid`, `colorModeGradient` — English, then
+`fieldGradientAngle`, `fieldGradientStop` (with an `{{n}}` interpolation
+placeholder, matching the existing `addElement` key's `{{type}}` pattern),
+`colorModeSolid`, `colorModeGradient` — English, then
 Russian, then Ukrainian, matching the existing tone/style of each locale
 file's current `templateEditor.*` entries (read all three before writing
 the new ones, don't just translate the English ones through a single
@@ -1776,7 +1947,7 @@ Expected: PASS.
 - [ ] **Step 11: Commit**
 
 ```bash
-cd frontend && git add src/pages/TemplateEditor.tsx src/pages/TemplateEditor.test.tsx src/i18n/locales
+cd frontend && git add src/pages/TemplateEditor.tsx src/pages/TemplateEditor.test.tsx src/components/TemplateFormFields.tsx src/components/TemplateFormFields.test.tsx src/i18n/locales
 git commit -m "feat: text/image elements + typography/gradient/stroke/shadow controls in the template editor"
 ```
 
@@ -1793,7 +1964,8 @@ git commit -m "feat: text/image elements + typography/gradient/stroke/shadow con
 - Test: extend that page's existing test file
 
 **Interfaces:**
-- Consumes: `updateTrackOverlayOverride` (Task 10).
+- Consumes: `updateTrackOverlayOverride`, `TrackOverlayOverride` (Task 10),
+  `ColorValueField` (Task 11's `frontend/src/components/TemplateFormFields.tsx`).
 
 - [ ] **Step 1: Read `Library.tsx` and its test file completely first**
 
@@ -1805,11 +1977,13 @@ edit affordance can just grow one more field.
 
 - [ ] **Step 2: Add a small color-override control**
 
-A compact form: solid/gradient/none toggle for `color`, same for
-`backgroundColor`, reusing whatever `ColorField`-equivalent component
-already exists in the shared `components/` directory (check before
-building a second one). "None" sends `overlayOverride: null` via
-`updateTrackOverlayOverride`.
+A compact form: an off/on toggle for `color` and, separately, for
+`backgroundColor` — off means that field is absent from the
+`TrackOverlayOverride` object entirely (not present, not an empty value);
+on reveals `ColorValueField` (from `frontend/src/components/TemplateFormFields.tsx`,
+Task 11 — import it directly, do not reimplement the solid/gradient
+picker here). Sending `overlayOverride: null` (both toggles off) via
+`updateTrackOverlayOverride` clears any existing override.
 
 - [ ] **Step 3: Write component tests**
 

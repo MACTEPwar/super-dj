@@ -254,15 +254,19 @@ Produces:
 `imageDataUri.ts` used for cover, keyed by `assetId` resolved to its
 on-disk path.
 
-**Open risk, needs a real-render spike before building the API/UI around
-it:** `backgroundClip:'text'`, `WebkitTextStroke*`, and `textShadow` are
-all things Satori is documented to support, but this project has already
-been bitten twice by "works against fakes/docs, breaks against the real
-binary" (the piscina `Buffer`-rewrapping gap, drawtext's double-colon
-escaping) — per [[feedback-verify-against-real-binaries]]. First
-implementation step should be a small throwaway script that renders all
-three CSS tricks through the real `satori`+`resvg` pair and inspects the
-output PNG, before any API/UI is built on the assumption they work.
+**Resolved during planning (was an open risk):** `backgroundClip:'text'`,
+`WebkitTextStroke*`, and `textShadow` were only documented Satori
+behavior, unverified in this project — and this project has already been
+bitten twice by "works against fakes/docs, breaks against the real binary"
+(the piscina `Buffer`-rewrapping gap, drawtext's double-colon escaping) —
+per [[feedback-verify-against-real-binaries]]. A throwaway spike ran all
+three through the real installed `satori@^0.33.4` + `@resvg/resvg-js@^2.6.2`
+pair (this project's actual pinned versions) and confirmed all three work:
+gradient text produces a real `<linearGradient>` def with `fill="url(#...)"`,
+the stroke properties produce real `stroke`/`stroke-width` SVG attributes,
+and `textShadow` produces a real `feDropShadow`/`feGaussianBlur` filter —
+confirmed both structurally and by eye on the rendered PNGs. The
+implementation plan builds on this as a verified fact, not an assumption.
 
 ## Editor UI (`TemplateEditor.tsx`)
 
