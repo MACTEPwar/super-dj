@@ -97,7 +97,7 @@ export class StreamController {
     }
     this.segmentGeneration += 1;
     this.state = 'paused';
-    this.feeder!.feedPause(this.elapsedSessionSeconds(), this.pausedElapsedSeconds);
+    this.feeder!.feedPause(this.pausedElapsedSeconds);
     this.deps.onStatusChanged?.();
   }
 
@@ -146,7 +146,7 @@ export class StreamController {
     // were awaiting the overlay — a stale overlay must never be fed.
     if (generation !== this.segmentGeneration) return;
     if (this.state !== 'streaming') return;
-    const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds, this.elapsedSessionSeconds());
+    const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds);
     this.trackStartedAt = Date.now();
     // 'close' (not 'exit') — Node's 'exit' can fire before the child's stdio streams have
     // finished flushing to their listeners. Reacting on 'exit' meant advanceToNextTrack()

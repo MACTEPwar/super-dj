@@ -44,7 +44,7 @@ export class SegmentFeeder {
     });
   }
 
-  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0, outputTsOffsetSeconds = 0): ChildProcessLike {
+  feedTrack(track: Track, overlay: NowPlayingOverlay, startOffsetSeconds = 0): ChildProcessLike {
     this.writeFileSync(this.options.overlayImagePath, overlay.overlayPng);
     this.hasWrittenOverlay = true;
     this.lastOverlay = overlay;
@@ -53,8 +53,7 @@ export class SegmentFeeder {
       ...overlay.timer,
       // Live, ticking — pts:hms's optional offset carries the seek position forward so a
       // resumed track's displayed time continues from where it was paused instead of
-      // restarting at 0 (this segment's own pts always starts near 0, same reason
-      // -output_ts_offset exists for the video/audio timeline itself). Both colons inside
+      // restarting at 0 (this segment's own pts always starts near 0). Both colons inside
       // %{...} need escaping, not just the first one — confirmed by actually running this
       // through ffmpeg locally (`No option name near ...` otherwise), not just by reading docs.
       text: `%{pts\\:hms\\:${startOffsetSeconds}} / ${formatDurationForDrawtext(overlay.durationSeconds)}`,
@@ -70,12 +69,14 @@ export class SegmentFeeder {
       height: this.options.height,
       fps: this.options.fps,
       startOffsetSeconds,
-      outputTsOffsetSeconds,
+      durationSeconds: overlay.durationSeconds,
+      videoFifoPath: `${this.options.fifoPath}-video.fifo`,
+      audioFifoPath: `${this.options.fifoPath}-audio.fifo`,
     });
     return this.spawnAndPipe(args);
   }
 
-  feedPause(outputTsOffsetSeconds = 0, trackElapsedSeconds = 0): ChildProcessLike {
+  feedPause(trackElapsedSeconds = 0): ChildProcessLike {
     // Reuses whichever picture is already on disk — the last playing track's — so pausing
     // only ever changes the audio, never the overlay. If a track segment somehow never got
     // to write one yet (defensive: shouldn't happen, start() always feeds a track before a
@@ -102,7 +103,8 @@ export class SegmentFeeder {
       width: this.options.width,
       height: this.options.height,
       fps: this.options.fps,
-      outputTsOffsetSeconds,
+      videoFifoPath: `${this.options.fifoPath}-video.fifo`,
+      audioFifoPath: `${this.options.fifoPath}-audio.fifo`,
     });
     return this.spawnAndPipe(args);
   }

@@ -78,7 +78,6 @@ describe('StreamController', () => {
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       overlayFor(track('a')),
       0,
-      expect.any(Number),
     );
     expect(controller.status().state).toBe('streaming');
   });
@@ -156,10 +155,9 @@ describe('StreamController', () => {
 
     nowSpy.mockReturnValue(1_000 + 12_345);
     controller.pause();
-    // Both args happen to be 12.345 here since this is the track's first pause of the session
-    // (session-elapsed and track-elapsed coincide) — see the "multiple pause/resume cycles"
-    // test below for a case where they diverge.
-    expect(feeder.feedPause).toHaveBeenCalledWith(12.345, 12.345);
+    // Track-elapsed is 12.345 here since this is the track's first pause of the session.
+    // See the "multiple pause/resume cycles" test below for a case where it's different.
+    expect(feeder.feedPause).toHaveBeenCalledWith(12.345);
     expect(controller.status().state).toBe('paused');
 
     nowSpy.mockReturnValue(1_000 + 20_000);
@@ -169,7 +167,6 @@ describe('StreamController', () => {
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       overlayFor(track('a')),
       12.345,
-      20,
     );
     expect(controller.status().state).toBe('streaming');
 
@@ -185,7 +182,7 @@ describe('StreamController', () => {
 
     nowSpy.mockReturnValue(5_000); // 5s played
     controller.pause();
-    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 5);
+    expect(feeder.feedPause).toHaveBeenLastCalledWith(5);
 
     nowSpy.mockReturnValue(8_000); // resumed at t=5s, "resume" itself doesn't advance the clock
     await controller.resume();
@@ -194,7 +191,7 @@ describe('StreamController', () => {
     controller.pause();
     // Second pause's track-elapsed is the FIRST pause's 5s plus these 3 more, not just the 3 —
     // otherwise a frozen timer would visibly jump backwards on a second pause.
-    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 8);
+    expect(feeder.feedPause).toHaveBeenLastCalledWith(8);
 
     nowSpy.mockRestore();
   });
@@ -211,7 +208,6 @@ describe('StreamController', () => {
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
       overlayFor(track('b')),
       0,
-      expect.any(Number),
     );
   });
 
@@ -279,7 +275,6 @@ describe('StreamController', () => {
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
       overlayFor(track('b')),
       0,
-      expect.any(Number),
     );
     expect(controller.status().state).toBe('streaming');
   });
