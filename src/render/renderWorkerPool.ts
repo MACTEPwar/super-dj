@@ -27,11 +27,21 @@ function getPool(): Piscina {
   return pool;
 }
 
-export function renderViaPool(elements: TemplateElement[], scene: SceneData, options: SceneRendererOptions): Promise<Buffer> {
+export async function renderViaPool(elements: TemplateElement[], scene: SceneData, options: SceneRendererOptions): Promise<Buffer> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
   const task: RenderTask = { elements, scene, options };
-  return getPool()
-    .run(task, { signal: controller.signal })
-    .finally(() => clearTimeout(timer));
+  try {
+    // Structured clone (what postMessage — and so piscina — uses to hand the worker's return
+    // value back across the thread boundary) has no concept of Node's Buffer subclass, only the
+    // standard Uint8Array; the PNG comes back a plain Uint8Array even though renderScene()
+    // returns a real Buffer inside the worker. Buffer.from() here (no copy — it wraps the same
+    // underlying ArrayBuffer) is what makes Buffer.isBuffer() true again for every caller
+    // downstream — notably Express's res.send(), which silently JSON-serializes ({"0":137,...})
+    // instead of sending raw bytes for anything that isn't a real Buffer.
+    const result = await getPool().run(task, { signal: controller.signal });
+    return Buffer.from(result.buffer, result.byteOffset, result.byteLength);
+  } finally {
+    clearTimeout(timer);
+  }
 }
