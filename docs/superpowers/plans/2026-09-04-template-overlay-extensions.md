@@ -55,6 +55,24 @@ until this plan, etc.). This plan argues from that spec.
   check pattern already used throughout `templateRoutes.ts`/`trackRoutes.ts`
   (404 if the resource doesn't exist, 403 if it exists but isn't the
   caller's) — never skip the ownership check "for now."
+- **`src/templates/templateRoutes.ts`'s real, verified route pattern —
+  every task adding a route to this file (6, 7, 9) must match it exactly,
+  not the generic Express `(req, res, next) => { try {...} catch(err) {
+  next(err) } }` shape used elsewhere in earlier drafts of this plan:**
+  `createTemplateRouter(authService, templateRepository, trackRepository,
+  rendererDeps)` takes four positional parameters, not one `deps` object.
+  Inside it: `const auth = requireAuth(authService)` once, reused as
+  middleware (`router.get('/x', auth, ...)`, never bare `requireAuth`).
+  `const userId = (req: AuthenticatedRequest) => req.user!.id` — the
+  caller's id is `userId(req as AuthenticatedRequest)`, **not**
+  `req.session.userId`. Handlers are wrapped in `wrapAsync(async (req,
+  res) => { ... })` (imported from `../api/errorHandler`) and simply
+  `throw new ApiError(...)` on failure — there is no `next` parameter and
+  no manual try/catch. An existing helper,
+  `requireOwnedTemplate(id, ownerId): Promise<Template>` (throws 404/403
+  itself), already exists in this file's closure — reuse it for any new
+  route that needs to load-and-check-ownership of a template, don't
+  re-implement the check inline.
 
 ---
 
@@ -599,11 +617,34 @@ git commit -m "fix: fontCache caches every distinct font path, not just the last
 ### Task 4: `sceneRenderer.ts` — gradient/stroke/shadow/bold/italic/image rendering
 
 **Files:**
-- Modify: `src/render/sceneRenderer.ts`
+- Modify: `src/render/sceneRenderer.ts`, `src/render/renderWorker.ts`
 - Test: `test/render/sceneRenderer.test.ts` (extend the existing real
   satori+resvg end-to-end test file — do not mock satori/resvg here, this
   file's whole purpose is catching exactly the class of bug a mocked test
-  would miss, per CLAUDE.md's piscina-Buffer lesson)
+  would miss, per CLAUDE.md's piscina-Buffer lesson), extend
+  `test/render/renderWorker.test.ts`
+
+**A real, verified cross-file consequence this task must handle (found by
+a fresh review of an earlier draft, which scoped this task to
+`sceneRenderer.ts` alone and would have broken the build):**
+`src/render/renderWorker.ts` is the actual piscina worker entry point —
+it currently does `const raw = task.options.fontData; const fontData =
+Buffer.from(raw.buffer, ...); return renderScene(task.elements, task.scene,
+{ ...task.options, fontData });`, rewrapping `fontData` because
+`postMessage`'s structured clone strips it down to a plain `Uint8Array`
+crossing the piscina thread boundary (the documented Cyrillic-glyph bug
+from CLAUDE.md). Once `renderScene` stops taking `fontData` as an input
+(this task's whole point — it loads fonts itself now), that rewrap has
+nothing left to rewrap: `task.options` no longer has a `fontData` field at
+all, so this line is a compile error, not just dead code. **This is also
+a genuine simplification, not just a fix:** because `renderScene` (running
+*inside* the worker thread, per `renderWorker.ts` calling it) now calls
+`loadFontData` itself, the font bytes never cross the `postMessage`
+boundary in the first place — the entire Buffer-rewrap concern this file
+existed to solve is now moot for fonts specifically (the *separate*,
+still-necessary PNG-rewrap-on-the-way-out in `renderWorkerPool.ts` is
+untouched by this task — that's the render *result* crossing the boundary
+on its way back, an unrelated call site).
 
 **Interfaces:**
 - Consumes: `ColorValue`/`TextStyle`/`TextElement`/`ImageElement` (Task 1),
@@ -613,9 +654,18 @@ git commit -m "fix: fontCache caches every distinct font path, not just the last
   it no longer receives a single pre-loaded `fontData` buffer from its
   caller. `renderOverlay.ts` (today's one caller) stops loading/passing
   font data entirely; see Step 4's note on updating it.
-- Produces: `renderScene(elements, scene, options)` keeps its existing
-  signature; `SceneData` grows an optional `imageDataUris` field (see
-  below) that later tasks (6) populate.
+- Produces: `renderScene(elements, scene, options: SceneRendererOptions,
+  loadFont?)` — the exported `SceneRendererOptions` interface (currently
+  just `{width, height}`) is what Task 9 later widens with `background`;
+  `renderWorker.ts`/`renderWorkerPool.ts` import and reuse it by
+  reference rather than duplicating the shape. See Step 4 for the new
+  optional 4th `loadFont` parameter, added specifically so this task's own
+  tests can run on a non-Linux dev machine without touching production
+  behavior. `SceneData` grows an optional `imageDataUris` field (see
+  below) that later tasks (9) populate. `renderWorker.ts`'s `RenderTask`
+  shrinks — its `options` field's type follows whatever `sceneRenderer.ts`
+  exports for it, and the fontData-rewrap code this task removes is not
+  replaced by anything.
 
 - [ ] **Step 1: Read `renderOverlay.ts` and the current `sceneRenderer.test.ts` first**
 
@@ -629,10 +679,22 @@ mocks) is the pattern every new test case here must follow.
 - [ ] **Step 2: Write the failing tests — one real-render assertion per new capability**
 
 ```typescript
-// test/render/sceneRenderer.test.ts — add these cases to the existing describe block,
-// reusing whatever real font-loading setup the file already does for its current cases.
-// (fontData/fontFamily in SceneRendererOptions may need to become fontsByPath — see Step 4;
-// match whatever the file's existing tests already set up, adjusted for that.)
+// test/render/sceneRenderer.test.ts — add these cases to the existing describe block.
+//
+// Cross-platform note: production's default font loader (fontRegistry.ts) only knows
+// hardcoded Linux paths (/usr/share/fonts/...), which don't exist on a Windows/macOS dev
+// machine. Read the file's CURRENT test setup first — it may already solve this with its own
+// FONT_CANDIDATES-style local-file search; if so, adapt testLoadFont below to reuse that same
+// discovered path instead of hardcoding a second one. Where 'DejaVu Sans'/'Liberation Sans' are
+// used as family NAMES below, testLoadFont only cares about the (bold, italic) combination, not
+// the family string — any real local .ttf file stands in for "a font", since these tests are
+// checking that the CSS tricks render, not checking any specific font's glyphs.
+const testFontPath = /* whatever real local .ttf path the file's existing tests already use, or
+  a small set of files under a checked-in test-fixtures directory if none exists yet */;
+async function testLoadFont(_family: string, _bold: boolean, _italic: boolean): Promise<Buffer> {
+  return fs.promises.readFile(testFontPath);
+}
+const testOptions = { width: 400, height: 150 };
 
 it('renders gradient text without throwing', async () => {
   const png = await renderScene(
@@ -640,7 +702,7 @@ it('renders gradient text without throwing', async () => {
        color: { mode: 'gradient', stops: ['#ff0000', '#0000ff'], angleDeg: 0 },
        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } }],
     { title: 'GRADIENT', playlistLines: [], coverDataUri: null },
-    testOptions, // whatever the existing tests in this file already pass
+    testOptions, testLoadFont,
   );
   expect(png.length).toBeGreaterThan(0);
 });
@@ -652,7 +714,7 @@ it('renders a stroke without throwing', async () => {
        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false,
          stroke: { color: '#000000', width: 3 } } }],
     { title: 'STROKE', playlistLines: [], coverDataUri: null },
-    testOptions,
+    testOptions, testLoadFont,
   );
   expect(png.length).toBeGreaterThan(0);
 });
@@ -664,7 +726,7 @@ it('renders a shadow without throwing', async () => {
        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false,
          shadow: { color: '#000000', blur: 4, offsetX: 2, offsetY: 2 } } }],
     { title: 'SHADOW', playlistLines: [], coverDataUri: null },
-    testOptions,
+    testOptions, testLoadFont,
   );
   expect(png.length).toBeGreaterThan(0);
 });
@@ -675,7 +737,7 @@ it('renders bold+italic using the Liberation Sans family', async () => {
        color: { mode: 'solid', color: '#ffffff' },
        style: { fontFamily: 'Liberation Sans', bold: true, italic: true } }],
     { title: 'BOLD ITALIC', playlistLines: [], coverDataUri: null },
-    testOptions,
+    testOptions, testLoadFont,
   );
   expect(png.length).toBeGreaterThan(0);
 });
@@ -687,7 +749,7 @@ it('renders a free-standing text element using its own literal text, not scene.t
        color: { mode: 'solid', color: '#ffffff' },
        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } }],
     { title: 'unrelated track title', playlistLines: [], coverDataUri: null },
-    testOptions,
+    testOptions, testLoadFont,
   );
   expect(png.length).toBeGreaterThan(0);
 });
@@ -697,16 +759,36 @@ it('renders an image element from a data URI', async () => {
   const png = await renderScene(
     [{ type: 'image', x: 10, y: 10, width: 100, height: 100, assetId: 'asset-1' }],
     { title: 'x', playlistLines: [], coverDataUri: null, imageDataUris: { 'asset-1': tinyPngDataUri } },
+    testOptions, testLoadFont,
+  );
+  expect(png.length).toBeGreaterThan(0);
+});
+
+it('production default (no loadFont override) still resolves through the real fontRegistry — CI/Docker-only assertion', async () => {
+  // This one deliberately does NOT pass testLoadFont, to prove the production default path
+  // still works end to end. It only makes sense where /usr/share/fonts/... actually exists
+  // (the built Docker image, or CI running inside it) — guard it so local Windows/macOS runs
+  // don't fail on an environment difference that isn't a real bug:
+  if (process.platform !== 'linux') return;
+  const png = await renderScene(
+    [{ type: 'title', x: 0, y: 0, width: 400, fontSize: 40,
+       color: { mode: 'solid', color: '#ffffff' },
+       style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } }],
+    { title: 'PROD DEFAULT', playlistLines: [], coverDataUri: null },
     testOptions,
   );
   expect(png.length).toBeGreaterThan(0);
 });
 ```
 
-If the existing file has no shared `testOptions` fixture, build one the
-same way the file's current passing tests already load font data (real
-`loadFontData` call against a real font path from `fontRegistry.ts` — do
-not invent a different pattern).
+Fill in `testFontPath` by reading the file's *current* test setup first — it
+may already have a real local font path wired up for its existing passing
+tests; reuse that exact value rather than inventing a second one. If it
+doesn't, add one small checked-in fixture font (a single small permissively-
+licensed `.ttf`) under a `test/fixtures/` directory instead of depending on
+OS-specific system paths like `C:\Windows\Fonts\...`, so the test suite
+doesn't silently break on a machine that happens not to have Arial
+installed.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -817,15 +899,34 @@ function collectFontVariants(elements: TemplateElement[]): { family: string; bol
   return [...seen.values()];
 }
 
+// Default font loader: real registry path + real fs read, exactly what production uses.
+// The optional 4th parameter below exists ONLY so this file's own tests can substitute a
+// cross-platform-safe loader (e.g. a real local Windows/macOS .ttf for dev-machine test runs)
+// without mocking satori/resvg themselves or the production code path — production never
+// passes this argument, so it always gets the real registry.
+async function defaultLoadFont(family: string, bold: boolean, italic: boolean): Promise<Buffer> {
+  return loadFontData(resolveFontFile(family, bold, italic));
+}
+
+// A named, exported interface (not an inline `{width,height}` type) deliberately — Task 9
+// later adds a `background` field to THIS interface, and renderWorker.ts/renderWorkerPool.ts
+// import and reuse it by reference rather than duplicating the shape, so that later addition
+// doesn't require touching those two files by hand.
+export interface SceneRendererOptions {
+  width: number;
+  height: number;
+}
+
 export async function renderScene(
   elements: TemplateElement[],
   scene: SceneData,
-  options: { width: number; height: number },
+  options: SceneRendererOptions,
+  loadFont: (family: string, bold: boolean, italic: boolean) => Promise<Buffer> = defaultLoadFont,
 ): Promise<Buffer> {
   const variants = collectFontVariants(elements);
   const fonts = await Promise.all(variants.map(async (v) => ({
     name: v.family,
-    data: await loadFontData(resolveFontFile(v.family, v.bold, v.italic)),
+    data: await loadFont(v.family, v.bold, v.italic),
     weight: (v.bold ? 700 : 400) as 400 | 700,
     style: (v.italic ? 'italic' : 'normal') as 'italic' | 'normal',
   })));
@@ -863,12 +964,63 @@ Ripping out that entire now-dead plumbing chain is a separate, purely
 mechanical cleanup task not worth bundling into this one (it risks
 touching wiring this plan doesn't otherwise need to touch, for a
 correctness-neutral change — unused parameters aren't a bug). Leave them
-in place.
+in place. **This does NOT include `renderWorker.ts`** — that file's
+`fontData` rewrap is not "unused plumbing that's fine to leave," it is a
+compile error once `SceneRendererOptions`/`RenderTask['options']` stops
+having a `fontData` field. Fix it now, in this task (Step 4b below).
+
+- [ ] **Step 4b: Fix `renderWorker.ts` — remove the now-obsolete fontData rewrap**
+
+```typescript
+// src/render/renderWorker.ts — full replacement
+import { renderScene, SceneData, SceneRendererOptions } from './sceneRenderer';
+import { TemplateElement } from '../templates/templateTypes';
+
+export interface RenderTask {
+  elements: TemplateElement[];
+  scene: SceneData;
+  options: SceneRendererOptions; // imported by reference — when Task 9 later adds a
+    // `background` field to SceneRendererOptions, this type widens automatically, no edit
+    // needed here.
+}
+
+// Piscina's worker entry point — runs inside a worker_thread, off the main event loop. Resvg's
+// SVG->PNG rasterization is synchronous native CPU work; running it here (rather than inline in
+// the request/segment-build path) is what keeps one stream's overlay render from stalling every
+// other active stream's ffmpeg feeding and every other in-flight HTTP request on the same
+// process. See renderWorkerPool.ts for the pool this feeds into.
+//
+// Font loading now happens inside renderScene() itself (see sceneRenderer.ts), reading font
+// files directly from disk in THIS worker thread — the font bytes never cross the postMessage
+// boundary into or out of this function, so there is no Buffer/Uint8Array rewrap needed here
+// any more (contrast with renderWorkerPool.ts's renderViaPool(), which still rewraps the PNG
+// *return value* crossing back out — that boundary is unrelated and still real).
+export default function render(task: RenderTask): Promise<Buffer> {
+  return renderScene(task.elements, task.scene, task.options);
+}
+```
+
+Update `test/render/renderWorker.test.ts` — read it first. Its existing
+case(s) construct a `RenderTask` with `options: { width, height, fontData,
+fontFamily }` and likely assert on the Buffer-rewrap behavior for
+`fontData` specifically (the documented Cyrillic-glyph regression). That
+specific assertion no longer applies (there's nothing to rewrap — this
+task's own `sceneRenderer.ts` tests, via the `loadFont` injection point,
+are what now cover real-font-loading correctness). Replace it with a
+simpler test confirming `render()` just forwards its arguments to
+`renderScene` and returns its result (mock `sceneRenderer.ts`'s
+`renderScene` export for this one test file only — this file's job is
+"does the worker wrapper delegate correctly," not "does rendering work,"
+which `sceneRenderer.test.ts` already covers with the real thing).
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `npx jest test/render/sceneRenderer.test.ts test/render/renderOverlay.test.ts`
-Expected: PASS. **This risk is already resolved, not open:** during
+Run: `npx jest test/render/sceneRenderer.test.ts test/render/renderWorker.test.ts`
+Expected: PASS. (Note: `test/render/renderOverlay.test.ts` does not
+currently exist in this repo — an earlier draft of this plan referenced
+it by mistake; don't create it speculatively here, `renderOverlay.ts`'s
+own signature is untouched by this task per the out-of-scope note above.)
+**This risk is already resolved, not open:** during
 planning, a throwaway script ran all three CSS tricks through the real
 installed `satori@^0.33.4` + `@resvg/resvg-js@^2.6.2` pair (this project's
 actual pinned versions, not just satori's docs) and confirmed all three
@@ -887,14 +1039,14 @@ not evidence the trick itself doesn't work.
 - [ ] **Step 6: Run the full suite**
 
 Run: `npx jest`
-Expected: only `renderOverlay.ts`'s own callers (Task 6/9, not yet built)
-may still fail on unrelated grounds — no regression in anything currently
-passing.
+Expected: PASS, no regressions. `renderWorkerPool.test.ts` should be
+unaffected (its own `SceneRendererOptions`-typed parameter just narrows,
+nothing in that file's own logic touches `fontData` directly).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/render/sceneRenderer.ts src/render/renderOverlay.ts test/render/sceneRenderer.test.ts
+git add src/render/sceneRenderer.ts src/render/renderOverlay.ts src/render/renderWorker.ts test/render/sceneRenderer.test.ts test/render/renderWorker.test.ts
 git commit -m "feat: gradient/stroke/shadow/bold/italic/text/image rendering via Satori"
 ```
 
@@ -1057,18 +1209,38 @@ git commit -m "feat: timer drawtext resolves font family/weight/style, stroke, s
 
 **Files:**
 - Create: `src/templates/templateImageService.ts`
-- Modify: `src/templates/templateRoutes.ts`
+- Modify: `src/templates/templateRoutes.ts`, `src/server.ts`, `src/api/app.ts`
 - Test: `test/templates/templateImageService.test.ts`, extend `test/templates/templateRoutes.test.ts`
 
 **Interfaces:**
-- Consumes: `TemplateRepository` (existing, for the ownership check —
-  reuse whatever pattern `templateRoutes.ts` already uses to verify a
-  template belongs to the caller).
+- Consumes: `TemplateRepository` and the existing `requireOwnedTemplate`/
+  `userId`/`auth`/`wrapAsync` helpers already in `templateRoutes.ts`'s
+  closure (see the Global Constraints section for the verified pattern).
 - Produces: `TemplateImageService.upload(userId, templateId, file): Promise<{ assetId: string }>`
   and `TemplateImageService.resolvePath(userId, templateId, assetId): string`
-  (the renderable `.png` path) — Task 9 (buildOverlay wiring the
-  `imageDataUris` scene field, via `imageDataUri.ts`) and Task 10
-  (frontend) both depend on the exact route shapes below.
+  (the renderable `.png` path) — Task 9 (buildOverlay/preview wiring the
+  `imageDataUris` scene field) and Task 10 (frontend) both depend on the
+  exact route shapes below. `createTemplateRouter` gains a 5th parameter,
+  `templateImageService: TemplateImageService`.
+
+**This task must fully wire `TemplateImageService` end to end through
+`server.ts`/`app.ts` itself — do not leave it half-built for a later
+task to finish.** (An earlier draft of this plan split this wiring across
+Task 6 and Task 9, which would leave the codebase in a
+non-compiling/non-running state at the end of Task 6 — every task must
+leave `npm run build` and the full test suite green.) Concretely, in
+`src/server.ts`: construct `const templateImageService = new
+TemplateImageService({ uploadsDir: config.uploadsDir });` **early**,
+alongside `trackUploadService` (both are upload-related services keyed off
+`config.uploadsDir`, and — importantly — this must be declared *before*
+`new StreamManager({...})` is constructed a bit further down in this same
+file, so Task 9 can later add it to `StreamManagerDeps` without having to
+reorder anything). Add `templateImageService: TemplateImageService` to
+`AppDeps` (`src/api/app.ts`) and pass it as `createTemplateRouter`'s 5th
+argument at that file's one call site; pass `templateImageService` into
+the `createApp({...})` call in `server.ts` alongside every other dep.
+Task 9 later reuses this exact same `templateImageService` variable for
+`StreamManagerDeps` — it does not construct a second instance.
 
 - [ ] **Step 1: Read `trackUploadService.ts` and `trackRoutes.ts`'s cover-upload/cover-get routes first**
 
@@ -1157,9 +1329,9 @@ export class TemplateImageService {
         }
       }
     });
-    // -update 1 is required for a single-file PNG output rather than an image-sequence
-    // pattern — this exact flag was a real gotcha the first time this project extracted a
-    // still frame with ffmpeg. One code path handles PNG/JPEG/GIF-first-frame alike.
+    // -update 1 is required so ffmpeg writes a single PNG file rather than treating the output
+    // path as an image-sequence pattern (which -frames:v 1 alone does not prevent). One code
+    // path handles PNG/JPEG/GIF-first-frame alike this way.
     this.runFfmpeg = deps.runFfmpeg ?? (async (originalPath, outPngPath) => {
       await execFileAsync('ffmpeg', ['-y', '-i', originalPath, '-frames:v', '1', '-update', '1', outPngPath]);
     });
@@ -1196,44 +1368,74 @@ Expected: PASS.
 
 - [ ] **Step 6: Wire the routes**
 
-Add to `src/templates/templateRoutes.ts` (mirror the existing ownership-
-check pattern this file already uses for every other `/templates/{id}/...`
-route — read the file first to match it exactly, including 404-vs-403
-semantics):
+**Confirmed by reading the real files:** `multer` is NOT shared across
+routers in this codebase — `trackRoutes.ts` configures its own local
+`const upload = multer({ dest: os.tmpdir(), limits: { fileSize:
+MAX_AUDIO_BYTES } })`. Add an equivalent local instance to
+`templateRoutes.ts` with an image-appropriate size limit (images are much
+smaller than audio uploads — a `MAX_IMAGE_BYTES` constant, e.g. 10MB, not
+`trackRoutes.ts`'s audio limit).
+
+**`createTemplateRouter`'s real signature is four positional parameters,
+not a `deps` object** (see the Global Constraints section above for the
+full verified pattern — `wrapAsync`, `throw new ApiError(...)`, the
+existing `requireOwnedTemplate`/`userId` helpers). It gains a 5th
+parameter, `templateImageService: TemplateImageService`:
 
 ```typescript
-// POST /templates/{id}/images — multipart, field name 'image'
-router.post('/:id/images', requireAuth, upload.single('image'), async (req, res, next) => {
-  try {
-    const template = await deps.templateRepository.findById(req.params.id);
-    if (!template) return next(new ApiError(404, 'template not found'));
-    if (template.userId !== req.session.userId) return next(new ApiError(403, 'not your template'));
-    if (!req.file) return next(new ApiError(400, 'image file is required'));
-    const allowed = ['image/png', 'image/jpeg', 'image/gif'];
-    if (!allowed.includes(req.file.mimetype)) return next(new ApiError(400, 'unsupported image type'));
-    const result = await deps.templateImageService.upload(req.session.userId, template.id, {
+// src/templates/templateRoutes.ts
+import multer from 'multer';
+import * as os from 'os';
+import { TemplateImageService } from './templateImageService';
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const upload = multer({ dest: os.tmpdir(), limits: { fileSize: MAX_IMAGE_BYTES } });
+const ALLOWED_IMAGE_MIMETYPES = ['image/png', 'image/jpeg', 'image/gif'];
+
+export function createTemplateRouter(
+  authService: AuthService,
+  templateRepository: TemplateRepository,
+  trackRepository: Pick<TrackRepository, 'findById'>,
+  rendererDeps: TemplateRendererDeps,
+  templateImageService: TemplateImageService,
+): Router {
+  // ...existing router/auth/userId/requireOwnedTemplate setup, unchanged...
+
+  router.post('/:id/images', auth, upload.single('image'), wrapAsync(async (req, res) => {
+    const owner = userId(req as AuthenticatedRequest);
+    const template = await requireOwnedTemplate(req.params.id, owner);
+    if (!req.file) throw new ApiError(400, 'image file is required');
+    if (!ALLOWED_IMAGE_MIMETYPES.includes(req.file.mimetype)) throw new ApiError(400, 'unsupported image type');
+    const result = await templateImageService.upload(owner, template.id, {
       originalname: req.file.originalname, path: req.file.path, size: req.file.size,
     });
-    res.json(result);
-  } catch (err) { next(err); }
-});
+    res.status(200).json(result);
+  }));
 
-// GET /templates/{id}/images/{assetId}
-router.get('/:id/images/:assetId', requireAuth, async (req, res, next) => {
-  try {
-    const template = await deps.templateRepository.findById(req.params.id);
-    if (!template) return next(new ApiError(404, 'template not found'));
-    if (template.userId !== req.session.userId) return next(new ApiError(403, 'not your template'));
-    const filePath = deps.templateImageService.resolvePath(req.session.userId, template.id, req.params.assetId);
-    res.sendFile(filePath, (err) => { if (err) next(new ApiError(404, 'image not found')); });
-  } catch (err) { next(err); }
-});
+  router.get('/:id/images/:assetId', auth, wrapAsync(async (req, res) => {
+    const owner = userId(req as AuthenticatedRequest);
+    const template = await requireOwnedTemplate(req.params.id, owner);
+    const filePath = templateImageService.resolvePath(owner, template.id, req.params.assetId);
+    res.sendFile(filePath);
+  }));
+
+  return router;
+}
 ```
 
-Match the exact `upload`/multer instance, `ApiError` import, and
-`requireAuth` middleware this file already uses elsewhere — do not
-introduce a second multer configuration if one is already exported
-somewhere shared (check `trackRoutes.ts`/a shared `upload.ts` first).
+**Matches the existing, real pattern exactly** — `trackRoutes.ts`'s
+`GET /:id/cover` calls `res.sendFile(track.coverPath)` with **no**
+callback (confirmed by reading that file), relying on Express's documented
+default behavior of forwarding a missing-file error to `next()`
+automatically when no callback is given; wrapped in `wrapAsync`, that
+still reaches `errorHandler.ts`. Don't add a callback here — it would
+diverge from the codebase's one existing precedent for this exact kind of
+route for no reason (an earlier draft of this plan added an unnecessary
+`next`-calling callback here before this was checked against the real
+file). Also worth knowing: `errorHandler.ts` already 400s a
+`multer.MulterError` automatically (e.g. `LIMIT_FILE_SIZE` from
+`MAX_IMAGE_BYTES`) — no manual file-size check is needed in the upload
+handler above.
 
 - [ ] **Step 7: Write route tests, following the existing fake-repository pattern in `templateRoutes.test.ts`**
 
@@ -1241,17 +1443,24 @@ Cover: 200 + `{assetId}` on a valid upload by the template's owner; 404 for
 a nonexistent template; 403 for another user's template; 400 for a missing
 file; 400 for a disallowed mimetype (e.g. `image/svg+xml`); GET returns
 the file for the owner, 404 for a wrong assetId, 403 for another user's
-template.
+template. Whatever this test file's existing setup does to construct a
+router for testing (it calls `createTemplateRouter(...)` with fakes for
+its first four params) now needs a 5th argument too — a fake/stub
+`TemplateImageService` (e.g. `{ upload: jest.fn(), resolvePath: jest.fn() }`).
 
-- [ ] **Step 8: Run the full suite**
+- [ ] **Step 8: Run the full suite, and the build**
 
-Run: `npx jest`
-Expected: PASS.
+Run: `npx jest && npm run build`
+Expected: both PASS — `npm run build` matters here specifically because
+this task changes `AppDeps`/`createApp`'s call site and `server.ts`'s
+construction order (see the `templateImageService` wiring note above); a
+type error in that wiring wouldn't necessarily show up in `jest` alone if
+no test exercises the real `createApp`/`server.ts` composition root.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/templates/templateImageService.ts src/templates/templateRoutes.ts test/templates/templateImageService.test.ts test/templates/templateRoutes.test.ts
+git add src/templates/templateImageService.ts src/templates/templateRoutes.ts src/server.ts src/api/app.ts test/templates/templateImageService.test.ts test/templates/templateRoutes.test.ts
 git commit -m "feat: template image upload (POST/GET /templates/:id/images)"
 ```
 
@@ -1290,9 +1499,11 @@ Expected: FAIL — route doesn't exist.
 
 ```typescript
 import { FONT_FAMILIES } from '../render/fontRegistry';
-// ...
-router.get('/fonts', requireAuth, (_req, res) => {
-  res.json({ families: FONT_FAMILIES });
+// ...inside createTemplateRouter, using the already-bound `auth` middleware
+// (const auth = requireAuth(authService)) — not bare `requireAuth`, matching every
+// other route in this file:
+router.get('/fonts', auth, (_req, res) => {
+  res.status(200).json({ families: FONT_FAMILIES });
 });
 ```
 
@@ -1319,8 +1530,8 @@ git commit -m "feat: GET /templates/fonts"
 
 **Files:**
 - Modify: `prisma/schema.prisma`, `src/tracks/trackRepository.ts`, `src/tracks/trackRoutes.ts`,
-  `src/playlists/playlistRepository.ts`, `src/playlist/types.ts`
-- Test: extend `test/tracks/trackRoutes.test.ts`, extend `test/playlists/playlistRepository.test.ts` if one exists (check)
+  `src/playlists/playlistRepository.ts`, `src/playlist/types.ts`, `src/stream/streamManager.ts`
+- Test: extend `test/tracks/trackRoutes.test.ts`, extend `test/playlists/playlistRepository.test.ts` if one exists (check), extend `test/stream/streamManager.test.ts`
 - Create: `prisma/migrations/<timestamp>_track_overlay_override/migration.sql` (generated, not hand-written)
 
 **Confirmed by reading the current files (this is not a hypothetical
@@ -1390,15 +1601,24 @@ it('updateOverlayOverride sets the field, and passing null clears it', async () 
 
 ```typescript
 // src/tracks/trackRepository.ts — add alongside the existing methods
+import { Prisma } from '@prisma/client';
+// ...
 async updateOverlayOverride(trackId: string, override: TrackOverlayOverride | null): Promise<void> {
-  await this.prisma.track.update({ where: { id: trackId }, data: { overlayOverride: override ?? Prisma.JsonNull } });
+  await this.prisma.track.update({ where: { id: trackId }, data: { overlayOverride: override ?? Prisma.DbNull } });
 }
 ```
 
-(Use whatever the file's existing `Prisma`-namespace import already is for
-this pattern — Prisma requires `Prisma.JsonNull`/`Prisma.DbNull` rather
-than a plain `null` for nullable `Json` columns; check the file's current
-imports before assuming which is already available.)
+**Use `Prisma.DbNull`, not `Prisma.JsonNull`, here.** Prisma's nullable
+`Json?` columns need one of these two distinct sentinels instead of a
+plain `null` literal, and they are NOT interchangeable: `Prisma.JsonNull`
+writes the literal JSON value `null` *into* the column (the column is
+still non-NULL at the SQL level, storing the 4-byte JSON token `null`);
+`Prisma.DbNull` writes a true SQL `NULL`. Both currently deserialize back
+to JS `null` on a plain read, so the difference is easy to miss in a quick
+test — but `DbNull` is the one that actually means "no override," and
+becomes real correctness (not just style) the moment anything ever
+queries with `where: { overlayOverride: null }` (a true SQL `NULL`
+matches that Prisma filter; a stored JSON `null` token does not).
 
 - [ ] **Step 5: Write the failing route test**
 
@@ -1429,6 +1649,14 @@ it('PATCH /tracks/:id with overlayOverride: null clears it', async () => {
 
 - [ ] **Step 6: Implement the route**
 
+**Confirmed by reading the real `src/tracks/trackRoutes.ts`:** it uses the
+exact same `wrapAsync`/`throw new ApiError(...)` pattern as
+`templateRoutes.ts` (see Global Constraints), but inlines the caller's id
+as `(req as AuthenticatedRequest).user!.id` at each use rather than a
+shared `userId()` helper function — `createTrackRouter`'s existing routes
+(`GET /:id/cover`, `DELETE /:id`) are the exact model to copy for the
+ownership check, not a generic `deps.x`/`next(err)` shape:
+
 ```typescript
 // src/tracks/trackRoutes.ts
 import { isValidColorValue } from '../templates/templateTypes';
@@ -1443,18 +1671,16 @@ function isValidOverlayOverride(value: unknown): value is TrackOverlayOverride |
   return true;
 }
 
-router.patch('/:id', requireAuth, async (req, res, next) => {
-  try {
-    const track = await deps.trackRepository.findById(req.params.id);
-    if (!track) return next(new ApiError(404, 'track not found'));
-    if (track.userId !== req.session.userId) return next(new ApiError(403, 'not your track'));
-    if (!('overlayOverride' in req.body) || !isValidOverlayOverride(req.body.overlayOverride)) {
-      return next(new ApiError(400, 'invalid overlayOverride'));
-    }
-    await deps.trackRepository.updateOverlayOverride(track.id, req.body.overlayOverride);
-    res.sendStatus(200);
-  } catch (err) { next(err); }
-});
+router.patch('/:id', auth, wrapAsync(async (req, res) => {
+  const track = await trackRepository.findById(req.params.id);
+  if (!track) throw new ApiError(404, 'track not found');
+  if (track.userId !== (req as AuthenticatedRequest).user!.id) throw new ApiError(403, 'not your track');
+  if (!('overlayOverride' in (req.body ?? {})) || !isValidOverlayOverride(req.body.overlayOverride)) {
+    throw new ApiError(400, 'invalid overlayOverride');
+  }
+  await trackRepository.updateOverlayOverride(track.id, req.body.overlayOverride);
+  res.status(200).json({});
+}));
 ```
 
 - [ ] **Step 7: Thread `overlayOverride` through the read path Task 9 depends on**
@@ -1507,6 +1733,63 @@ a fake — follow that same convention here rather than introducing a new
 one; check `test/playlists/playlistRepository.test.ts` for whether one
 already exists before assuming its shape).
 
+- [ ] **Step 7b: Fix the SECOND place this exact same stripping bug exists — `StreamManager.start()`'s `allUserTracks`**
+
+**Found by a fresh review of an earlier draft of this plan, which fixed
+`PlaylistRepository.listTracks()` (Step 7 above) but missed an identical
+bug three lines away in a different file.** `src/stream/streamManager.ts`,
+inside `start()`, builds the library used for the `play`-by-name command:
+
+```typescript
+const allUserTracks: Track[] = allUserTracksRaw.map((t) => ({ name: t.name, audioPath: t.audioPath, coverPath: t.coverPath }));
+```
+
+This drops `overlayOverride` exactly the way `listTracks()` did — a track
+reached via `POST /destinations/{id}/stream/play` would render with its
+override silently missing, even after Step 7's fix, because this is a
+*second*, independent read path. Fix it the same way:
+
+```typescript
+const allUserTracks: Track[] = allUserTracksRaw.map((t) => ({
+  name: t.name, audioPath: t.audioPath, coverPath: t.coverPath,
+  overlayOverride: t.overlayOverride as TrackOverlayOverride | null,
+}));
+```
+
+(`allUserTracksRaw` comes from `trackRepository.listByUser(destination.userId)`
+— confirm its return type already carries the raw `overlayOverride` column
+now that the migration has landed, which it should since it's presumably a
+full Prisma row read, not a hand-projected view like `PlaylistTrackView`
+was.) Add `src/stream/streamManager.ts` to this task's Files list; extend
+`test/stream/streamManager.test.ts` with a case asserting a `play`-command
+track carries its override through to `LibraryLike.findByName`'s result.
+
+- [ ] **Step 7c: Expose `overlayOverride` on `GET /tracks` — the Library UI (Task 12) cannot function without this**
+
+**Also found by the same review.** `trackRoutes.ts`'s `toSummary()`
+returns `{ id, name, durationSeconds, hasCover }` only — Step 6 above adds
+the *write* side (`PATCH`) but nothing exposes the *current* value, so
+Task 12's on/off override toggle would have no way to initialize its
+checked state and risks silently clobbering an existing override the
+first time a user opens the Library page and saves anything. Fix:
+
+```typescript
+// src/tracks/trackRoutes.ts
+function toSummary(track: { id: string; name: string; durationSeconds: number | null; coverPath: string | null; overlayOverride: TrackOverlayOverride | null }) {
+  return {
+    id: track.id, name: track.name, durationSeconds: track.durationSeconds,
+    hasCover: track.coverPath !== null, overlayOverride: track.overlayOverride,
+  };
+}
+```
+
+Update this task's route tests (`GET /tracks`) to assert the field is
+present. Task 10's frontend `Track` type (`frontend/src/api/tracks.ts`)
+must include `overlayOverride: TrackOverlayOverride | null` to match —
+flag this for Task 10 explicitly since Task 10 was written before this
+gap was found; if executing Task 10 from an earlier snapshot of this
+plan, add the field there too.
+
 - [ ] **Step 8: Run tests, then the full suite**
 
 Run: `npx jest`
@@ -1515,120 +1798,282 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add prisma/schema.prisma prisma/migrations src/tracks/trackRepository.ts src/tracks/trackRoutes.ts src/playlist/types.ts src/playlists/playlistRepository.ts test/tracks/trackRoutes.test.ts
-git commit -m "feat: per-track overlayOverride (PATCH /tracks/:id), threaded through to StreamManager's read path"
+git add prisma/schema.prisma prisma/migrations src/tracks/trackRepository.ts src/tracks/trackRoutes.ts src/playlist/types.ts src/playlists/playlistRepository.ts src/stream/streamManager.ts test/tracks/trackRoutes.test.ts test/stream/streamManager.test.ts
+git commit -m "feat: per-track overlayOverride (PATCH/GET /tracks/:id), threaded through both StreamManager read paths"
 ```
 
 ---
 
-### Task 9: `StreamManager.buildOverlay` merges `overlayOverride`
+### Task 9: Wire `overlayOverride` + image elements into BOTH render call sites (live stream and preview)
 
 **Files:**
-- Modify: `src/stream/streamManager.ts`, `src/render/sceneRenderer.ts`
-- Test: extend `test/stream/streamManager.test.ts`, extend `test/render/sceneRenderer.test.ts`
+- Modify: `src/stream/streamManager.ts`, `src/render/sceneRenderer.ts`,
+  `src/render/renderOverlay.ts`, `src/templates/templateRoutes.ts`, `src/server.ts`
+- Test: extend `test/stream/streamManager.test.ts`, extend `test/render/sceneRenderer.test.ts`,
+  extend `test/templates/templateRoutes.test.ts`
 
-**Interfaces:**
-- Consumes: `Track.overlayOverride` (Task 8 Step 7 — already present on
-  the `track: Track` parameter `buildOverlay` receives, no additional
-  repository read needed), `imageDataUris` scene field (Task 4),
-  `TemplateImageService.resolvePath` + `imageDataUri.ts` (Task 6, for
-  resolving each `image` element's file to a data URI before rendering).
-- Produces: no new exported interface — this task closes the loop the
-  spec left open ("which element(s) the override patches onto").
+**Two real gaps a fresh review found in an earlier draft of this task —
+both are fixed by the design below, read this before the steps:**
 
-- [ ] **Step 1: Read the current `buildOverlay` closure in full**
+1. **`backgroundColor` was designed (Step 2, old draft) but never actually
+   reached the renderer.** The old draft added `sceneRenderer.ts` support
+   for a root `backgroundColor`, but `applyOverlayOverride()` only ever
+   read `override.color` — `override.backgroundColor` was computed
+   nowhere and passed nowhere. `RenderOverlayParams`
+   (`src/render/renderOverlay.ts`, the shared type both this task's
+   `buildOverlay` call and `templateRoutes.ts`'s `/preview` handler build)
+   had no field for it to flow through even if it had been read. Fixed
+   below by threading a `background?: ColorValue` field end to end:
+   `TrackOverlayOverride.backgroundColor` → `RenderOverlayParams.background`
+   → `renderViaPool`'s options → `renderScene`'s options → the root
+   `SatoriNode`'s style.
+2. **`image` elements were never resolved on the `/templates/{id}/preview`
+   path at all** — only on the live-stream path this task builds. Without
+   this, `TemplateEditor.tsx`'s live preview (its *only* feedback
+   mechanism for the new `image` element type) would always show the
+   black-rect fallback. Fixed below by extending
+   `templateRoutes.ts`'s `/preview` handler too, not just
+   `StreamManager.buildOverlay` — this is why this task's scope grew to
+   include `templateRoutes.ts`.
 
-Read `src/stream/streamManager.ts`'s `buildOverlay` (already read once
-during brainstorming — re-confirm against the file, not memory, since
-Tasks 1-8 changed several of the types it touches). By this point in the
-plan, the `track: Track` parameter `buildOverlay` receives already carries
-`overlayOverride?: TrackOverlayOverride | null` (Task 8, Step 7) — no
-additional repository read is needed here.
-
-- [ ] **Step 2: Pin down the override's target — decision made here, not deferred further**
-
-The override's `color` field patches every `title`/`text` element's
-`color` (the most track-relevant, prominent text); `backgroundColor`
-patches the whole canvas's background, behind every element. `playlist`
-and `timer` colors are never touched by an override — they're deliberately
-excluded so a bold per-track accent doesn't make the persistent playlist
-window unreadable across a track change it isn't about.
-
-**`sceneRenderer.ts` change needed for `backgroundColor`:** `renderScene`'s
-`options` parameter (currently `{ width: number; height: number }`, per
-Task 4) gains an optional `backgroundColor?: string`, applied to the root
-`SatoriNode`'s own style when present (`backgroundColor: options.backgroundColor`
-alongside its existing `width`/`height`/`display`/`position` — omit the
-property entirely when not present, don't pass `undefined` into Satori's
-style object). Add one small test to `sceneRenderer.test.ts` asserting the
-call doesn't throw with `backgroundColor` set — this is a one-line,
-low-risk addition to a file Task 4 already built, not a reason to
-reopen Task 4 itself.
-
-- [ ] **Step 3: Write the failing test**
+**Confirmed by reading `src/render/renderOverlay.ts` and
+`src/templates/templateRoutes.ts` in full (not guessed):** after Task 4,
+`renderTemplatePng(params: RenderOverlayParams): Promise<Buffer>` looks
+like this (Task 4 already removed the `fontData`/`fontFamily` loading and
+passing — `fontPath`/`fontFamily` remain as unused fields on
+`RenderOverlayParams` per Task 4's explicit "leave this dead plumbing in
+place" decision):
 
 ```typescript
-it('buildOverlay applies the track overlayOverride color to title elements when present', async () => {
-  // construct a StreamManager the way this file's other tests already do, with a track that
-  // has overlayOverride: { color: { mode: 'solid', color: '#ff0000' } }
-  // assert the elements array passed into renderTemplatePng has every title/text element's
-  // color replaced with that override, and playlist/timer left untouched
+// src/render/renderOverlay.ts, as Task 4 leaves it
+export async function renderTemplatePng(params: RenderOverlayParams): Promise<Buffer> {
+  const coverDataUri = await readImageAsDataUri(params.coverPath);
+  return renderViaPool(
+    params.elements,
+    { title: params.title, playlistLines: params.playlistLines, coverDataUri },
+    { width: params.width, height: params.height },
+  );
+}
+```
+
+`templateRoutes.ts`'s `/preview` handler (`router.post('/:id/preview', ...)`)
+is the ONE other real call site — it builds a `RenderOverlayParams` object
+from either the saved template's elements or a draft posted in the request
+body, and does not currently touch images or backgrounds at all.
+
+- [ ] **Step 1: Read the current `buildOverlay` closure and the `/preview` handler in full**
+
+Read `src/stream/streamManager.ts`'s `buildOverlay` and
+`src/templates/templateRoutes.ts`'s `/preview` handler fresh — re-confirm
+against the files, not memory, since Tasks 1-8 changed several of the
+types both touch. By this point in the plan, the `track: Track` parameter
+`buildOverlay` receives already carries `overlayOverride?: TrackOverlayOverride | null`
+(Task 8, Steps 7/7b) — no additional repository read is needed for that
+part.
+
+- [ ] **Step 2: Extend `RenderOverlayParams` and `renderTemplatePng`**
+
+```typescript
+// src/render/renderOverlay.ts — full replacement
+import { renderViaPool } from './renderWorkerPool';
+import { readImageAsDataUri } from './imageDataUri';
+import { TemplateElement, ColorValue } from '../templates/templateTypes';
+
+export interface RenderOverlayParams {
+  elements: TemplateElement[];
+  title: string;
+  playlistLines: string[];
+  coverPath: string;
+  width: number;
+  height: number;
+  fontPath: string;
+  fontFamily: string;
+  // assetId -> on-disk renderable PNG path (TemplateImageService.resolvePath's return value),
+  // one entry per 'image' element actually present in `elements`. Absent/empty is fine — image
+  // elements just fall back to their black-rect placeholder (see sceneRenderer.ts).
+  imageAssets?: Record<string, string>;
+  // The per-track overlayOverride's backgroundColor, if any — applied to the whole canvas
+  // behind every element. Absent means "use the template's own background," i.e. none (today's
+  // existing behavior, unchanged).
+  background?: ColorValue;
+}
+
+export async function renderTemplatePng(params: RenderOverlayParams): Promise<Buffer> {
+  const imageAssetEntries = Object.entries(params.imageAssets ?? {});
+  const [coverDataUri, ...imageDataUriValues] = await Promise.all([
+    readImageAsDataUri(params.coverPath),
+    ...imageAssetEntries.map(([, filePath]) => readImageAsDataUri(filePath)),
+  ]);
+  const imageDataUris = Object.fromEntries(imageAssetEntries.map(([assetId], i) => [assetId, imageDataUriValues[i]]));
+
+  return renderViaPool(
+    params.elements,
+    { title: params.title, playlistLines: params.playlistLines, coverDataUri, imageDataUris },
+    { width: params.width, height: params.height, background: params.background },
+  );
+}
+```
+
+- [ ] **Step 3: Extend `sceneRenderer.ts`'s root background support**
+
+```typescript
+// src/render/sceneRenderer.ts — extends what Task 4 already built. `SceneRendererOptions` is
+// the SAME named interface Task 4 exported (renderWorker.ts/renderWorkerPool.ts already import
+// it by reference) — widen it in place, don't redefine renderScene's parameter as a new inline
+// type:
+export interface SceneRendererOptions {
+  width: number;
+  height: number;
+  background?: ColorValue;
+}
+
+function backgroundToCss(background: ColorValue): Record<string, unknown> {
+  if (background.mode === 'solid') return { backgroundColor: background.color };
+  return { backgroundImage: `linear-gradient(${background.angleDeg}deg, ${background.stops.join(', ')})` };
+}
+
+// Inside renderScene's existing body (signature itself is unchanged — still
+// `(elements, scene, options: SceneRendererOptions, loadFont = defaultLoadFont)`), the root
+// SatoriNode's style gains the background:
+const root: SatoriNode = {
+  type: 'div',
+  props: {
+    style: {
+      width: options.width, height: options.height, display: 'flex', position: 'relative',
+      ...(options.background ? backgroundToCss(options.background) : {}),
+    },
+    children: elements.map((el) => elementNode(el, scene)).filter((node): node is SatoriNode => node !== null),
+  },
+};
+```
+
+Add a test asserting a gradient `background` renders without throwing
+(mirrors Task 4's own gradient-text test, applied to the root instead of
+one element's text).
+
+- [ ] **Step 4: Write the failing `buildOverlay` tests**
+
+```typescript
+it('buildOverlay applies the track overlayOverride color to title/text elements and backgroundColor to the canvas', async () => {
+  // construct a StreamManager the way this file's other tests already do, with a track that has
+  // overlayOverride: { color: { mode: 'solid', color: '#ff0000' }, backgroundColor: { mode: 'solid', color: '#000000' } }
+  // assert renderTemplatePng was called with: every title/text element's color replaced with
+  // the override color (playlist/timer untouched), AND params.background === the override's
+  // backgroundColor
 });
 
-it('buildOverlay renders unmodified template elements when overlayOverride is null', async () => {
-  // same setup, overlayOverride: null — elements passed through exactly as the template defines
+it('buildOverlay passes no background and unmodified elements when overlayOverride is null', async () => {
+  // same setup, overlayOverride: null — renderTemplatePng called with background: undefined and
+  // elements exactly as the template defines
+});
+
+it('buildOverlay resolves image elements to on-disk paths via templateImageService.resolvePath', async () => {
+  // a template with one 'image' element (assetId: 'asset-1') — assert renderTemplatePng was
+  // called with imageAssets: { 'asset-1': <whatever the mocked templateImageService.resolvePath returned> }
 });
 ```
 
 Match this file's existing mocking style for `renderTemplatePng` (a jest
 mock capturing call arguments) rather than inventing a new one.
 
-- [ ] **Step 4: Implement**
+- [ ] **Step 5: Implement `buildOverlay`'s changes**
 
 ```typescript
-// src/stream/streamManager.ts, inside buildOverlay, before calling render()
-function applyOverlayOverride(elements: TemplateElement[], override: TrackOverlayOverride | null): TemplateElement[] {
-  if (!override) return elements;
-  return elements.map((el) => {
-    if ((el.type === 'title' || el.type === 'text') && override.color) {
-      return { ...el, color: override.color };
-    }
-    return el;
-  });
+// src/stream/streamManager.ts — inside the buildOverlay closure, before calling renderTemplatePng
+function applyOverlayOverride(elements: TemplateElement[], override: TrackOverlayOverride | null | undefined): TemplateElement[] {
+  if (!override?.color) return elements;
+  return elements.map((el) => ((el.type === 'title' || el.type === 'text') ? { ...el, color: override.color! } : el));
+}
+
+function resolveImageAssets(
+  elements: TemplateElement[],
+  templateImageService: Pick<TemplateImageService, 'resolvePath'>,
+  userId: string,
+  templateId: string,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const el of elements) {
+    if (el.type === 'image') result[el.assetId] = templateImageService.resolvePath(userId, templateId, el.assetId);
+  }
+  return result;
 }
 ```
 
-Also resolve every `image` element's `assetId` to a data URI before
-rendering (mirrors how `coverDataUri` is already resolved elsewhere in
-this same function — read that existing code and follow the same
-`imageDataUri.ts` call pattern, building the `imageDataUris` map Task 4's
-`SceneData` expects):
+Wire both into the existing `renderTemplatePng({...})` call inside
+`buildOverlay` — pass `elements: applyOverlayOverride(bakedElements, track.overlayOverride)`
+instead of the raw `bakedElements`, add
+`imageAssets: resolveImageAssets(bakedElements, this.deps.templateImageService, destination.userId, options.templateId!)`,
+and add `background: track.overlayOverride?.backgroundColor`. (Match the
+surrounding function's real current variable names — `bakedElements`/
+`destination`/`options.templateId` above are illustrative of the
+mechanism given how much of this function Tasks 1-8 have already changed,
+not a guaranteed literal match; the *shape* of what to pass is exact.)
+
+- [ ] **Step 6: Wire `TemplateImageService` into `StreamManagerDeps`**
 
 ```typescript
-const imageElements = bakedElements.filter((e): e is ImageElement => e.type === 'image');
-const imageDataUris = Object.fromEntries(
-  await Promise.all(imageElements.map(async (e) => [
-    e.assetId,
-    await imageDataUri(this.deps.templateImageService.resolvePath(destination.userId, options.templateId!, e.assetId)),
-  ])),
-);
+// src/stream/streamManager.ts
+import { TemplateImageService } from '../templates/templateImageService';
+
+export interface StreamManagerDeps {
+  // ...existing fields...
+  templateImageService: Pick<TemplateImageService, 'resolvePath'>;
+}
 ```
 
-(Adjust exact variable names to match the surrounding function's real
-current names — this is illustrative of the mechanism, not a literal
-drop-in given how much of this function's surrounding context Tasks 1-8
-have already changed.)
+In `src/server.ts`, add `templateImageService,` to the `new StreamManager({...})`
+construction — **reuse the exact same `templateImageService` instance
+Task 6 already constructed** (declared earlier in that same file,
+alongside `trackUploadService`), do not construct a second one.
 
-- [ ] **Step 5: Run tests, then the full suite**
+- [ ] **Step 7: Extend `templateRoutes.ts`'s `/preview` handler — the second real render call site**
 
-Run: `npx jest`
-Expected: PASS.
+Read the handler's current body (Step 1) — it builds a `RenderOverlayParams`-
+shaped object today with `elements`, `title`, `playlistLines`, `coverPath`,
+`width`, `height`, `fontPath`, `fontFamily`. Add, using the same
+`templateImageService` this file already received as `createTemplateRouter`'s
+5th parameter (Task 6):
 
-- [ ] **Step 6: Commit**
+```typescript
+const imageAssets: Record<string, string> = {};
+for (const el of previewElements) {
+  if (el.type === 'image') imageAssets[el.assetId] = templateImageService.resolvePath(owner, template.id, el.assetId);
+}
+
+const png = await renderTemplatePng({
+  elements: previewElements,
+  title: title ?? 'Sample Track',
+  playlistLines: playlistLines ?? ['▶ Sample Track', '  Next Track'],
+  coverPath,
+  width: CANVAS_WIDTH,
+  height: CANVAS_HEIGHT,
+  fontPath: rendererDeps.fontPath,
+  fontFamily: rendererDeps.fontFamily,
+  imageAssets,
+  // no `background` here — the preview endpoint has no concept of a per-track override (there's
+  // no specific track being "played"), so it always shows the template's own look, matching
+  // today's existing preview behavior for everything else.
+});
+```
+
+Add a test: preview a draft with one `image` element and a mocked
+`templateImageService.resolvePath`, assert `renderTemplatePng` (or, if
+this test file mocks at the `renderViaPool`/HTTP-response level instead,
+whatever the equivalent existing assertion style is) receives the
+resolved path.
+
+- [ ] **Step 8: Run tests, then the full suite and the build**
+
+Run: `npx jest && npm run build`
+Expected: PASS. The build check matters here for the same reason as Task
+6 — this task touches `StreamManagerDeps`/`server.ts`'s construction
+again.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/stream/streamManager.ts src/render/sceneRenderer.ts test/stream/streamManager.test.ts test/render/sceneRenderer.test.ts
-git commit -m "feat: per-track overlayOverride patches title/text color; image elements resolve to data URIs"
+git add src/stream/streamManager.ts src/render/sceneRenderer.ts src/render/renderOverlay.ts src/templates/templateRoutes.ts src/server.ts test/stream/streamManager.test.ts test/render/sceneRenderer.test.ts test/templates/templateRoutes.test.ts
+git commit -m "feat: wire overlayOverride (color+background) and image elements into both the live-stream and preview render paths"
 ```
 
 ---
@@ -1641,7 +2086,8 @@ git commit -m "feat: per-track overlayOverride patches title/text color; image e
 
 **Interfaces:**
 - Consumes: every backend route shape from Tasks 1, 6, 7, 8 exactly as
-  specified there.
+  specified there — including Task 8 Step 7c's addition of
+  `overlayOverride` to `GET /tracks`'s response shape.
 - Produces: TypeScript types + fetch wrappers Task 11/12 import directly —
   no task after this one talks to `fetch`/routes directly, only to these
   wrappers.
@@ -1668,7 +2114,24 @@ export async function getFontFamilies(): Promise<string[]> { /* GET /templates/f
 
 - [ ] **Step 3: Extend `frontend/src/api/tracks.ts`**
 
+Mirror `TrackOverlayOverride` from the backend (`src/tracks/trackRepository.ts`,
+Task 8) — `{ color?: ColorValue; backgroundColor?: ColorValue }`, reusing
+the `ColorValue` type this file (or `templates.ts`, wherever it's already
+imported from for this frontend) defines per Step 2. **Add
+`overlayOverride: TrackOverlayOverride | null` to this file's existing
+`Track` type** — `GET /tracks` now returns it (Task 8, Step 7c) and
+Task 12's override UI needs it to initialize its on/off toggle correctly;
+this is a real, necessary field, not optional cleanup.
+
 ```typescript
+export interface TrackOverlayOverride {
+  color?: ColorValue;
+  backgroundColor?: ColorValue;
+}
+
+// Track's existing fields (id, name, durationSeconds, hasCover, ...) unchanged, plus:
+// overlayOverride: TrackOverlayOverride | null;
+
 export async function updateTrackOverlayOverride(trackId: string, override: TrackOverlayOverride | null): Promise<void> { /* PATCH /tracks/{id} */ }
 ```
 

@@ -222,9 +222,9 @@ template images).
 **GIF, Part-A behavior only:** on upload, extract the first frame via
 `ffmpeg -i input.gif -frames:v 1 -update 1 preview.png` (the `-update 1`
 flag matters for a single-file PNG output rather than an image-sequence
-pattern — a real gotcha already hit once earlier in this project). The
-extracted `preview.png` is what Part A actually renders; the original GIF
-file is kept alongside it (not deleted) so Part B can pick it up later for
+pattern). The extracted `preview.png` is what Part A actually renders; the
+original GIF file is kept alongside it (not deleted) so Part B can pick it
+up later for
 real looping animation without asking the user to re-upload.
 
 **Not doing:** cleanup of orphaned image files when an element is removed
