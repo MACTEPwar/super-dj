@@ -8,7 +8,12 @@
     "streams": "Streams",
     "signOut": "Sign out"
   },
+  "confirmDialog": {
+    "cancel": "Cancel",
+    "working": "Working…"
+  },
   "auth": {
+    "tagline": "Stream your playlists live, on your terms.",
     "login": {
       "title": "Sign in",
       "email": "Email",
@@ -30,10 +35,13 @@
     "title": "Library",
     "addTrack": "+ Add Track",
     "empty": "No tracks yet.",
+    "loading": "Loading tracks…",
     "durationUnknown": "duration unknown",
     "durationSeconds": "{{seconds}}s",
     "delete": "Delete",
-    "deleteFailed": "Failed to delete track"
+    "deleteFailed": "Failed to delete track",
+    "deleteConfirmTitle": "Delete this track?",
+    "deleteConfirmDescription": "This removes it from your library and from any playlists that use it. This can't be undone."
   },
   "addTrackDrawer": {
     "title": "Add Track",
@@ -48,8 +56,11 @@
     "title": "Playlists",
     "create": "+ Create Playlist",
     "empty": "No playlists yet.",
+    "loading": "Loading playlists…",
     "delete": "Delete",
-    "deleteFailed": "Failed to delete playlist"
+    "deleteFailed": "Failed to delete playlist",
+    "deleteConfirmTitle": "Delete this playlist?",
+    "deleteConfirmDescription": "The tracks themselves stay in your library — only this playlist is removed. This can't be undone."
   },
   "createPlaylistDrawer": {
     "title": "Create Playlist",
@@ -74,8 +85,11 @@
     "title": "Destinations",
     "add": "+ Add Destination",
     "empty": "No destinations yet.",
+    "loading": "Loading destinations…",
     "delete": "Delete",
-    "deleteFailed": "Failed to delete destination"
+    "deleteFailed": "Failed to delete destination",
+    "deleteConfirmTitle": "Delete this destination?",
+    "deleteConfirmDescription": "Any stream session using it will need a different destination. This can't be undone."
   },
   "addDestinationModal": {
     "title": "Add Destination",
@@ -120,8 +134,11 @@
     "title": "Streams",
     "start": "+ Start Stream",
     "empty": "No stream sessions yet.",
+    "loading": "Loading stream sessions…",
     "stopAndRemove": "Stop & remove",
-    "stopFailed": "Failed to stop stream session"
+    "stopFailed": "Failed to stop stream session",
+    "stopConfirmTitle": "Stop and remove this session?",
+    "stopConfirmDescription": "This stops streaming on every destination in this session and deletes the session itself. This can't be undone."
   },
   "startStreamDrawer": {
     "title": "Start Stream",

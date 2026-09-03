@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Playlists from './Playlists';
 import { playlistsApi } from '../api/playlists';
@@ -46,6 +46,8 @@ describe('Playlists', () => {
     await screen.findByText('Mix');
 
     await userEvent.click(screen.getByText('Delete'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     expect(playlistsApi.remove).toHaveBeenCalledWith('p1');
     await waitFor(() => expect(screen.getByText('No playlists yet.')).toBeInTheDocument());

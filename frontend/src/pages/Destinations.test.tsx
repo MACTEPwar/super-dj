@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Destinations from './Destinations';
 import { destinationsApi } from '../api/destinations';
@@ -24,6 +24,8 @@ describe('Destinations', () => {
     await screen.findByText(/My Channel/);
 
     await userEvent.click(screen.getByText('Delete'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     expect(destinationsApi.remove).toHaveBeenCalledWith('d1');
     await waitFor(() => expect(screen.getByText('No destinations yet.')).toBeInTheDocument());

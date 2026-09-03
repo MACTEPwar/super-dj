@@ -1,3 +1,11 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* The app has no dark-mode support of its own — text colors throughout assume a light
+   background. Without this, a visitor whose OS/browser prefers dark mode gets dark text
+   rendered over a dark default background (low/no contrast, effectively unreadable) instead of
+   the light theme every component was actually designed against. */
+body {
+  @apply bg-white text-gray-900;
+}

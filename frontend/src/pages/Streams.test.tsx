@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Streams from './Streams';
 import { streamSessionsApi } from '../api/streamSessions';
@@ -58,6 +58,8 @@ describe('Streams', () => {
     await screen.findByText('Friday Mix');
 
     await userEvent.click(screen.getByText('Stop & remove'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Stop & remove' }));
 
     expect(streamSessionsApi.remove).toHaveBeenCalledWith('s1');
     await waitFor(() => expect(screen.getByText('No stream sessions yet.')).toBeInTheDocument());
