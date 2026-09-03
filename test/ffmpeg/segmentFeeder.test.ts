@@ -123,7 +123,7 @@ describe('SegmentFeeder', () => {
     const { feeder } = buildFeeder({ spawner });
 
     feeder.feedTrack(track, overlayWithTimer);
-    feeder.feedPause(37);
+    feeder.feedPause(0, 37);
 
     const args = (spawner as jest.Mock).mock.calls[1][1] as string[];
     const filterComplex = filterComplexArg(args);
