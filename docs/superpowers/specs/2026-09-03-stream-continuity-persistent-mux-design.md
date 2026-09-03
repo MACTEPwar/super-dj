@@ -124,7 +124,7 @@ requirement but drops the stream-level unpipe logic, since there's no Node-owned
 `overlayImagePath`/`hasWrittenOverlay`/`lastOverlay` bookkeeping (per-destination fixed PNG path,
 reused verbatim on `feedPause()`) is unchanged.
 
-### 4. Muxer (renamed from `RtmpPusher`) / its args builder (renamed from `rtmpPusherArgs.ts`)
+### 4. `RtmpPusher` / `rtmpPusherArgs.ts` (kept as-is — not renamed, to keep this a pure fix rather than a cosmetic rename across every call site)
 
 New args, per destination, built once and used for the process's entire lifetime:
 
@@ -184,8 +184,8 @@ process-level failures. `StreamController`'s reaction to an unexpected muxer exi
 
 ## Risk / rollback
 
-Touches `segmentArgs.ts`, `segmentFeeder.ts`, `rtmpPusher.ts` → renamed, `rtmpPusherArgs.ts` →
-renamed, `fifo.ts` call sites, `streamController.ts`, `streamManager.ts` — every place a single
+Touches `segmentArgs.ts`, `segmentFeeder.ts`, `rtmpPusher.ts`, `rtmpPusherArgs.ts`,
+`fifo.ts` call sites, `streamController.ts`, `streamManager.ts` — every place a single
 `fifoPath` currently flows through. This is a full replacement of the segment-handoff mechanism,
 not a feature-flagged addition — no dual-path/backwards-compatibility shim. If real-binary
 verification surfaces a problem (e.g. the two FIFOs drifting out of sync under some edge case),
