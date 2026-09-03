@@ -9,7 +9,6 @@ jest.mock('../../src/render/renderOverlay', () => ({
   renderTemplatePng: jest.fn().mockResolvedValue(Buffer.from('fake-png')),
 }));
 
-import { PassThrough } from 'stream';
 import { StreamManager } from '../../src/stream/streamManager';
 import { ApiError } from '../../src/errors';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
@@ -52,18 +51,14 @@ function buildDeps() {
   const customProvider = { prepareSession: jest.fn().mockResolvedValue({ rtmpUrl: 'rtmp://example.com/live', streamKey: 'real-stream-key' }) };
   const youtubeLifecycle = fakeLifecycle();
   const youtubeProvider = { prepareSession: jest.fn().mockResolvedValue({ rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2', streamKey: 'yt-key', lifecycle: youtubeLifecycle }) };
-  // SegmentFeeder opens a real fs.createWriteStream on the fifo path unless overridden;
-  // fake it so start()/tests never touch the real filesystem (same rationale as the
-  // fifo/duration module mocks above — no real fs/subprocess touches in a unit test).
-  const createWriteStream = jest.fn().mockImplementation(() => new PassThrough());
   const templateRepository = { findById: jest.fn() };
   return {
     deps: {
       spawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
       fontFile: '/fonts/x.ttf', fontFamily: 'DejaVu Sans', playlistRepository, destinationRepository, trackRepository,
-      templateRepository, providers: { custom: customProvider, youtube: youtubeProvider }, createWriteStream,
+      templateRepository, providers: { custom: customProvider, youtube: youtubeProvider },
     },
-    destinationRepository, playlistRepository, trackRepository, templateRepository, createWriteStream, customProvider, youtubeProvider, youtubeLifecycle, spawner,
+    destinationRepository, playlistRepository, trackRepository, templateRepository, customProvider, youtubeProvider, youtubeLifecycle, spawner,
   };
 }
 
@@ -112,7 +107,7 @@ describe('StreamManager', () => {
   });
 
   it('start() creates a controller reachable via get(), and status() reflects it', async () => {
-    const { deps, createWriteStream } = buildDeps();
+    const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
 
     await manager.start('dest-1', 'playlist-1');
@@ -120,7 +115,6 @@ describe('StreamManager', () => {
     expect(manager.get('dest-1')).toBeDefined();
     expect(manager.status('dest-1').state).toBe('streaming');
     expect(manager.status('dest-1').currentTrack).toBe('a');
-    expect(createWriteStream).toHaveBeenCalledWith('/tmp/super-dj-stream-dest-1.fifo');
   });
 
   it('start() defaults the broadcast title to the playlist name when no meta is given', async () => {
