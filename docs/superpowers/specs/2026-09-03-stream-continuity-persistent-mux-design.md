@@ -102,8 +102,14 @@ path) everywhere a single `fifoPath` is created/removed today.
 `buildTrackSegmentArgs`/`buildPauseSegmentArgs` take `videoFifoPath`/`audioFifoPath` instead of a
 single output target, and end in two output groups (`-f h264 <videoFifoPath>`, `-f adts
 <audioFifoPath>`) instead of one (`-f mpegts pipe:1`). The overlay `filter_complex` (composited
-cover/title/playlist/timer PNG + drawtext), `-shortest`, and all codec parameters are unchanged —
-this is a pure output-stage swap.
+cover/title/playlist/timer PNG + drawtext) and all codec parameters are unchanged — this is a
+pure output-stage swap, with one consequence: `-shortest` only bounds a segment's length by
+comparing streams muxed into the *same* output, so it stops working once video and audio become
+two independent outputs. Both output legs get an explicit `-t <remainingSeconds>` instead,
+computed from `durationSeconds` (already probed up front via `getAudioDurationSeconds` and
+threaded through `NowPlayingOverlay.durationSeconds`) minus `startOffsetSeconds`. Pause segments
+don't need this — they're killed externally (next/resume/stop), never by hitting a length bound,
+same as today.
 
 `outputTsOffsetSeconds`/`-output_ts_offset` is removed from both builders — see point 5.
 
