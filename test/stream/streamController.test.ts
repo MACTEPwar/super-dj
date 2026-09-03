@@ -56,7 +56,7 @@ function buildDeps() {
   };
   const pusher = { start: jest.fn(), stop: jest.fn() };
   const deps: any = {
-    library, queue, fifoPath: '/tmp/fifo',
+    library, queue, videoFifoPath: '/tmp/video.fifo', audioFifoPath: '/tmp/audio.fifo',
     createFifo: jest.fn(), removeFifo: jest.fn(),
     createSegmentFeeder: jest.fn().mockReturnValue(feeder),
     createRtmpPusher: jest.fn().mockReturnValue(pusher),
@@ -72,13 +72,13 @@ describe('StreamController', () => {
 
     await controller.start();
 
-    expect(deps.createFifo).toHaveBeenCalledWith('/tmp/fifo');
+    expect(deps.createFifo).toHaveBeenCalledWith('/tmp/video.fifo');
+    expect(deps.createFifo).toHaveBeenCalledWith('/tmp/audio.fifo');
     expect(pusher.start).toHaveBeenCalled();
     expect(feeder.feedTrack).toHaveBeenCalledWith(
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       overlayFor(track('a')),
       0,
-      expect.any(Number),
     );
     expect(controller.status().state).toBe('streaming');
   });
@@ -159,7 +159,7 @@ describe('StreamController', () => {
     // Both args happen to be 12.345 here since this is the track's first pause of the session
     // (session-elapsed and track-elapsed coincide) — see the "multiple pause/resume cycles"
     // test below for a case where they diverge.
-    expect(feeder.feedPause).toHaveBeenCalledWith(12.345, 12.345);
+    expect(feeder.feedPause).toHaveBeenCalledWith(12.345);
     expect(controller.status().state).toBe('paused');
 
     nowSpy.mockReturnValue(1_000 + 20_000);
@@ -169,7 +169,6 @@ describe('StreamController', () => {
       { name: 'a', audioPath: '/music/a.mp3', coverPath: null },
       overlayFor(track('a')),
       12.345,
-      20,
     );
     expect(controller.status().state).toBe('streaming');
 
@@ -185,7 +184,7 @@ describe('StreamController', () => {
 
     nowSpy.mockReturnValue(5_000); // 5s played
     controller.pause();
-    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 5);
+    expect(feeder.feedPause).toHaveBeenLastCalledWith(5);
 
     nowSpy.mockReturnValue(8_000); // resumed at t=5s, "resume" itself doesn't advance the clock
     await controller.resume();
@@ -194,7 +193,7 @@ describe('StreamController', () => {
     controller.pause();
     // Second pause's track-elapsed is the FIRST pause's 5s plus these 3 more, not just the 3 —
     // otherwise a frozen timer would visibly jump backwards on a second pause.
-    expect(feeder.feedPause).toHaveBeenLastCalledWith(expect.any(Number), 8);
+    expect(feeder.feedPause).toHaveBeenLastCalledWith(8);
 
     nowSpy.mockRestore();
   });
@@ -211,7 +210,6 @@ describe('StreamController', () => {
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
       overlayFor(track('b')),
       0,
-      expect.any(Number),
     );
   });
 
@@ -249,7 +247,8 @@ describe('StreamController', () => {
     expect(feeder.stopCurrent).toHaveBeenCalled();
     expect(feeder.close).toHaveBeenCalled();
     expect(pusher.stop).toHaveBeenCalled();
-    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/fifo');
+    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/video.fifo');
+    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/audio.fifo');
     expect(controller.status().state).toBe('idle');
   });
 
@@ -259,9 +258,10 @@ describe('StreamController', () => {
 
     await controller.start();
 
-    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/fifo');
-    expect(deps.removeFifo.mock.invocationCallOrder[0])
-      .toBeLessThan(deps.createFifo.mock.invocationCallOrder[0]);
+    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/video.fifo');
+    expect(deps.removeFifo).toHaveBeenCalledWith('/tmp/audio.fifo');
+    expect(Math.max(...deps.removeFifo.mock.invocationCallOrder))
+      .toBeLessThan(Math.min(...deps.createFifo.mock.invocationCallOrder));
   });
 
   it('auto-advances to the next track when the current segment exits naturally', async () => {
@@ -279,7 +279,6 @@ describe('StreamController', () => {
       { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
       overlayFor(track('b')),
       0,
-      expect.any(Number),
     );
     expect(controller.status().state).toBe('streaming');
   });
