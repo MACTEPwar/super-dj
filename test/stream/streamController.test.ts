@@ -183,6 +183,42 @@ describe('StreamController', () => {
     nowSpy.mockRestore();
   });
 
+  it('the ticking timer continues from the paused position after resume, instead of resetting toward zero', async () => {
+    const { deps, canvasFeeder } = buildDeps();
+    const overlayWithTimer = { ...overlayFor(track('a')), timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff' } };
+    deps.buildOverlay = jest.fn(() => Promise.resolve(overlayWithTimer));
+    // jest.useFakeTimers() (modern, this project's default) replaces the global Date binding
+    // itself — jest.spyOn(Date, 'now') is silently inert once it's active, whichever order
+    // they're called in. jest.setSystemTime() is the correct way to control "now" here, and
+    // jest.advanceTimersByTime() moves that same fake clock forward together with any timers
+    // it fires, so a single advance both fires the ticker AND advances what Date.now() reads
+    // inside it.
+    jest.useFakeTimers();
+    try {
+      jest.setSystemTime(0);
+      const controller = new StreamController(deps);
+      await controller.start();
+
+      jest.setSystemTime(5_000); // played 5s before pausing
+      controller.pause();
+
+      // resumed immediately — system time unchanged at 5s
+      await controller.resume();
+      canvasFeeder.render.mockClear();
+
+      jest.advanceTimersByTime(1000); // fires one ticker tick; also moves Date.now() to 6_000
+
+      // 5s (the paused position) + 1s (live since resume) = 6s — NOT 1s, which is what a ticker
+      // that only measured time since the resume's own feedCurrentTrack() call would show
+      // instead, visibly resetting the on-stream timer every time someone resumes.
+      // formatDurationForDrawtext escapes every ':' as '\:' for ffmpeg's drawtext filter syntax
+      // (see overlayText.ts) — the expected string carries that escaping too, not plain "0:06".
+      expect(canvasFeeder.render).toHaveBeenCalledWith(overlayWithTimer, '0\\:06 / 1\\:40');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('next() advances the queue, resets elapsed time and feeds the new track while streaming', async () => {
     const { deps, queue, audioRelay, canvasFeeder } = buildDeps();
     const controller = new StreamController(deps);

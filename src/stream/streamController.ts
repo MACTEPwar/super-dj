@@ -30,6 +30,11 @@ export class StreamController {
   private audioRelay: AudioRelay | null = null;
   private encoder: PersistentEncoder | null = null;
   private trackStartedAt: number | null = null;
+  // The elapsed-seconds baseline in effect for the CURRENT feedCurrentTrack() call — 0 for a
+  // fresh track, pausedElapsedSeconds for a resume. elapsedTrackSeconds() must add this to the
+  // live delta since trackStartedAt, or the ticking timer visibly resets toward 0 on every tick
+  // after a resume instead of continuing from where it was paused.
+  private trackStartOffsetSeconds = 0;
   private pausedElapsedSeconds = 0;
   private currentOverlay: NowPlayingOverlay | null = null;
   private timerTicker: NodeJS.Timeout | null = null;
@@ -139,6 +144,7 @@ export class StreamController {
 
     this.currentOverlay = overlay;
     this.trackStartedAt = Date.now();
+    this.trackStartOffsetSeconds = startOffsetSeconds;
     const child = this.audioRelay!.switchTrack(track.audioPath, startOffsetSeconds);
     await this.canvasFeeder!.render(overlay, this.timerText(startOffsetSeconds));
     this.startTimerTicker();
@@ -171,7 +177,8 @@ export class StreamController {
   }
 
   private elapsedTrackSeconds(): number {
-    return this.trackStartedAt !== null ? (Date.now() - this.trackStartedAt) / 1000 : 0;
+    const liveDelta = this.trackStartedAt !== null ? (Date.now() - this.trackStartedAt) / 1000 : 0;
+    return this.trackStartOffsetSeconds + liveDelta;
   }
 
   private timerText(elapsedSeconds: number): string | null {
@@ -199,6 +206,7 @@ export class StreamController {
     this.canvasFeeder = null;
     this.encoder = null;
     this.trackStartedAt = null;
+    this.trackStartOffsetSeconds = 0;
     this.pausedElapsedSeconds = 0;
     this.currentOverlay = null;
   }
