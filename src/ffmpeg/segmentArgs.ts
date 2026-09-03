@@ -8,19 +8,22 @@ export interface TimerElementPosition {
 export interface NowPlayingOverlay {
   durationSeconds: number;
   // The rendered picture (cover/title/playlist, per the selected template) for this segment —
-  // SegmentFeeder writes it to a fixed on-disk path and composites it via ffmpeg's own `overlay`
-  // filter, replacing the hand-built drawtext filter graph this used to be.
+  // CanvasFeeder writes it to a fixed on-disk path before each one-shot canvas-frame render and
+  // composites it via ffmpeg's own `overlay` filter, replacing the hand-built drawtext filter
+  // graph this used to be.
   overlayPng: Buffer;
   // Position/style for the template's timer element, if it has one — null if not. Unlike
-  // overlayPng, this isn't baked into a picture: SegmentFeeder turns it into a native ffmpeg
-  // drawtext (ticking live on a track segment, frozen on a pause segment).
+  // overlayPng, this isn't baked into a picture: it becomes a native ffmpeg drawtext, given
+  // its `text` as an already-formatted plain string (see TimerOverlay below).
   timer: TimerElementPosition | null;
 }
 
-// A fully-composed drawtext overlay: position/style plus the already-built `text` (either a
-// live `%{pts\:hms:OFFSET}` expression for a playing track, or a static frozen string for a
-// pause segment) — segmentArgs.ts just plugs it into the filter graph, it doesn't need to know
-// which case produced it. See SegmentFeeder.feedTrack()/feedPause().
+// A fully-composed drawtext overlay: position/style plus the already-built `text`. Always a
+// plain, already-formatted string — StreamController.timerText() computes it (ticking elapsed
+// time for a playing track, frozen for a pause segment) and CanvasFeeder passes it through as-
+// is; there's no live pts-expression any more, since there's no continuous per-track encode
+// process for one to run against — segmentArgs.ts just plugs the finished string into the
+// filter graph, it doesn't need to know which case produced it.
 export interface TimerOverlay extends TimerElementPosition {
   text: string;
 }

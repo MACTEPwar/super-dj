@@ -50,13 +50,22 @@ export function createPipeSpawner(): PipeSpawner {
     // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4 are the
     // video/audio pipes ffmpeg's own args reference as pipe:3/pipe:4.
     const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+    child.on('error', (err) => {
+      console.error('persistent encoder process failed to spawn', err);
+    });
     child.stderr?.on('data', (chunk: Buffer) => {
       process.stderr.write(chunk);
     });
-    return Object.assign(child as unknown as ChildProcessLike, {
-      videoPipe: child.stdio[3] as unknown as NodeJS.WritableStream,
-      audioPipe: child.stdio[4] as unknown as NodeJS.WritableStream,
-    }) as ChildProcessWithPipes;
+    const videoPipe = child.stdio[3] as unknown as NodeJS.WritableStream;
+    const audioPipe = child.stdio[4] as unknown as NodeJS.WritableStream;
+    // An 'error' event with no listener is an uncaught exception in Node, which would crash the
+    // whole process (every tenant's active stream, not just this one) — the same hazard the
+    // earlier per-segment pipeline's FIFO write-stream guard existed for. Writes fail with EPIPE
+    // once the encoder process has died or exited, which can race a still-writing
+    // CanvasFeeder/AudioRelay.
+    videoPipe.on('error', (err) => { console.error('video pipe write error', err); });
+    audioPipe.on('error', (err) => { console.error('audio pipe write error', err); });
+    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe }) as ChildProcessWithPipes;
   };
 }
 

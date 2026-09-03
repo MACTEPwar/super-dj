@@ -99,6 +99,12 @@ export class StreamManager extends EventEmitter {
       if (state === 'streaming' || state === 'paused') {
         throw new ApiError(409, 'a stream is already active for this destination');
       }
+      if (state === 'error') {
+        // An error-state controller's collaborators (CanvasFeeder's heartbeat, AudioRelay's
+        // decode process) are still alive until torn down — stop() runs that teardown. Skipped
+        // for 'idle' (already torn down; stop() would throw 409 for a non-active session).
+        existing.stop();
+      }
       this.controllers.delete(destinationId);
       // A stale entry here means an earlier session's lifecycle (e.g. a YouTube broadcast/
       // stream) was never finalized — the pusher died before StreamManager got a chance to,

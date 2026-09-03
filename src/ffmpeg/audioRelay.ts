@@ -26,7 +26,7 @@ export class AudioRelay {
 
   stopCurrent(): void {
     if (this.activeProcess) {
-      // Same reasoning SegmentFeeder always had: kill() doesn't stop a still-alive process's
+      // Same reasoning the earlier per-segment pipeline always needed: kill() doesn't stop a still-alive process's
       // stdout from draining into the audio pipe immediately, so unpipe first or two decoders'
       // raw PCM could interleave into the same pipe for a moment.
       if (this.activeProcess.stdout && this.audioPipe) {

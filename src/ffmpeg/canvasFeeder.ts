@@ -6,17 +6,17 @@ export interface CanvasFeederOptions {
   spawner: Spawner;
   backgroundPath: string;
   // Fixed on-disk path this feeder writes the current overlay PNG to before every render — same
-  // pattern SegmentFeeder always used, just now feeding a one-shot render instead of a continuous
-  // encode.
+  // pattern the earlier per-segment pipeline always used, just now feeding a one-shot render
+  // instead of a continuous encode.
   overlayImagePath: string;
   fontFile: string;
   width: number;
   height: number;
   // How often the last-rendered frame is resent to the video pipe, regardless of whether content
   // changed — this fixed cadence is what keeps the persistent encoder's declared input framerate
-  // (see persistentEncoderArgs.ts's heartbeatFps) matching real wall-clock time. Re-rendering
-  // (spawning a new one-shot ffmpeg) only happens on an actual call to render(); the heartbeat
-  // itself never re-renders, only resends the existing buffer.
+  // (see persistentEncoderArgs.ts's heartbeatFps) matching real wall-clock time. Every actual
+  // write — whether from this heartbeat or from render() below — must be exactly heartbeatMs
+  // apart; see writeCachedFrame()/render()'s heartbeat-resync comment for why.
   heartbeatMs: number;
   writeFileSync?: (path: string, data: Buffer) => void;
 }
@@ -34,14 +34,7 @@ export class CanvasFeeder {
   /** Called once, right after the persistent encoder starts — see StreamController.start(). */
   attach(videoPipe: NodeJS.WritableStream): void {
     this.videoPipe = videoPipe;
-    this.heartbeatTimer = setInterval(() => {
-      if (this.cachedFrame) this.videoPipe!.write(this.cachedFrame);
-    }, this.options.heartbeatMs);
-    // Don't let this timer alone keep the process alive. In production the real HTTP server
-    // listener keeps the process running regardless, so this has no effect there -- it's
-    // specifically what lets a test process exit cleanly once its other handles are closed,
-    // without every single test needing to remember to call manager.stop()/canvasFeeder.close().
-    this.heartbeatTimer.unref();
+    this.startHeartbeat();
   }
 
   /**
@@ -68,19 +61,53 @@ export class CanvasFeeder {
     });
 
     this.cachedFrame = await this.runOneShot(args);
-    this.videoPipe?.write(this.cachedFrame);
+    // This write IS this cycle's frame — resync the heartbeat's phase from here (kill the old
+    // timer, start a fresh one) so the total write cadence stays exactly one frame per
+    // heartbeatMs. Without this resync, this write would be an EXTRA frame on top of whatever
+    // the heartbeat was already about to send on its own schedule, silently inflating the
+    // video's frame count relative to real elapsed time — this was a real bug (found in final
+    // review, not caught by task-scoped review against fakes): every render() call — every
+    // track switch, pause, resume, and once-a-second timer tick — was adding a frame the
+    // encoder's declared input rate didn't account for, causing the video timeline to run
+    // ahead of real time.
+    this.writeCachedFrame();
+    this.startHeartbeat();
   }
 
   close(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
+    this.stopHeartbeat();
     try {
       fs.unlinkSync(this.options.overlayImagePath);
     } catch {
       // Never written, or already gone — either way there's nothing left to clean up.
     }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => this.writeCachedFrame(), this.options.heartbeatMs);
+    // Doesn't hold the process open on its own — in production the real HTTP server listener
+    // keeps the process running regardless; this is specifically what lets a test process exit
+    // cleanly when nothing else is holding it open, without needing every test to remember to
+    // call stop()/close().
+    this.heartbeatTimer.unref();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private writeCachedFrame(): void {
+    if (!this.cachedFrame || !this.videoPipe) return;
+    // Backpressure: if Node's own write buffer for this pipe is already backed up, skip this
+    // tick rather than piling more ~1.3MB raw frames into unbounded memory — ffmpeg will just
+    // hold the last frame it has a little longer, which is harmless since the content hasn't
+    // changed anyway.
+    if ((this.videoPipe as unknown as { writableNeedDrain?: boolean }).writableNeedDrain) return;
+    this.videoPipe.write(this.cachedFrame);
   }
 
   private runOneShot(args: string[]): Promise<Buffer> {

@@ -222,7 +222,7 @@ describe('StreamManager', () => {
   it('start() replaces a controller stuck in error state instead of rejecting with 409', async () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
-    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }) };
+    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }), stop: jest.fn() };
     (manager as any).controllers.set('dest-1', crashed);
 
     await expect(manager.start('dest-1', 'playlist-1')).resolves.toBeUndefined();
@@ -230,12 +230,13 @@ describe('StreamManager', () => {
     expect(manager.get('dest-1')).toBeDefined();
     expect(manager.get('dest-1')).not.toBe(crashed);
     expect(manager.status('dest-1').state).toBe('streaming');
+    expect(crashed.stop).toHaveBeenCalledTimes(1);
   });
 
   it('start() finalizes a stale lifecycle left behind by a crashed controller instead of dropping it', async () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
-    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }) };
+    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }), stop: jest.fn() };
     (manager as any).controllers.set('dest-1', crashed);
     const staleLifecycle = fakeLifecycle();
     (manager as any).lifecycles.set('dest-1', { providerType: 'youtube', lifecycle: staleLifecycle });

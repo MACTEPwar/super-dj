@@ -19,9 +19,3 @@ export interface ChildProcessWithPipes extends ChildProcessLike {
 }
 
 export type PipeSpawner = (command: string, args: string[]) => ChildProcessWithPipes;
-
-export interface VideoParams {
-  width: number;
-  height: number;
-  fps: number;
-}

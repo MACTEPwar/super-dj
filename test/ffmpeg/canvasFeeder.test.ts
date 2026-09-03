@@ -150,4 +150,55 @@ describe('CanvasFeeder', () => {
     expect(unlinkSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png');
     unlinkSync.mockRestore();
   });
+
+  it('render() does not add an extra frame on top of the heartbeat — the total write cadence stays exactly one frame per heartbeatMs even across a render() call', async () => {
+    jest.useFakeTimers();
+    try {
+      const { feeder, writeFileSync } = buildFeeder({ heartbeatMs: 200 });
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      feeder.attach(videoPipe);
+
+      // Let the heartbeat run before any render() — no cached frame yet, so no writes.
+      jest.advanceTimersByTime(500);
+      expect(chunks.length).toBe(0);
+
+      const child = fakeChild(['frame-a']);
+      const spawner = jest.fn().mockReturnValue(child);
+      const { feeder: feeder2 } = buildFeeder({ spawner, heartbeatMs: 200 });
+      feeder2.attach(videoPipe);
+      await renderAndClose(feeder2, child, overlay, null); // 1 write; cadence resyncs from here
+      chunks.length = 0; // isolate what follows from this render's own write
+
+      jest.advanceTimersByTime(1000); // exactly 5 heartbeat periods at 200ms
+
+      // Not 6 — proves render()'s write didn't add an extra frame on top of the heartbeat's own
+      // schedule; it replaced/resynced it instead.
+      expect(chunks.length).toBe(5);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('skips a heartbeat write when the video pipe reports backpressure, instead of buffering unboundedly', async () => {
+    jest.useFakeTimers();
+    try {
+      const child = fakeChild(['frame-a']);
+      const spawner = jest.fn().mockReturnValue(child);
+      const { feeder } = buildFeeder({ spawner, heartbeatMs: 200 });
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      Object.defineProperty(videoPipe, 'writableNeedDrain', { get: () => true });
+      feeder.attach(videoPipe);
+
+      await renderAndClose(feeder, child, overlay, null);
+      chunks.length = 0;
+
+      jest.advanceTimersByTime(600);
+
+      expect(chunks.length).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

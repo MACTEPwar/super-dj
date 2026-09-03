@@ -150,7 +150,7 @@ export class StreamController {
     this.startTimerTicker();
 
     // 'close' — the decode-only process reaches this on its own once the track file ends, same
-    // auto-advance signal SegmentFeeder's encode process used to provide.
+    // auto-advance signal the earlier per-segment pipeline's encode process used to provide.
     child.once('close', () => {
       if (generation !== this.sessionGeneration) return;
       if (this.state !== 'streaming') return;
