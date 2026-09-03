@@ -92,6 +92,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const streamManager = new StreamManager({
     spawner,
+    pipeSpawner: createPipeSpawner(),
     fifoDir: config.fifoDir,
     defaultCoverPath: config.defaultCoverPath,
     backgroundImagePath: config.backgroundImagePath,

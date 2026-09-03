@@ -37,6 +37,11 @@ export class CanvasFeeder {
     this.heartbeatTimer = setInterval(() => {
       if (this.cachedFrame) this.videoPipe!.write(this.cachedFrame);
     }, this.options.heartbeatMs);
+    // Don't let this timer alone keep the process alive. In production the real HTTP server
+    // listener keeps the process running regardless, so this has no effect there -- it's
+    // specifically what lets a test process exit cleanly once its other handles are closed,
+    // without every single test needing to remember to call manager.stop()/canvasFeeder.close().
+    this.heartbeatTimer.unref();
   }
 
   /**

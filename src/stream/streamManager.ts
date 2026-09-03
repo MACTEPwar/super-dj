@@ -4,13 +4,13 @@ import { PlaylistQueue } from '../playlist/queue';
 import { Track } from '../playlist/types';
 import { StreamController } from './streamController';
 import { DestinationStreamStatus, StreamStatus } from './types';
-import { SegmentFeeder } from '../ffmpeg/segmentFeeder';
-import { RtmpPusher } from '../ffmpeg/rtmpPusher';
+import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
+import { AudioRelay } from '../ffmpeg/audioRelay';
+import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
-import { createFifo, removeFifo } from '../ffmpeg/fifo';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
 import { buildPlaylistWindowLines } from '../ffmpeg/overlayText';
-import { Spawner } from '../ffmpeg/types';
+import { Spawner, PipeSpawner } from '../ffmpeg/types';
 import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
@@ -27,6 +27,10 @@ import { BroadcastMeta, DestinationLifecycle, StreamDestinationProvider } from '
 const VIDEO_WIDTH = 1280;
 const VIDEO_HEIGHT = 720;
 const VIDEO_FPS = 30;
+// How often CanvasFeeder resends its last-rendered frame — see canvasFeeder.ts and
+// persistentEncoderArgs.ts's heartbeatFps for why these two must always match.
+const CANVAS_HEARTBEAT_MS = 200;
+const CANVAS_HEARTBEAT_FPS = 1000 / CANVAS_HEARTBEAT_MS;
 const PLAYLIST_WINDOW_BEFORE = 2;
 const PLAYLIST_WINDOW_AFTER = 7;
 
@@ -46,6 +50,7 @@ export interface StreamStartOptions {
 
 export interface StreamManagerDeps {
   spawner: Spawner;
+  pipeSpawner: PipeSpawner;
   fifoDir: string;
   defaultCoverPath: string;
   backgroundImagePath: string;
@@ -150,7 +155,6 @@ export class StreamManager extends EventEmitter {
       const session = await provider.prepareSession(destination, resolvedMeta);
 
       const queue = new PlaylistQueue(tracks);
-      const fifoPath = path.join(this.deps.fifoDir, `super-dj-stream-${destinationId}.fifo`);
       const overlayImagePath = path.join(this.deps.fifoDir, `super-dj-overlay-${destinationId}.png`);
 
       // A timer isn't baked into the rendered PNG (see TimerElement's doc comment) — split it
@@ -207,22 +211,26 @@ export class StreamManager extends EventEmitter {
           findByName: (name: string) => allUserTracks.find((t) => t.name === name),
         },
         queue,
-        fifoPath,
-        createFifo,
-        removeFifo,
         buildOverlay,
-        createSegmentFeeder: () => new SegmentFeeder({
+        createCanvasFeeder: () => new CanvasFeeder({
           spawner: this.deps.spawner,
-          fifoPath,
           backgroundPath: this.deps.backgroundImagePath,
           overlayImagePath,
           fontFile: this.deps.fontFile,
           width: VIDEO_WIDTH,
           height: VIDEO_HEIGHT,
-          fps: VIDEO_FPS,
-          createWriteStream: this.deps.createWriteStream,
+          heartbeatMs: CANVAS_HEARTBEAT_MS,
         }),
-        createRtmpPusher: () => new RtmpPusher(this.deps.spawner, { fifoPath, rtmpUrl: session.rtmpUrl, streamKey: session.streamKey }),
+        createAudioRelay: () => new AudioRelay({ spawner: this.deps.spawner }),
+        createPersistentEncoder: () => new PersistentEncoder({
+          spawner: this.deps.pipeSpawner,
+          width: VIDEO_WIDTH,
+          height: VIDEO_HEIGHT,
+          fps: VIDEO_FPS,
+          heartbeatFps: CANVAS_HEARTBEAT_FPS,
+          rtmpUrl: session.rtmpUrl,
+          streamKey: session.streamKey,
+        }),
         onError: () => {
           const entry = this.lifecycles.get(destinationId);
           this.lifecycles.delete(destinationId);
