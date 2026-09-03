@@ -61,10 +61,6 @@ export interface StreamManagerDeps {
   trackRepository: Pick<TrackRepository, 'listByUser'>;
   templateRepository: Pick<TemplateRepository, 'findById'>;
   providers: Record<string, StreamDestinationProvider>;
-  // Optional seam for tests: SegmentFeeder opens a real fs write stream onto the
-  // FIFO by default. Left undefined in production so SegmentFeeder's own default
-  // (fs.createWriteStream) applies unchanged.
-  createWriteStream?: (path: string) => NodeJS.WritableStream;
 }
 
 export class StreamManager extends EventEmitter {
