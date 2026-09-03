@@ -154,27 +154,32 @@ describe('CanvasFeeder', () => {
   it('render() does not add an extra frame on top of the heartbeat — the total write cadence stays exactly one frame per heartbeatMs even across a render() call', async () => {
     jest.useFakeTimers();
     try {
-      const { feeder, writeFileSync } = buildFeeder({ heartbeatMs: 200 });
+      const child = fakeChild(['frame-a']);
+      const spawner = jest.fn().mockReturnValue(child);
+      const { feeder } = buildFeeder({ spawner, heartbeatMs: 200 });
       const chunks: Buffer[] = [];
       const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
       feeder.attach(videoPipe);
 
-      // Let the heartbeat run before any render() — no cached frame yet, so no writes.
-      jest.advanceTimersByTime(500);
+      // Let time pass PARTWAY through a heartbeat period before the render lands (130ms into
+      // the first 200ms period) — a render landing at the exact same instant as attach() can't
+      // distinguish "reset the phase" from "leave the original schedule alone", since both
+      // produce the same future firing times. No cached frame exists yet, so no write happens
+      // on this leg.
+      jest.advanceTimersByTime(130);
       expect(chunks.length).toBe(0);
 
-      const child = fakeChild(['frame-a']);
-      const spawner = jest.fn().mockReturnValue(child);
-      const { feeder: feeder2 } = buildFeeder({ spawner, heartbeatMs: 200 });
-      feeder2.attach(videoPipe);
-      await renderAndClose(feeder2, child, overlay, null); // 1 write; cadence resyncs from here
+      await renderAndClose(feeder, child, overlay, null); // write #1, at t=130; cadence resyncs from here
       chunks.length = 0; // isolate what follows from this render's own write
 
-      jest.advanceTimersByTime(1000); // exactly 5 heartbeat periods at 200ms
+      // 900ms is deliberately NOT a multiple of heartbeatMs (200ms) — this is what makes the
+      // window sensitive to the phase shift. Resynced from t=130: ticks at 330/530/730/930 fall
+      // inside (130, 1030] — 4 of them. Unpatched (original schedule from attach() never reset):
+      // ticks at 200/400/600/800/1000 — 5 of them. If this test still passed against the
+      // pre-fix code, that would mean the resync isn't actually happening.
+      jest.advanceTimersByTime(900);
 
-      // Not 6 — proves render()'s write didn't add an extra frame on top of the heartbeat's own
-      // schedule; it replaced/resynced it instead.
-      expect(chunks.length).toBe(5);
+      expect(chunks.length).toBe(4);
     } finally {
       jest.useRealTimers();
     }
