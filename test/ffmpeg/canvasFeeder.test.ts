@@ -1,0 +1,209 @@
+import { PassThrough, Writable } from 'stream';
+import { CanvasFeeder } from '../../src/ffmpeg/canvasFeeder';
+import { Spawner, ChildProcessLike } from '../../src/ffmpeg/types';
+import { NowPlayingOverlay } from '../../src/ffmpeg/segmentArgs';
+
+type FakeChild = ChildProcessLike & { stdout: PassThrough; emitClose: (code: number | null) => void };
+
+// Exposes an explicit emitClose() the test calls itself, synchronously, instead of scheduling
+// the fake completion via process.nextTick/setTimeout — this keeps the test correct whether or
+// not jest.useFakeTimers() is active (some fake-timer configurations also intercept
+// process.nextTick, which silently hangs a test relying on it to eventually fire on its own).
+function fakeChild(outputChunks: string[] = ['fake-frame-bytes']): FakeChild {
+  const stdout = new PassThrough();
+  let closeListener: ((code: number | null) => void) | null = null;
+  return {
+    pid: 1,
+    stdout,
+    stderr: null,
+    kill: jest.fn(),
+    once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
+      if (event === 'close') closeListener = listener as (code: number | null) => void;
+    }),
+    emitClose: (code = 0) => {
+      for (const chunk of outputChunks) stdout.write(chunk);
+      stdout.end();
+      closeListener?.(code);
+    },
+  };
+}
+
+const overlay: NowPlayingOverlay = { durationSeconds: 65, overlayPng: Buffer.from('fake-png-bytes'), timer: null };
+const overlayWithTimer: NowPlayingOverlay = {
+  durationSeconds: 65,
+  overlayPng: Buffer.from('fake-png-bytes'),
+  timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff' },
+};
+
+function buildFeeder(overrides: Partial<{ spawner: Spawner; writeFileSync: jest.Mock; heartbeatMs: number }> = {}) {
+  const writeFileSync = overrides.writeFileSync ?? jest.fn();
+  const feeder = new CanvasFeeder({
+    spawner: overrides.spawner ?? (jest.fn().mockReturnValue(fakeChild()) as Spawner),
+    backgroundPath: '/assets/background.png',
+    overlayImagePath: '/tmp/overlay-dest-1.png',
+    fontFile: '/fonts/DejaVuSans-Bold.ttf',
+    width: 1280,
+    height: 720,
+    heartbeatMs: overrides.heartbeatMs ?? 200,
+    writeFileSync,
+  });
+  return { feeder, writeFileSync };
+}
+
+// render()'s synchronous portion (spawn + attach listeners) runs to completion before it hits
+// its first real await, so the fake child is ready to have its close event emitted immediately
+// after calling render() and before awaiting the promise it returned.
+async function renderAndClose(feeder: CanvasFeeder, child: FakeChild, overlay: NowPlayingOverlay, timerText: string | null): Promise<void> {
+  const promise = feeder.render(overlay, timerText);
+  child.emitClose(0);
+  await promise;
+}
+
+describe('CanvasFeeder', () => {
+  it('render() writes the overlay PNG to the fixed path, spawns a one-shot canvas-frame render, and writes the resulting bytes to the attached video pipe', async () => {
+    const child = fakeChild(['frame-one']);
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
+    const { feeder, writeFileSync } = buildFeeder({ spawner });
+    const chunks: Buffer[] = [];
+    const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+    feeder.attach(videoPipe);
+
+    await renderAndClose(feeder, child, overlay, null);
+
+    expect(writeFileSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png', overlay.overlayPng);
+    expect(spawner).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-i', '/tmp/overlay-dest-1.png']));
+    expect(Buffer.concat(chunks).toString()).toBe('frame-one');
+  });
+
+  it('render() with a timer element passes the given plain text through as a static drawtext, not a live pts expression', async () => {
+    const child = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
+    const { feeder } = buildFeeder({ spawner });
+    feeder.attach(new PassThrough());
+
+    await renderAndClose(feeder, child, overlayWithTimer, '0:37 / 1:05');
+
+    const args = (spawner as jest.Mock).mock.calls[0][1] as string[];
+    const filterComplex = args[args.indexOf('-filter_complex') + 1];
+    expect(filterComplex).toContain("text='0:37 / 1:05'");
+    expect(filterComplex).not.toContain('%{pts');
+  });
+
+  it('render() with a timer element but null timerText omits the drawtext (used when the caller has no live/frozen text yet)', async () => {
+    const child = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
+    const { feeder } = buildFeeder({ spawner });
+    feeder.attach(new PassThrough());
+
+    await renderAndClose(feeder, child, overlayWithTimer, null);
+
+    const args = (spawner as jest.Mock).mock.calls[0][1] as string[];
+    const filterComplex = args[args.indexOf('-filter_complex') + 1];
+    expect(filterComplex).not.toContain('drawtext');
+  });
+
+  it('attach() starts a heartbeat that resends the last rendered frame at the configured interval', async () => {
+    jest.useFakeTimers();
+    try {
+      const child = fakeChild(['frame-a']);
+      const spawner: Spawner = jest.fn().mockReturnValue(child);
+      const { feeder } = buildFeeder({ spawner, heartbeatMs: 200 });
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      feeder.attach(videoPipe);
+
+      await renderAndClose(feeder, child, overlay, null);
+      chunks.length = 0; // clear the initial render's own write, isolate the heartbeat's writes
+
+      jest.advanceTimersByTime(600); // 3 heartbeat ticks at 200ms
+
+      expect(chunks.length).toBe(3);
+      expect(chunks.every((c) => c.toString() === 'frame-a')).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('the heartbeat writes nothing before the first render() call resolves', () => {
+    jest.useFakeTimers();
+    try {
+      const { feeder } = buildFeeder();
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      feeder.attach(videoPipe);
+
+      jest.advanceTimersByTime(1000);
+
+      expect(chunks.length).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('close() stops the heartbeat and removes the overlay image file', () => {
+    const unlinkSync = jest.spyOn(require('fs'), 'unlinkSync').mockImplementation(() => {});
+    const { feeder } = buildFeeder();
+    feeder.attach(new PassThrough());
+
+    feeder.close();
+
+    expect(unlinkSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png');
+    unlinkSync.mockRestore();
+  });
+
+  it('render() does not add an extra frame on top of the heartbeat — the total write cadence stays exactly one frame per heartbeatMs even across a render() call', async () => {
+    jest.useFakeTimers();
+    try {
+      const child = fakeChild(['frame-a']);
+      const spawner = jest.fn().mockReturnValue(child);
+      const { feeder } = buildFeeder({ spawner, heartbeatMs: 200 });
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      feeder.attach(videoPipe);
+
+      // Let time pass PARTWAY through a heartbeat period before the render lands (130ms into
+      // the first 200ms period) — a render landing at the exact same instant as attach() can't
+      // distinguish "reset the phase" from "leave the original schedule alone", since both
+      // produce the same future firing times. No cached frame exists yet, so no write happens
+      // on this leg.
+      jest.advanceTimersByTime(130);
+      expect(chunks.length).toBe(0);
+
+      await renderAndClose(feeder, child, overlay, null); // write #1, at t=130; cadence resyncs from here
+      chunks.length = 0; // isolate what follows from this render's own write
+
+      // 900ms is deliberately NOT a multiple of heartbeatMs (200ms) — this is what makes the
+      // window sensitive to the phase shift. Resynced from t=130: ticks at 330/530/730/930 fall
+      // inside (130, 1030] — 4 of them. Unpatched (original schedule from attach() never reset):
+      // ticks at 200/400/600/800/1000 — 5 of them. If this test still passed against the
+      // pre-fix code, that would mean the resync isn't actually happening.
+      jest.advanceTimersByTime(900);
+
+      expect(chunks.length).toBe(4);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('skips a heartbeat write when the video pipe reports backpressure, instead of buffering unboundedly', async () => {
+    jest.useFakeTimers();
+    try {
+      const child = fakeChild(['frame-a']);
+      const spawner = jest.fn().mockReturnValue(child);
+      const { feeder } = buildFeeder({ spawner, heartbeatMs: 200 });
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      Object.defineProperty(videoPipe, 'writableNeedDrain', { get: () => true });
+      feeder.attach(videoPipe);
+
+      await renderAndClose(feeder, child, overlay, null);
+      chunks.length = 0;
+
+      jest.advanceTimersByTime(600);
+
+      expect(chunks.length).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

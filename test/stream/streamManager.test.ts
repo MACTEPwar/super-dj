@@ -1,7 +1,3 @@
-jest.mock('../../src/ffmpeg/fifo', () => ({
-  createFifo: jest.fn(),
-  removeFifo: jest.fn(),
-}));
 jest.mock('../../src/ffmpeg/duration', () => ({
   getAudioDurationSeconds: jest.fn().mockResolvedValue(100),
 }));
@@ -15,8 +11,22 @@ import { ApiError } from '../../src/errors';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
 import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
 
+// Captures whatever listener a real ffmpeg-wrapping class (CanvasFeeder/AudioRelay/
+// PersistentEncoder — StreamManager wires the real ones, not fakes, in this integration-level
+// test) registers via once(), and exposes emit() so a fake spawner can simulate that process
+// finishing/exiting.
 function fakeChild() {
-  return { pid: 1, stdout: null, stderr: null, kill: jest.fn(), once: jest.fn() };
+  const listeners: Record<string, (...args: unknown[]) => void> = {};
+  return {
+    pid: 1,
+    stdout: null,
+    stderr: null,
+    kill: jest.fn(),
+    once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
+      listeners[event] = listener;
+    }),
+    emit: (event: string, ...args: unknown[]) => listeners[event]?.(...args),
+  };
 }
 
 function fakeLifecycle(overrides: Record<string, jest.Mock> = {}) {
@@ -31,7 +41,19 @@ function fakeLifecycle(overrides: Record<string, jest.Mock> = {}) {
 }
 
 function buildDeps() {
-  const spawner = jest.fn().mockReturnValue(fakeChild());
+  // CanvasFeeder's one-shot canvas-frame render (buildCanvasFrameArgs, identifiable by
+  // -frames:v) is the only thing spawned through this fake that StreamController directly
+  // awaits (render()'s returned promise) — auto-resolve just that one so start()/
+  // feedCurrentTrack() don't hang forever waiting on a 'close' that never comes. AudioRelay's
+  // decode/silence processes (the other consumer of this same spawner) must NOT auto-close, or
+  // every start() would immediately auto-advance past the first track.
+  const spawner = jest.fn().mockImplementation((_command: string, args: string[]) => {
+    const child = fakeChild();
+    if (args.includes('-frames:v')) {
+      queueMicrotask(() => child.emit('close', 0));
+    }
+    return child;
+  });
   const destinationRepository = {
     findById: jest.fn().mockResolvedValue({ id: 'dest-1', userId: 'user-1', provider: 'custom' }),
   };
@@ -52,22 +74,43 @@ function buildDeps() {
   const customProvider = { prepareSession: jest.fn().mockResolvedValue({ rtmpUrl: 'rtmp://example.com/live', streamKey: 'real-stream-key' }) };
   const youtubeLifecycle = fakeLifecycle();
   const youtubeProvider = { prepareSession: jest.fn().mockResolvedValue({ rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2', streamKey: 'yt-key', lifecycle: youtubeLifecycle }) };
-  // SegmentFeeder opens a real fs.createWriteStream on the fifo path unless overridden;
-  // fake it so start()/tests never touch the real filesystem (same rationale as the
-  // fifo/duration module mocks above — no real fs/subprocess touches in a unit test).
-  const createWriteStream = jest.fn().mockImplementation(() => new PassThrough());
+  const pipeSpawner = jest.fn().mockReturnValue({
+    ...fakeChild(),
+    videoPipe: new PassThrough(),
+    audioPipe: new PassThrough(),
+  });
   const templateRepository = { findById: jest.fn() };
   return {
     deps: {
-      spawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
+      spawner, pipeSpawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
       fontFile: '/fonts/x.ttf', fontFamily: 'DejaVu Sans', playlistRepository, destinationRepository, trackRepository,
-      templateRepository, providers: { custom: customProvider, youtube: youtubeProvider }, createWriteStream,
+      templateRepository, providers: { custom: customProvider, youtube: youtubeProvider },
     },
-    destinationRepository, playlistRepository, trackRepository, templateRepository, createWriteStream, customProvider, youtubeProvider, youtubeLifecycle, spawner,
+    destinationRepository, playlistRepository, trackRepository, templateRepository, customProvider, youtubeProvider, youtubeLifecycle, spawner, pipeSpawner,
   };
 }
 
 describe('StreamManager', () => {
+  // StreamManager wires up the REAL CanvasFeeder in this integration-level test (see buildDeps()
+  // above), and CanvasFeeder.attach() starts a real setInterval heartbeat the moment start()
+  // runs (see canvasFeeder.ts) — no test here calls stop() to tear it back down, so without fake
+  // timers every start() in this file leaves a live 200ms OS timer running for the rest of the
+  // process's life. Across 20+ tests that adds up to enough dangling intervals (each writing to
+  // an unread PassThrough) to make Jest hang trying to exit at the end of the file, not just print
+  // its usual open-handles warning. `doNotFake: ['queueMicrotask']` matters here — Jest's modern
+  // fake timers fake queueMicrotask by default too (not just setInterval/setTimeout/Date), and
+  // buildDeps()'s fake spawner resolves CanvasFeeder.render()'s promise via queueMicrotask() —
+  // faked, that scheduled callback would only run on an explicit jest.advanceTimersByTime()/
+  // runAllTimers() call that nothing here makes, hanging every start() until Jest's real-wall-
+  // clock 5000ms test timeout. Excluding it keeps that resolution on the real microtask queue.
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['queueMicrotask'] });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   it('has no listener cap on the shared EventEmitter, since SSE subscribers are intentionally unbounded', () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
@@ -112,7 +155,7 @@ describe('StreamManager', () => {
   });
 
   it('start() creates a controller reachable via get(), and status() reflects it', async () => {
-    const { deps, createWriteStream } = buildDeps();
+    const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
 
     await manager.start('dest-1', 'playlist-1');
@@ -120,7 +163,6 @@ describe('StreamManager', () => {
     expect(manager.get('dest-1')).toBeDefined();
     expect(manager.status('dest-1').state).toBe('streaming');
     expect(manager.status('dest-1').currentTrack).toBe('a');
-    expect(createWriteStream).toHaveBeenCalledWith('/tmp/super-dj-stream-dest-1.fifo');
   });
 
   it('start() defaults the broadcast title to the playlist name when no meta is given', async () => {
@@ -180,7 +222,7 @@ describe('StreamManager', () => {
   it('start() replaces a controller stuck in error state instead of rejecting with 409', async () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
-    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }) };
+    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }), stop: jest.fn() };
     (manager as any).controllers.set('dest-1', crashed);
 
     await expect(manager.start('dest-1', 'playlist-1')).resolves.toBeUndefined();
@@ -188,12 +230,13 @@ describe('StreamManager', () => {
     expect(manager.get('dest-1')).toBeDefined();
     expect(manager.get('dest-1')).not.toBe(crashed);
     expect(manager.status('dest-1').state).toBe('streaming');
+    expect(crashed.stop).toHaveBeenCalledTimes(1);
   });
 
   it('start() finalizes a stale lifecycle left behind by a crashed controller instead of dropping it', async () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
-    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }) };
+    const crashed = { status: () => ({ state: 'error', currentTrack: null, nextTrack: null }), stop: jest.fn() };
     (manager as any).controllers.set('dest-1', crashed);
     const staleLifecycle = fakeLifecycle();
     (manager as any).lifecycles.set('dest-1', { providerType: 'youtube', lifecycle: staleLifecycle });
@@ -322,17 +365,17 @@ describe('StreamManager', () => {
     });
 
     it('an unexpected pusher exit finalizes the lifecycle via the onError hook', async () => {
-      const { deps, destinationRepository, youtubeLifecycle, spawner } = buildDeps() as any;
+      const { deps, destinationRepository, youtubeLifecycle, pipeSpawner } = buildDeps() as any;
       const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
       await manager.start('dest-1', 'playlist-1');
 
-      // StreamController.start() calls createRtmpPusher().start(...) — which spawns the pusher's
-      // ffmpeg — BEFORE it ever feeds a track (which spawns the segment feeder's producer ffmpeg).
-      // So the pusher's child is always the FIRST spawner() call, regardless of how many segments
-      // get fed afterward. RtmpPusher.start() registers `child.once('exit', onExitCallback)` — grab
-      // that same callback and invoke it directly to simulate the pusher's ffmpeg dying unexpectedly.
-      const pusherChild = spawner.mock.results[0].value;
-      const onExit = pusherChild.once.mock.calls.find((call: any[]) => call[0] === 'exit')?.[1];
+      // StreamController.start() calls createPersistentEncoder().start(...) — which spawns the
+      // encoder's ffmpeg via pipeSpawner — before anything else touches the regular spawner
+      // (feeding a track's AudioRelay/CanvasFeeder calls). PersistentEncoder.start() registers
+      // `child.once('exit', onExitCallback)` — grab that same callback and invoke it directly to
+      // simulate the persistent encoder's ffmpeg dying unexpectedly.
+      const encoderChild = pipeSpawner.mock.results[0].value;
+      const onExit = encoderChild.once.mock.calls.find((call: any[]) => call[0] === 'exit')?.[1];
       onExit(1);
 
       expect(youtubeLifecycle.finalize).toHaveBeenCalledTimes(1);

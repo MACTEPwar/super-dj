@@ -32,8 +32,9 @@ export interface PlaylistElement {
 // Unlike cover/title/playlist, a timer isn't baked into the rendered PNG — it ticks every
 // second, and re-rendering through Satori/resvg that often per active stream would be wasteful.
 // It's drawn natively via a small ffmpeg drawtext layered on top of the PNG instead (see
-// src/ffmpeg/segmentFeeder.ts) — no `width`, since drawtext sizes itself to its own text rather
-// than wrapping inside a fixed box the way a Satori flex div does.
+// StreamController.timerText() and src/ffmpeg/canvasFeeder.ts) — no `width`, since drawtext
+// sizes itself to its own text rather than wrapping inside a fixed box the way a Satori flex div
+// does.
 export interface TimerElement {
   type: 'timer';
   x: number;

@@ -1,8 +1,10 @@
 import { PlaylistQueue } from '../playlist/queue';
 import { Track } from '../playlist/types';
-import { SegmentFeeder } from '../ffmpeg/segmentFeeder';
-import { RtmpPusher } from '../ffmpeg/rtmpPusher';
+import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
+import { AudioRelay } from '../ffmpeg/audioRelay';
+import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
+import { formatDurationForDrawtext } from '../ffmpeg/overlayText';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 
@@ -14,11 +16,9 @@ export interface LibraryLike {
 export interface StreamControllerDeps {
   library: LibraryLike;
   queue: PlaylistQueue;
-  fifoPath: string;
-  createFifo: (path: string) => void;
-  removeFifo: (path: string) => void;
-  createSegmentFeeder: () => SegmentFeeder;
-  createRtmpPusher: () => RtmpPusher;
+  createCanvasFeeder: () => CanvasFeeder;
+  createAudioRelay: () => AudioRelay;
+  createPersistentEncoder: () => PersistentEncoder;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
   onError?: () => void;
   onStatusChanged?: () => void;
@@ -26,12 +26,23 @@ export interface StreamControllerDeps {
 
 export class StreamController {
   private state: SessionState = 'idle';
-  private feeder: SegmentFeeder | null = null;
-  private pusher: RtmpPusher | null = null;
+  private canvasFeeder: CanvasFeeder | null = null;
+  private audioRelay: AudioRelay | null = null;
+  private encoder: PersistentEncoder | null = null;
   private trackStartedAt: number | null = null;
+  // The elapsed-seconds baseline in effect for the CURRENT feedCurrentTrack() call — 0 for a
+  // fresh track, pausedElapsedSeconds for a resume. elapsedTrackSeconds() must add this to the
+  // live delta since trackStartedAt, or the ticking timer visibly resets toward 0 on every tick
+  // after a resume instead of continuing from where it was paused.
+  private trackStartOffsetSeconds = 0;
   private pausedElapsedSeconds = 0;
-  private segmentGeneration = 0;
-  private streamStartedAt: number | null = null;
+  private currentOverlay: NowPlayingOverlay | null = null;
+  private timerTicker: NodeJS.Timeout | null = null;
+  // Distinguishes "this track ended naturally" (advance to the next one) from "this track was
+  // superseded/torn down by next/previous/pause/stop/start" (do nothing) — same role
+  // segmentGeneration always had, renamed because there's no more per-segment process for
+  // "segment" to describe.
+  private sessionGeneration = 0;
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
@@ -41,28 +52,21 @@ export class StreamController {
     }
     if (this.deps.library.list().length === 0) throw new ApiError(409, 'library is empty');
 
-    // Best-effort cleanup of anything left behind by a crashed session or an
-    // unclean shutdown; removeFifo is idempotent (it swallows ENOENT), so this
-    // also makes createFifo safe when a stale FIFO survived on disk.
-    this.segmentGeneration += 1;
-    this.feeder?.stopCurrent();
-    this.feeder?.close();
-    this.pusher?.stop();
-    this.feeder = null;
-    this.pusher = null;
-    this.deps.removeFifo(this.deps.fifoPath);
+    this.sessionGeneration += 1;
+    this.teardown();
 
-    this.deps.createFifo(this.deps.fifoPath);
-    this.pusher = this.deps.createRtmpPusher();
-    this.pusher.start(() => {
+    this.encoder = this.deps.createPersistentEncoder();
+    const child = this.encoder.start(() => {
       this.state = 'error';
       this.deps.onError?.();
       this.deps.onStatusChanged?.();
     });
-    this.feeder = this.deps.createSegmentFeeder();
+    this.canvasFeeder = this.deps.createCanvasFeeder();
+    this.canvasFeeder.attach(child.videoPipe);
+    this.audioRelay = this.deps.createAudioRelay();
+    this.audioRelay.attach(child.audioPipe);
     this.pausedElapsedSeconds = 0;
     this.trackStartedAt = null;
-    this.streamStartedAt = Date.now();
 
     this.state = 'streaming';
 
@@ -75,16 +79,8 @@ export class StreamController {
 
   stop(): void {
     if (this.state === 'idle') throw new ApiError(409, 'stream is not active');
-    this.segmentGeneration += 1;
-    this.feeder?.stopCurrent();
-    this.feeder?.close();
-    this.pusher?.stop();
-    this.deps.removeFifo(this.deps.fifoPath);
-    this.feeder = null;
-    this.pusher = null;
-    this.trackStartedAt = null;
-    this.pausedElapsedSeconds = 0;
-    this.streamStartedAt = null;
+    this.sessionGeneration += 1;
+    this.teardown();
     this.state = 'idle';
     this.deps.onStatusChanged?.();
   }
@@ -95,9 +91,15 @@ export class StreamController {
       this.pausedElapsedSeconds += (Date.now() - this.trackStartedAt) / 1000;
       this.trackStartedAt = null;
     }
-    this.segmentGeneration += 1;
+    this.sessionGeneration += 1;
     this.state = 'paused';
-    this.feeder!.feedPause(this.elapsedSessionSeconds(), this.pausedElapsedSeconds);
+    this.stopTimerTicker();
+    this.audioRelay!.switchToSilence();
+    if (this.currentOverlay) {
+      this.canvasFeeder!.render(this.currentOverlay, this.timerText(this.pausedElapsedSeconds)).catch((err) => {
+        console.error('failed to render the frozen pause frame', err);
+      });
+    }
     this.deps.onStatusChanged?.();
   }
 
@@ -132,45 +134,56 @@ export class StreamController {
     this.deps.onStatusChanged?.();
   }
 
-  /**
-   * Feeds a track segment and arms an auto-advance listener on the producer
-   * process. The generation counter distinguishes "this segment ended naturally"
-   * (advance to the next track) from "this segment was superseded/torn down by
-   * next/previous/pause/stop/start" (do nothing).
-   */
   private async feedCurrentTrack(track: Track, startOffsetSeconds = 0): Promise<void> {
-    const generation = ++this.segmentGeneration;
+    const generation = ++this.sessionGeneration;
     const overlay = await this.deps.buildOverlay(track);
-    // The generation may have advanced, or the session may have left
-    // 'streaming' (e.g. the pusher died, or stop()/pause() ran), while we
-    // were awaiting the overlay — a stale overlay must never be fed.
-    if (generation !== this.segmentGeneration) return;
+    // The generation may have advanced, or the session may have left 'streaming', while we were
+    // awaiting the overlay — a stale overlay must never be fed.
+    if (generation !== this.sessionGeneration) return;
     if (this.state !== 'streaming') return;
-    const child = this.feeder!.feedTrack(track, overlay, startOffsetSeconds, this.elapsedSessionSeconds());
+
+    this.currentOverlay = overlay;
     this.trackStartedAt = Date.now();
-    // 'close' (not 'exit') — Node's 'exit' can fire before the child's stdio streams have
-    // finished flushing to their listeners. Reacting on 'exit' meant advanceToNextTrack()
-    // (and the SegmentFeeder.stopCurrent()/unpipe it triggers via the next feedTrack) could
-    // fire while this segment's tail was still draining into the fifo write stream, cutting
-    // it off mid-flush — a second, independent source of the same corrupt-packet symptom the
-    // interleaving-pipe race caused, this time on natural end-of-track rather than a manual
-    // next/previous/pause.
-    child?.once('close', () => {
-      if (generation !== this.segmentGeneration) return;
+    this.trackStartOffsetSeconds = startOffsetSeconds;
+    const child = this.audioRelay!.switchTrack(track.audioPath, startOffsetSeconds);
+    await this.canvasFeeder!.render(overlay, this.timerText(startOffsetSeconds));
+    this.startTimerTicker();
+
+    // 'close' — the decode-only process reaches this on its own once the track file ends, same
+    // auto-advance signal the earlier per-segment pipeline's encode process used to provide.
+    child.once('close', () => {
+      if (generation !== this.sessionGeneration) return;
       if (this.state !== 'streaming') return;
       this.advanceToNextTrack();
     });
   }
 
-  // How many real seconds this stream session has been live for. Each segment is its own
-  // ffmpeg process (fresh PTS/DTS starting near 0), but the pusher treats the FIFO as one
-  // continuous stream and paces it with -re against real elapsed time — passed to every new
-  // segment as -output_ts_offset so its timestamps continue the running session clock
-  // instead of resetting, which is what a track switch's PTS/DTS discontinuity otherwise
-  // causes: the pusher briefly free-runs until the new segment's timestamps catch back up,
-  // showing up as a burst/stall and decode artifacts right at the switch.
-  private elapsedSessionSeconds(): number {
-    return this.streamStartedAt !== null ? (Date.now() - this.streamStartedAt) / 1000 : 0;
+  private startTimerTicker(): void {
+    this.stopTimerTicker();
+    if (!this.currentOverlay?.timer) return;
+    this.timerTicker = setInterval(() => {
+      if (this.state !== 'streaming' || !this.currentOverlay) return;
+      this.canvasFeeder!.render(this.currentOverlay, this.timerText(this.elapsedTrackSeconds())).catch((err) => {
+        console.error('failed to render the ticking timer frame', err);
+      });
+    }, 1000);
+  }
+
+  private stopTimerTicker(): void {
+    if (this.timerTicker) {
+      clearInterval(this.timerTicker);
+      this.timerTicker = null;
+    }
+  }
+
+  private elapsedTrackSeconds(): number {
+    const liveDelta = this.trackStartedAt !== null ? (Date.now() - this.trackStartedAt) / 1000 : 0;
+    return this.trackStartOffsetSeconds + liveDelta;
+  }
+
+  private timerText(elapsedSeconds: number): string | null {
+    if (!this.currentOverlay?.timer) return null;
+    return `${formatDurationForDrawtext(elapsedSeconds)} / ${formatDurationForDrawtext(this.currentOverlay.durationSeconds)}`;
   }
 
   private advanceToNextTrack(): void {
@@ -178,13 +191,24 @@ export class StreamController {
     this.deps.onStatusChanged?.();
     this.pausedElapsedSeconds = 0;
     if (track) {
-      // Fire-and-forget: this runs from a child-process 'exit' callback, not
-      // an awaited call chain. Catch so a failed duration probe surfaces as a
-      // log line instead of an unhandled rejection.
       this.feedCurrentTrack(track).catch((err) => {
         console.error('failed to auto-advance to the next track', err);
       });
     }
+  }
+
+  private teardown(): void {
+    this.stopTimerTicker();
+    this.audioRelay?.close();
+    this.canvasFeeder?.close();
+    this.encoder?.stop();
+    this.audioRelay = null;
+    this.canvasFeeder = null;
+    this.encoder = null;
+    this.trackStartedAt = null;
+    this.trackStartOffsetSeconds = 0;
+    this.pausedElapsedSeconds = 0;
+    this.currentOverlay = null;
   }
 
   playByName(name: string): void {

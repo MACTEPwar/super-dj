@@ -11,30 +11,38 @@ per destination — all via a REST API, gated behind email/password auth.
 
 ## Architecture (as built)
 
-**Backend streaming pipeline.** The FIFO + MPEG-TS pipeline (not the concat-demuxer MVP) is used per active stream, one
-independent pipeline per destination:
+**Backend streaming pipeline.** A single persistent per-destination `PersistentEncoder` process —
+spawned once in `StreamController.start()` and never restarted for the life of the session — is
+fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` itself creates via
+`stdio: [..., 'pipe', 'pipe']`, not named FIFOs — see `ChildProcessWithPipes`/`PipeSpawner` in
+`src/ffmpeg/types.ts`), one independent encoder per destination:
 
-- **Two-process ffmpeg pipeline per destination.** A short-lived *producer* ffmpeg per segment
-  (one track, or a silence/background "pause" segment) encodes to MPEG-TS on stdout; Node pipes
-  that stdout into a named pipe (FIFO) unique to the destination
-  (`{FIFO_DIR}/super-dj-stream-{destinationId}.fifo`). A single long-lived *pusher* ffmpeg reads
-  the FIFO and `-c copy`s it to that destination's RTMP URL, so the YouTube connection survives
-  every track change, skip, pause and seek.
-- **Codec pinning matters.** Because the pusher uses `-c copy`, every segment must share identical
-  codec parameters (H.264/yuv420p, fixed fps + GOP, AAC 44.1kHz stereo). These are pinned in
-  `src/ffmpeg/segmentArgs.ts` — do not let a new segment builder diverge.
-- **Segment handoff.** `SegmentFeeder.stopCurrent()` `unpipe()`s the outgoing producer's stdout
-  from the shared FIFO write stream *before* killing it and piping the next segment's stdout in —
-  `kill('SIGTERM')` alone doesn't stop a still-alive process's stdout from draining into the same
-  destination as the next segment's, and two producers piped into one stream at once interleaves
-  their MPEG-TS bytes at a switch. Every new segment also carries
-  `StreamController.elapsedSessionSeconds()` (real seconds since `start()`) forward as
-  `-output_ts_offset`, since each segment is its own ffmpeg process with PTS/DTS starting back
-  near 0 — without carrying the session clock forward, the pusher (which paces the FIFO with
-  `-re` against real elapsed time) briefly free-runs at every switch until the new segment's
-  timestamps catch back up. Both were real, user-reported causes of visible video/audio artifacts
-  and slow-looking track switches, not signs of anything wrong with the "generation" concept
-  itself.
+- **`PersistentEncoder` reads raw video (`pipe:3`) and raw PCM audio (`pipe:4`), continuously
+  encodes+muxes+pushes to RTMP for the whole session.** Its codec parameters (H.264/yuv420p, fixed
+  fps + GOP, AAC 44.1kHz stereo) are pinned once in `src/ffmpeg/persistentEncoderArgs.ts` — since
+  there's only one encode process per destination now, there's no `-c copy` handoff between
+  differently-encoded segments to keep in sync any more, which is what actually eliminates the
+  continuity-counter/PTS discontinuity the earlier FIFO + two-process pipeline hit at every track
+  switch (see the "Overlay templates" Stage 2 note below for a two-FIFO split-encode-from-mux
+  design that was tried and abandoned along the way, before this one).
+- **`CanvasFeeder` owns the video leg.** It renders one still frame (background + composited
+  overlay PNG + optional timer `drawtext`, via a one-shot `ffmpeg` call built by
+  `buildCanvasFrameArgs` in `src/ffmpeg/segmentArgs.ts`) on every actual content change — track
+  switch, pause, resume, a once-a-second timer tick — and independently resends the last-rendered
+  frame on a fixed `heartbeatMs` cadence the rest of the time, so `PersistentEncoder`'s declared
+  input framerate (`heartbeatFps` in `persistentEncoderArgs.ts`) matches real wall-clock time.
+  **Every actual pipe write — heartbeat or fresh render — must land exactly `heartbeatMs` apart**;
+  `render()` resyncs the heartbeat's phase from its own write rather than writing an extra frame on
+  top of the timer's independent schedule (a real bug: writing both left the video timeline running
+  measurably ahead of real time, worst with a timer element since that reduces the whole session to
+  little more than a chain of these writes). `CanvasFeeder.close()`'s heartbeat `setInterval` is
+  `.unref()`'d so it never blocks process exit on its own.
+- **`AudioRelay` owns the audio leg**, one short-lived decode-only ffmpeg per track (or a
+  silence/background "pause" clip) piped into the shared audio pipe. `stopCurrent()` `unpipe()`s
+  the outgoing decoder's stdout from that pipe *before* killing it and piping the next decoder's
+  stdout in — the same discipline the earlier per-segment pipeline always needed: `kill('SIGTERM')` alone doesn't
+  stop a still-alive process's stdout from draining into the same pipe as the next track's, and two
+  decoders piped in at once interleaves their raw PCM.
 - **`StreamManager` owns one `StreamController` per active destination** (keyed by
   `destinationId`, in an in-memory `Map`). `StreamManager.start()` loads the playlist's track
   snapshot (used for playback and the overlay window — deliberately *not* re-read live, so
@@ -42,23 +50,29 @@ independent pipeline per destination:
   user's full track list (for `play`-by-name lookup, via the `LibraryLike` adapter in
   `streamController.ts`), decrypts the destination's stream key, and wires a fresh
   `StreamController`.
-- **Auto-advance.** `StreamController` listens for the producer child's `exit` and advances the
-  queue. A `segmentGeneration` counter distinguishes a natural end-of-track from a segment that was
-  deliberately superseded (next/previous/pause/stop/start), preventing double-advance.
+- **Auto-advance.** `StreamController` listens for `AudioRelay`'s current decode child's `close`
+  (fired once the track file naturally ends) and advances the queue. A `sessionGeneration` counter
+  (renamed from the FIFO-era `segmentGeneration` — there's no more per-segment process for
+  "segment" to describe) distinguishes a natural end-of-track from a track that was deliberately
+  superseded (next/previous/pause/stop/start), preventing double-advance.
 - **Async duration probe.** `buildOverlay`/`getAudioDurationSeconds` run `ffprobe` asynchronously
   (never `execFileSync`, which would block Node's entire event loop). Because feeding a track has
-  an `await` point, `feedCurrentTrack` re-checks `segmentGeneration` *and* `state === 'streaming'`
-  right after the probe resolves, before calling `feedTrack` — otherwise a command that arrived
-  during the probe (next/previous/pause/stop, or the pusher dying) could feed a stale/superseded
-  track. A track's `durationSeconds` is also probed once at upload time and cached on the `Track`
-  row, so playlist listings don't need to re-probe.
-- **Overlay.** Each track segment composites background + a pre-rendered overlay PNG (cover art,
-  title, playlist window — from the selected `StreamTemplate`, or a built-in default layout when
-  none is selected) via ffmpeg's `overlay` filter, plus an optional native `drawtext` for the
-  template's `timer` element (ticking elapsed/total) layered on top — see "Overlay templates"
-  below for the full rework this landed as part of.
-- **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected pusher exit sets
-  `error`, from which `start()` recovers (it cleans up leftovers and recreates the FIFO).
+  an `await` point, `feedCurrentTrack` re-checks `sessionGeneration` *and* `state === 'streaming'`
+  right after the probe resolves, before calling into `AudioRelay`/`CanvasFeeder` — otherwise a
+  command that arrived during the probe (next/previous/pause/stop, or the encoder dying) could feed
+  a stale/superseded track. A track's `durationSeconds` is also probed once at upload time and
+  cached on the `Track` row, so playlist listings don't need to re-probe.
+- **Overlay.** Each rendered canvas frame composites background + a pre-rendered overlay PNG
+  (cover art, title, playlist window — from the selected `StreamTemplate`, or a built-in default
+  layout when none is selected) via ffmpeg's `overlay` filter, plus an optional native `drawtext`
+  for the template's `timer` element (ticking elapsed/total) layered on top — see "Overlay
+  templates" below for the full rework this landed as part of, including Stage 2 (below), which is
+  what actually produces this "one persistent encoder" shape.
+- **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected encoder exit sets
+  `error`, from which `start()` recovers — it tears down the errored controller's still-alive
+  collaborators (`CanvasFeeder`'s heartbeat, `AudioRelay`'s decode process) via `stop()` before
+  wiring a fresh one (`StreamManager.start()`; skipped for an already-`idle` controller, which has
+  nothing left to tear down).
 - **Stream keys at rest.** `StreamDestination.streamKeyEncrypted` is AES-256-GCM-encrypted
   (`src/crypto/streamKeyCipher.ts`) with `STREAM_KEY_ENCRYPTION_KEY`; the plaintext key is never
   echoed back by the API (`toPublicDestination` omits it) and is only decrypted in-memory when a
@@ -70,8 +84,8 @@ independent pipeline per destination:
   `YoutubeProvider` for an OAuth-connected YouTube channel). `StreamManager` picks a
   `StreamDestinationProvider` by `destination.provider` and calls `prepareSession()`, which for
   YouTube creates an ephemeral `liveBroadcast` + `liveStream` *per streaming session* (not
-  persisted — created fresh on `start()`, transitioned to `live` once the pusher's RTMP push is
-  healthy, and torn down/deleted on `stop()` or an unexpected pusher exit) and returns the RTMP
+  persisted — created fresh on `start()`, transitioned to `live` once the encoder's RTMP push is
+  healthy, and torn down/deleted on `stop()` or an unexpected encoder exit) and returns the RTMP
   ingest URL/key StreamManager needs, plus a `DestinationLifecycle` handle for that polling/
   teardown. `OAuthConnection` (refresh token, external account id/name) is itself
   provider-generic — keyed by `destinationId` and a `provider` string — so a future OAuth-based
@@ -153,12 +167,11 @@ lands:
     `image/png` content-type; (2) `fontData` on the way *into* `renderWorker.ts` — Satori's font
     parsing doesn't throw on a plain `Uint8Array`, it just silently produces missing-glyph boxes
     for anything outside ASCII, which only showed up when previewing real Cyrillic text.
-  - **`SegmentFeeder` writes the rendered PNG to a fixed per-destination path** and reuses that
-    same file, unmodified, for a pause segment (`feedPause()` never re-renders — pausing only
-    changes the audio, never the overlay). If nothing has been rendered yet when a pause segment
-    is built (shouldn't happen — `start()` always feeds a track first — but defensive), it writes
-    `BLANK_OVERLAY_PNG` there first rather than pointing ffmpeg's `-loop 1` input at a missing
-    file. The file is cleaned up in `close()` (full teardown), not on every segment switch.
+  - **The overlay PNG is written to a fixed per-destination path before every render**, superseded
+    at Stage 2 (below) into `CanvasFeeder.render()` — including a pause, which still calls
+    `render()` (to update the frozen timer text) but composites the *same* overlay PNG, since
+    pausing only changes the audio, never the picture. The file is cleaned up in `close()` (full
+    teardown), not on every render.
   - **`SessionOverlayCache`** (`src/stream/sessionOverlayCache.ts`) lets destinations in the same
     `StreamSession` that are showing the identical `(track, template)` share one render instead of
     each paying for their own — keyed so a destination that's drifted onto a different track
@@ -167,31 +180,31 @@ lands:
     cached, and concurrent callers for the same not-yet-resolved key share the in-flight promise.
   - **`StreamSession.templateId`** is a nullable FK, persisted like `playlistId` (migration
     `add_stream_session_template_id`), so a session remembers its template choice across restarts.
-- **Stage 1b (done):** a `timer` overlay element — position/font/color configurable like
-  `title`/`playlist` (no `width`, unlike them — drawtext sizes itself to its own text) —
-  restoring the elapsed/total counter Stage 1a dropped. Unlike the other element types it isn't
-  baked into the PNG (it needs to tick every second, and re-rendering through Satori/resvg once a
-  second per stream would be wasteful): `StreamManager.buildOverlay` splits a `timer` element out
-  of what gets rendered before calling `renderTemplatePng()`, and `SegmentFeeder` turns it into a
-  native `drawtext` layered on top of the composited PNG — live (`%{pts\:hms\:OFFSET}`, ticking)
-  on a track segment, frozen (a plain formatted string) on a pause segment, reusing
-  `StreamController`'s existing `pausedElapsedSeconds` bookkeeping (already tracked for pause/
-  resume — no new subsystem needed) as the frozen value and as the live expression's OFFSET on a
-  resumed track (so the displayed time continues from where it was paused instead of restarting
-  at 0 — the segment's own pts always starts near 0, same reason `-output_ts_offset` exists for
-  the audio/video timeline).
-  - **Both colons inside `%{...}` need escaping, not just the one between `pts` and `hms`** —
-    `%{pts\:hms\:OFFSET}`, not `%{pts\:hms:OFFSET}`. Found by actually running the generated
-    filter string through a real local `ffmpeg` process (`No option name near ...`), not by
-    reading ffmpeg's docs or by unit tests (which only assert the string shape, not that ffmpeg
-    itself accepts it) — worth doing this kind of check again for any future drawtext-adjacent
-    change, the failure mode here is silent/confusing (ffmpeg just refuses to start that segment)
-    rather than a clear error surfaced anywhere obvious.
-- **Stage 2 (not started, riskiest):** move each destination's whole session to a single
-  persistent ffmpeg process (concat-demuxer-with-rewritten-playlist, or filter-graph input
-  switching via zmq/sendcmd — not yet decided, wants a spike before committing) instead of one
-  process per segment. This is what actually eliminates the continuity-counter discontinuity at
-  every switch, not just papers over it.
+- **Stage 1b (done, later superseded by Stage 2's timer mechanism — see below):** a `timer`
+  overlay element — position/font/color configurable like `title`/`playlist` (no `width`, unlike
+  them — drawtext sizes itself to its own text) — restoring the elapsed/total counter Stage 1a
+  dropped. Unlike the other element types it isn't baked into the PNG (it needs to tick every
+  second, and re-rendering through Satori/resvg once a second per stream would be wasteful):
+  `StreamManager.buildOverlay` splits a `timer` element out of what gets rendered before calling
+  `renderTemplatePng()`. At this stage the ticking value was a *live* ffmpeg drawtext pts
+  expression (`%{pts\:hms\:OFFSET}` — both colons need escaping, not just the one between `pts`
+  and `hms`, found by running the generated filter string through a real local `ffmpeg` process
+  rather than trusting the string shape a unit test can assert) on a track segment, frozen (a
+  plain formatted string) on a pause segment. Stage 2 (below) replaced this: there's no more
+  continuous per-track encode process for a live pts expression to run against, so
+  `StreamController.timerText()` now always computes a plain, already-formatted string itself —
+  ticking case and frozen case both reuse the same `pausedElapsedSeconds`/`trackStartOffsetSeconds`
+  bookkeeping this stage introduced, just fed through `CanvasFeeder.render()`'s one-shot re-render
+  once a second instead of a live expression.
+- **Stage 2 (done):** replaced the per-segment ffmpeg pipeline with one persistent `PersistentEncoder`
+  process per destination, spawned once in `StreamController.start()` and never restarted for the
+  life of the session, fed by two Node-owned pipes (`CanvasFeeder` for video, `AudioRelay` for
+  audio — see "Backend streaming pipeline" above for the full mechanism). This is what actually
+  eliminates the continuity-counter/PTS discontinuity at every switch, not just papers over it.
+  Landing here took two rejected intermediate designs — a concat-demuxer MVP, then a two-FIFO
+  split-encode-from-mux design that deadlocked and hit a FIFO EOF-on-last-writer-close bug against
+  real ffmpeg binaries — see `docs/superpowers/specs/2026-09-03-obs-style-persistent-canvas-design.md`
+  for the full story of why those were abandoned.
 - **Stage 3 (not started):** drag-and-drop visual canvas editor in the frontend (full editor from
   the start, not a simpler form-based v1 — user's explicit call), backed by the Stage 0 CRUD +
   preview endpoint.
@@ -242,10 +255,13 @@ src/
                             (mounted at /stream-sessions), sessionOverlayCache.ts (shared-render
                             cache for same-session destinations), types.ts
   playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
-  ffmpeg/                   segmentArgs.ts / segmentFeeder.ts (producer), rtmpPusherArgs.ts /
-                            rtmpPusher.ts (pusher), fifo.ts (mkfifo/unlink), duration.ts (ffprobe),
+  ffmpeg/                   canvasFeeder.ts (video leg: one-shot renders + heartbeat resend),
+                            audioRelay.ts / audioRelayArgs.ts (audio leg: per-track decode-only
+                            process), persistentEncoder.ts / persistentEncoderArgs.ts (the one
+                            long-lived encoder process per destination), segmentArgs.ts (canvas-
+                            frame render args + overlay/timer types), duration.ts (ffprobe),
                             overlayText.ts (formatDuration, playlist-window text),
-                            types.ts (Spawner, ChildProcessLike)
+                            types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes)
   templates/                templateRepository.ts (Prisma), templateRoutes.ts (mounted at
                             /templates, incl. POST /:id/preview), templateTypes.ts
                             (TemplateElement union + isValidTemplateElement(s) +
@@ -436,13 +452,13 @@ destinations before either delete lands. Narrow (requires already holding a vali
 state), but a compare-and-delete-returning-count check would close it. `OAuthConnection` has no
 uniqueness constraint on `(provider, externalAccountId)` — a user can connect the same YouTube
 channel to multiple `StreamDestination`s, which would then compete over the same channel's
-broadcasts if both were streamed to at once. `onError` (the pusher-crash-triggers-finalize hook)
+broadcasts if both were streamed to at once. `onError` (the encoder-crash-triggers-finalize hook)
 resolves the destination's lifecycle to finalize by `destinationId` alone. In the narrow case where
 a crashed session's exit event is processed after a subsequent `start()` for the same destination
 has already completed and registered a new lifecycle, this could finalize the new (healthy)
-session's YouTube broadcast instead of the crashed one's. `RtmpPusher.stop()`'s existing
+session's YouTube broadcast instead of the crashed one's. `PersistentEncoder.stop()`'s existing
 `stopRequested` guard makes the ordinary stop path safe; this only matters for a genuine crash
-racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow. A `StreamSession`'s destination list is fixed at creation — there's no add/remove-destination-from-a-live-session endpoint; adding a destination mid-stream means starting a new session for it instead. `StreamSessionManager.deleteById()`'s per-destination `stop()` calls aren't atomic with each other (same class of narrow race as the rest of this list) — a crash between two of them could leave the session row deleted while one destination is still streaming, orphaned exactly like a single-destination stream would be if its owning destination were deleted mid-stream. **Segment switches can still occasionally kill the RTMP connection outright** (confirmed by live testing, worse under rapid manual switching): each segment is its own ffmpeg process muxing MPEG-TS from scratch, so its per-PID continuity counter always restarts at a switch; the pusher's demuxer sees that as a "Packet corrupt" continuity mismatch. `-err_detect ignore_err` on the pusher (added as a mitigation) makes this non-fatal *most* of the time, but a corrupt packet can still occasionally desync the ADTS-to-ASC audio bitstream filter badly enough to cascade into an EPIPE and drop the connection. The real fix is architectural, not a flag: drive each destination's whole session from one persistent ffmpeg process (e.g. dynamically rewriting a `concat`-demuxer playlist and reloading it, or remote-controlling a running process) instead of independent per-segment processes concatenated through a FIFO, so there is never a continuity-counter/PTS discontinuity to begin with. Not attempted yet — it's a real rework of `SegmentFeeder`/`StreamController`, not a one-line patch.
+racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow. A `StreamSession`'s destination list is fixed at creation — there's no add/remove-destination-from-a-live-session endpoint; adding a destination mid-stream means starting a new session for it instead. `StreamSessionManager.deleteById()`'s per-destination `stop()` calls aren't atomic with each other (same class of narrow race as the rest of this list) — a crash between two of them could leave the session row deleted while one destination is still streaming, orphaned exactly like a single-destination stream would be if its owning destination were deleted mid-stream. **(Fixed.)** Segment switches used to be able to kill the RTMP connection outright (confirmed by live testing, worse under rapid manual switching), because each track/pause segment was muxed to MPEG-TS by its own short-lived ffmpeg process, resetting the container's continuity counter and ADTS bitstream-filter state at every switch. The fix landed as the persistent-encoder rework described under "Overlay templates" Stage 2 below — one long-lived `PersistentEncoder` per destination, never restarted for the session, fed by two Node-owned pipes instead of independent per-segment processes handed off through a FIFO, so there is no more continuity-counter/PTS discontinuity to begin with. Getting there took two rejected intermediate designs (a concat-demuxer MVP, then a two-FIFO split-encode-from-mux design that deadlocked against real ffmpeg binaries) before landing on this shape — see `docs/superpowers/specs/2026-09-03-obs-style-persistent-canvas-design.md` for the full story.
 
 ## Tooling
 
