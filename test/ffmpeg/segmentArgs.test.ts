@@ -19,7 +19,8 @@ describe('buildTrackSegmentArgs', () => {
   it('builds ffmpeg args compositing the background and the overlay PNG, with no seek or timer by default', () => {
     const args = buildTrackSegmentArgs(base);
 
-    expect(args.slice(0, 8)).toEqual([
+    expect(args.slice(0, 9)).toEqual([
+      '-y',
       '-loop', '1', '-i', '/assets/background.png',
       '-loop', '1', '-i', '/tmp/super-dj-overlay-dest-1.png',
     ]);
@@ -91,6 +92,7 @@ describe('buildPauseSegmentArgs', () => {
     const args = buildPauseSegmentArgs(base);
 
     expect(args).toEqual([
+      '-y',
       '-loop', '1', '-i', '/assets/background.png',
       '-loop', '1', '-i', '/tmp/super-dj-overlay-dest-1.png',
       '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',

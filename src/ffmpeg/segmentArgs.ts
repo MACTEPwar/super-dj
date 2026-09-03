@@ -57,7 +57,7 @@ export function buildTrackSegmentArgs(params: VideoParams & {
 }): string[] {
   const { width, height, fps, audioPath, backgroundPath, overlayPngPath, fontFile, videoFifoPath, audioFifoPath } = params;
 
-  const args = ['-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', overlayPngPath];
+  const args = ['-y', '-loop', '1', '-i', backgroundPath, '-loop', '1', '-i', overlayPngPath];
 
   if (params.startOffsetSeconds) {
     args.push('-ss', String(params.startOffsetSeconds));
@@ -109,6 +109,7 @@ export function buildPauseSegmentArgs(params: VideoParams & {
   const { width, height, fps, backgroundPath, overlayPngPath, fontFile, videoFifoPath, audioFifoPath } = params;
 
   return [
+    '-y',
     '-loop', '1', '-i', backgroundPath,
     '-loop', '1', '-i', overlayPngPath,
     '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
