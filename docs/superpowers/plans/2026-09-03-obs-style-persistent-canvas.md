@@ -1423,6 +1423,37 @@ describe('StreamController', () => {
     nowSpy.mockRestore();
   });
 
+  it('the ticking timer continues from the paused position after resume, instead of resetting toward zero', async () => {
+    const { deps, canvasFeeder } = buildDeps();
+    const overlayWithTimer = { ...overlayFor(track('a')), timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff' } };
+    deps.buildOverlay = jest.fn(() => Promise.resolve(overlayWithTimer));
+    const nowSpy = jest.spyOn(Date, 'now');
+    jest.useFakeTimers();
+    try {
+      nowSpy.mockReturnValue(0);
+      const controller = new StreamController(deps);
+      await controller.start();
+
+      nowSpy.mockReturnValue(5_000); // played 5s before pausing
+      controller.pause();
+
+      nowSpy.mockReturnValue(5_000); // resumed immediately at t=5s
+      await controller.resume();
+      canvasFeeder.render.mockClear();
+
+      nowSpy.mockReturnValue(6_000); // 1s of real time passes after resume
+      jest.advanceTimersByTime(1000); // one ticker tick fires
+
+      // 5s (the paused position) + 1s (live since resume) = 6s — NOT 1s, which is what a ticker
+      // that only measured time since the resume's own feedCurrentTrack() call would show
+      // instead, visibly resetting the on-stream timer every time someone resumes.
+      expect(canvasFeeder.render).toHaveBeenCalledWith(overlayWithTimer, '0:06 / 1:40');
+    } finally {
+      jest.useRealTimers();
+      nowSpy.mockRestore();
+    }
+  });
+
   it('next() advances the queue, resets elapsed time and feeds the new track while streaming', async () => {
     const { deps, queue, audioRelay, canvasFeeder } = buildDeps();
     const controller = new StreamController(deps);
@@ -1618,6 +1649,11 @@ export class StreamController {
   private audioRelay: AudioRelay | null = null;
   private encoder: PersistentEncoder | null = null;
   private trackStartedAt: number | null = null;
+  // The elapsed-seconds baseline in effect for the CURRENT feedCurrentTrack() call — 0 for a
+  // fresh track, pausedElapsedSeconds for a resume. elapsedTrackSeconds() must add this to the
+  // live delta since trackStartedAt, or the ticking timer visibly resets toward 0 on every tick
+  // after a resume instead of continuing from where it was paused.
+  private trackStartOffsetSeconds = 0;
   private pausedElapsedSeconds = 0;
   private currentOverlay: NowPlayingOverlay | null = null;
   private timerTicker: NodeJS.Timeout | null = null;
@@ -1727,6 +1763,7 @@ export class StreamController {
 
     this.currentOverlay = overlay;
     this.trackStartedAt = Date.now();
+    this.trackStartOffsetSeconds = startOffsetSeconds;
     const child = this.audioRelay!.switchTrack(track.audioPath, startOffsetSeconds);
     await this.canvasFeeder!.render(overlay, this.timerText(startOffsetSeconds));
     this.startTimerTicker();
@@ -1759,7 +1796,8 @@ export class StreamController {
   }
 
   private elapsedTrackSeconds(): number {
-    return this.trackStartedAt !== null ? (Date.now() - this.trackStartedAt) / 1000 : 0;
+    const liveDelta = this.trackStartedAt !== null ? (Date.now() - this.trackStartedAt) / 1000 : 0;
+    return this.trackStartOffsetSeconds + liveDelta;
   }
 
   private timerText(elapsedSeconds: number): string | null {
@@ -1787,6 +1825,7 @@ export class StreamController {
     this.canvasFeeder = null;
     this.encoder = null;
     this.trackStartedAt = null;
+    this.trackStartOffsetSeconds = 0;
     this.pausedElapsedSeconds = 0;
     this.currentOverlay = null;
   }
