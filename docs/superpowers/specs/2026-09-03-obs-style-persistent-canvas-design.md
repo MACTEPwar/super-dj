@@ -64,23 +64,39 @@ sources, rather than a process-per-clip model. Concretely, per destination:
   above entirely — there is no filesystem entity with ambiguous multi-writer-over-time semantics,
   and Node holds both write ends open for the whole session by construction. `src/ffmpeg/fifo.ts`
   becomes unused by the streaming pipeline once this lands.
-- **Video: `CanvasFeeder` writes a new raw frame only when content actually changes** (track
-  switch, pause/resume, or once a second for the ticking timer) — not a continuous 30fps push.
-  It reuses the *existing* compositing logic (`overlayFilterComplex` from `segmentArgs.ts` —
-  background + overlay PNG + optional drawtext, unchanged) via a one-shot ffmpeg invocation ending
-  in `-frames:v 1 -f rawvideo -pix_fmt yuv420p -` instead of a continuous encode to a FIFO; Node
-  captures that single frame's bytes from stdout and writes them into the encoder's video pipe.
-  The encoder's video input is declared at a low rate (`-r 1` on that input) and its *output* rate
-  is set to the real target (`-r 30`), which triggers ffmpeg's standard frame-rate-conversion
-  duplication to fill in the unchanged frames — not custom logic, ffmpeg's own `-r`-on-output
-  behavior.
+- **Video: `CanvasFeeder` re-renders only when content actually changes, but writes to the pipe on
+  a fixed heartbeat** — these are two different things and the distinction matters. A raw video
+  pipe has no timestamps of its own; ffmpeg assigns each arriving frame a PTS purely from a
+  declared input rate (`-r`) and frame *count*, not real elapsed time. If `CanvasFeeder` only wrote
+  when content changed and declared a flat `-r 1`, an extra frame written mid-second (e.g. a track
+  switch landing between two timer ticks) would still be charged a full second of screen time,
+  silently drifting the video timeline away from real elapsed time over a long session. Instead:
+  a fixed interval timer (e.g. every 200ms — tunable, cheap since it's a plain buffer write, no
+  subprocess) resends whatever frame is currently cached; re-rendering only happens on an actual
+  content change (track switch, pause/resume, or the once-a-second timer-text tick), producing a
+  new cached buffer that the next heartbeat tick(s) then resend unchanged. The encoder's video
+  input is declared at that same fixed heartbeat rate (`-r 5` for a 200ms interval); its *output*
+  rate is the real target (`-r 30`), and ffmpeg's standard frame-rate-conversion duplication
+  (`-r`-on-output, not custom logic) fills in between — but only correctly because the *input*
+  side's declared rate now actually matches the real wall-clock cadence Node writes at.
+  Re-rendering itself reuses the *existing* compositing logic (`overlayFilterComplex` from
+  `segmentArgs.ts` — background + overlay PNG + optional drawtext, unchanged) via a one-shot
+  ffmpeg invocation ending in `-frames:v 1 -f rawvideo -pix_fmt yuv420p -` instead of a continuous
+  encode to a FIFO; Node captures that single frame's bytes from stdout as the new cached buffer.
 - **Audio: `AudioRelay` runs a decode-only ffmpeg per track** (`-i track.mp3 -f s16le -ar 44100
   -ac 2 -`, no encoding) and pipes its raw PCM stdout into the encoder's audio pipe, exactly the
   same "kill outgoing before spawning next" discipline `SegmentFeeder.stopCurrent()` already has
   today (reused, not reinvented). Pause feeds `anullsrc` instead of a decoder. Because this is raw
   PCM with no container of its own, there is nothing here that can develop a continuity-counter or
   bitstream-filter discontinuity at a switch — the persistent encoder's own AAC encode never
-  restarts.
+  restarts. **`-re` belongs on the persistent encoder's *audio* input** (`-re -f s16le -ar 44100
+  -ac 2 -i pipe:4`) — a plain decode-only ffmpeg process has no reason to pace itself and will
+  decode a whole track as fast as disk/CPU allow otherwise. `-re` there paces audio consumption to
+  real time, which backpressures the pipe (bounded OS pipe buffer) and naturally throttles the
+  upstream decoder — the same backpressure relationship the current architecture already relies on
+  (today `-re` sits on `RtmpPusher`; here it moves to the persistent encoder's audio input
+  specifically, not the video input, since video timing is already governed by `CanvasFeeder`'s
+  own heartbeat).
 - **`StreamController` coordinates the three pieces** instead of driving one big per-segment
   process. Track switch = `AudioRelay.switchTrack()` + `CanvasFeeder.render()`. Pause =
   `AudioRelay.switchToSilence()` + `CanvasFeeder.render({frozen: true})`. Auto-advance still keys
