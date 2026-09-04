@@ -12,6 +12,9 @@ export interface TextStyle {
   italic: boolean;
   stroke?: { color: string; width: number };
   shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+  // Single-line truncation — makes sense for title/text, not playlist (multi-line wrapping is
+  // intentional); the editor only exposes the checkbox for title/text (see TemplateEditor.tsx).
+  overflow?: 'ellipsis';
 }
 
 export type TemplateElement =

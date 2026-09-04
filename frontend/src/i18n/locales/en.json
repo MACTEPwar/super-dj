@@ -195,6 +195,7 @@
     "fieldShadowBlur": "Shadow blur",
     "fieldShadowOffsetX": "Shadow offset X",
     "fieldShadowOffsetY": "Shadow offset Y",
+    "fieldOverflowEllipsis": "Truncate with …",
     "colorModeSolid": "Solid",
     "colorModeGradient": "Gradient",
     "fieldGradientStop": "Stop {{n}}",

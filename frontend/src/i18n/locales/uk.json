@@ -195,6 +195,7 @@
     "fieldShadowBlur": "Розмиття тіні",
     "fieldShadowOffsetX": "Зміщення тіні по X",
     "fieldShadowOffsetY": "Зміщення тіні по Y",
+    "fieldOverflowEllipsis": "Обрізати трикрапкою",
     "colorModeSolid": "Суцільний",
     "colorModeGradient": "Градієнт",
     "fieldGradientStop": "Точка {{n}}",

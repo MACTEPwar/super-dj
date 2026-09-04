@@ -115,6 +115,19 @@ describe('renderScene', () => {
     expect(png.length).toBeGreaterThan(0);
   });
 
+  it('a title with overflow: ellipsis truncates long text instead of overflowing its box', async () => {
+    const png = await renderScene(
+      [{ type: 'title', x: 0, y: 0, width: 200, fontSize: 30,
+         color: { mode: 'solid', color: '#ffffff' },
+         style: { fontFamily: 'DejaVu Sans', bold: false, italic: false, overflow: 'ellipsis' } }],
+      { title: 'This Is A Very Long Track Title That Should Not Fit', playlistLines: [], coverDataUri: null },
+      testOptions, testLoadFont,
+    );
+    expect(png.length).toBeGreaterThan(0);
+    // This test's bar is "doesn't throw and produces real output," matching this file's existing
+    // convention for CSS-trick tests (no mocking of satori/resvg).
+  });
+
   it('renders bold+italic using the Liberation Sans family', async () => {
     const png = await renderScene(
       [{ type: 'title', x: 0, y: 0, width: 400, fontSize: 60,

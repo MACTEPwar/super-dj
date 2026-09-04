@@ -195,6 +195,7 @@
     "fieldShadowBlur": "Размытие тени",
     "fieldShadowOffsetX": "Смещение тени по X",
     "fieldShadowOffsetY": "Смещение тени по Y",
+    "fieldOverflowEllipsis": "Обрезать многоточием",
     "colorModeSolid": "Сплошной",
     "colorModeGradient": "Градиент",
     "fieldGradientStop": "Точка {{n}}",

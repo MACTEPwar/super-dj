@@ -679,6 +679,16 @@ export default function TemplateEditor() {
                       />
                     </>
                   )}
+                  {(selected.type === 'title' || selected.type === 'text') && (
+                    <label className="flex items-center gap-2 text-xs text-gray-600">
+                      <input
+                        type="checkbox"
+                        checked={selected.style.overflow === 'ellipsis'}
+                        onChange={(e) => updateElement(selectedIndex!, { style: { ...selected.style, overflow: e.target.checked ? 'ellipsis' : undefined } })}
+                      />
+                      {t('templateEditor.fieldOverflowEllipsis')}
+                    </label>
+                  )}
                 </>
               )}
 

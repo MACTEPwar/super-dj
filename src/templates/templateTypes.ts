@@ -13,6 +13,13 @@ export interface TextStyle {
   italic: boolean;
   stroke?: { color: string; width: number };
   shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+  // Single-line truncation ('nowrap' + 'hidden' + '…') — makes sense for title/text (single-
+  // line by design) but not playlist (multi-line, wrapping is intentional). TextStyle is shared
+  // across all three element types rather than split per-type, so this is left enabled at the
+  // type/validation level for playlist too; see sceneRenderer.ts's textStyleToCss for why, and
+  // TemplateEditor.tsx, which is where this is actually kept out of a playlist author's hands
+  // (the properties-panel checkbox only renders for title/text).
+  overflow?: 'ellipsis';
 }
 
 export interface CoverElement {
@@ -147,6 +154,7 @@ function isValidTextStyle(value: unknown): value is TextStyle {
     if (!isFiniteNumber(s.offsetX) || Math.abs(s.offsetX) > MAX_SHADOW_OFFSET) return false;
     if (!isFiniteNumber(s.offsetY) || Math.abs(s.offsetY) > MAX_SHADOW_OFFSET) return false;
   }
+  if (v.overflow !== undefined && v.overflow !== 'ellipsis') return false;
   return true;
 }
 

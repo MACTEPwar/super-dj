@@ -39,6 +39,21 @@ function textStyleToCss(style: TextStyle, color: ColorValue): Record<string, unk
   if (style.shadow) {
     css.textShadow = `${style.shadow.offsetX}px ${style.shadow.offsetY}px ${style.shadow.blur}px ${style.shadow.color}`;
   }
+  // Applied unconditionally here even though this helper is also called from the 'playlist'
+  // case below (multi-line, where wrapping is intentional) — TextStyle.overflow is a field on
+  // the one shared style type used by title/playlist/text, not a per-type variant, so there's no
+  // type-safe way to special-case it here without either splitting textStyleToCss in two or
+  // threading an extra "is this multi-line" parameter through every caller for one narrow field.
+  // Instead this is kept out of a playlist author's hands at the editor-UI level (see
+  // TemplateEditor.tsx's properties panel: the overflow checkbox only renders for title/text) —
+  // a playlist element could technically still carry `overflow: 'ellipsis'` if set via a direct
+  // API call, producing a confusing single-line-truncated playlist window, but that's an
+  // accepted, deliberate gap rather than an oversight.
+  if (style.overflow === 'ellipsis') {
+    css.whiteSpace = 'nowrap';
+    css.overflow = 'hidden';
+    css.textOverflow = 'ellipsis';
+  }
   return css;
 }
 

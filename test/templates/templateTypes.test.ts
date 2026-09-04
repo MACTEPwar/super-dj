@@ -162,6 +162,22 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
     })).toBe(false);
   });
 
+  it('accepts a TextStyle with overflow: ellipsis', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 0, y: 0, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { fontFamily: 'DejaVu Sans', bold: false, italic: false, overflow: 'ellipsis' },
+    })).toBe(true);
+  });
+
+  it('rejects an invalid overflow value', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 0, y: 0, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { fontFamily: 'DejaVu Sans', bold: false, italic: false, overflow: 'clip' as unknown },
+    })).toBe(false);
+  });
+
   it('rejects a timer with a gradient color (timer color must be a plain string)', () => {
     expect(isValidTemplateElement({
       type: 'timer', x: 10, y: 10, fontSize: 20,

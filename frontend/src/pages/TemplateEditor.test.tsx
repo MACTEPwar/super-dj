@@ -194,6 +194,105 @@ describe('TemplateEditor', () => {
     expect(screen.getByRole('option', { name: 'Liberation Sans' })).toBeInTheDocument();
   });
 
+  it('shows the overflow-ellipsis checkbox for a title element, unchecked by default', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+
+    const checkbox = await screen.findByLabelText('Truncate with …') as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+  });
+
+  it('shows the overflow-ellipsis checkbox for a text element, and it reflects an already-set style.overflow', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'text', x: 10, y: 10, width: 400, fontSize: 30, text: 'now streaming',
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { ...DEFAULT_STYLE, overflow: 'ellipsis' },
+      }],
+    });
+    renderEditor();
+
+    await userEvent.click(await screen.findByText('Text', { selector: 'span' }));
+
+    const checkbox = await screen.findByLabelText('Truncate with …') as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+  });
+
+  it('does not show the overflow-ellipsis checkbox for a playlist element (multi-line wrapping is intentional)', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'playlist', x: 10, y: 10, width: 400, fontSize: 22, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+
+    await userEvent.click(await screen.findByText('Playlist', { selector: 'span' }));
+    await screen.findByLabelText('Font size');
+
+    expect(screen.queryByLabelText('Truncate with …')).not.toBeInTheDocument();
+  });
+
+  it('checking the overflow-ellipsis checkbox sets style.overflow, and Save persists it', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+
+    const checkbox = await screen.findByLabelText('Truncate with …');
+    await userEvent.click(checkbox);
+
+    expect((checkbox as HTMLInputElement).checked).toBe(true);
+
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [{
+        type: 'title', x: 10, y: 10, width: 400, fontSize: 30,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { ...DEFAULT_STYLE, overflow: 'ellipsis' },
+      }],
+    }));
+  });
+
+  it('unchecking the overflow-ellipsis checkbox clears style.overflow', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'title', x: 10, y: 10, width: 400, fontSize: 30,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { ...DEFAULT_STYLE, overflow: 'ellipsis' },
+      }],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+
+    const checkbox = await screen.findByLabelText('Truncate with …');
+    await userEvent.click(checkbox);
+
+    expect((checkbox as HTMLInputElement).checked).toBe(false);
+
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [{
+        type: 'title', x: 10, y: 10, width: 400, fontSize: 30,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: DEFAULT_STYLE,
+      }],
+    }));
+  });
+
   it('toggling gradient mode shows/hides the stop color fields', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
