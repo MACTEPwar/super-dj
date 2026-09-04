@@ -57,10 +57,19 @@ export interface ImageElement {
   assetId: string;
 }
 
-export type TemplateElement =
-  | CoverElement | TitleElement | PlaylistElement | TimerElement | TextElement | ImageElement;
+export interface EqualizerElement {
+  type: 'equalizer';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string; // solid hex only — the rendering mechanism (ffmpeg showfreqs) can't do gradients
+}
 
-const ELEMENT_TYPES = ['cover', 'title', 'playlist', 'timer', 'text', 'image'] as const;
+export type TemplateElement =
+  | CoverElement | TitleElement | PlaylistElement | TimerElement | TextElement | ImageElement | EqualizerElement;
+
+const ELEMENT_TYPES = ['cover', 'title', 'playlist', 'timer', 'text', 'image', 'equalizer'] as const;
 const MAX_TEXT_LENGTH = 500;
 
 // #RGB / #RGBA / #RRGGBB / #RRGGBBAA only — this value can reach an ffmpeg drawtext filter
@@ -163,6 +172,9 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
   }
   if (el.type === 'timer') {
     return isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidColor(el.color) && isValidTextStyle(el.style);
+  }
+  if (el.type === 'equalizer') {
+    return isValidSize(el.width, CANVAS_WIDTH) && isValidSize(el.height, CANVAS_HEIGHT) && isValidColor(el.color);
   }
   if (el.type === 'text') {
     if (typeof el.text !== 'string' || el.text.length === 0 || el.text.length > MAX_TEXT_LENGTH) return false;

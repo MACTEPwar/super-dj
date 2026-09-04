@@ -109,6 +109,10 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
       // all; this is a defensive no-op, not the expected path. See StreamController.timerText()
       // and src/ffmpeg/canvasFeeder.ts for how the timer's text is actually produced/drawn.
       return null;
+    case 'equalizer':
+      // Native element (audio-reactive visualization drawn by ffmpeg's showfreqs filter, not a
+      // static picture) — filtering mechanism to be implemented in a later stage.
+      return null;
   }
 }
 

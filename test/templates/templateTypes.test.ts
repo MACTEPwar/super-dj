@@ -228,3 +228,29 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
     })).toBe(false);
   });
 });
+
+describe('isValidTemplateElement — equalizer', () => {
+  it('accepts a valid equalizer element', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#ffffff',
+    })).toBe(true);
+  });
+
+  it('rejects an equalizer with a non-hex color', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: 'not-a-color',
+    })).toBe(false);
+  });
+
+  it('rejects an equalizer with an out-of-canvas position', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: -1, y: 10, width: 400, height: 150, color: '#ffffff',
+    })).toBe(false);
+  });
+
+  it('rejects an equalizer missing width/height', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, color: '#ffffff',
+    })).toBe(false);
+  });
+});
