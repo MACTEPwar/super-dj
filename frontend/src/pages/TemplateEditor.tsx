@@ -328,9 +328,15 @@ export default function TemplateEditor() {
                 top: el.y * SCALE,
                 width: displayWidth(el) * SCALE,
                 height: displayHeight(el) * SCALE,
-                ...(el.type === 'equalizer' ? { backgroundColor: el.color, opacity: 0.25 } : {}),
               }}
             >
+              {el.type === 'equalizer' && (
+                // A separate fill layer for the translucent color swatch, rather than `opacity`
+                // on the outer box itself — CSS opacity composites the whole subtree, which
+                // would dim the label span and resize handle below (both siblings of this layer)
+                // right along with the color fill.
+                <div className="pointer-events-none absolute inset-0" style={{ backgroundColor: el.color, opacity: 0.25 }} />
+              )}
               <span className="pointer-events-none absolute -top-5 left-0 whitespace-nowrap rounded bg-black/70 px-1 text-xs text-white">
                 {t(`templateEditor.elementType.${el.type}`)}
               </span>

@@ -252,4 +252,27 @@ describe('TemplateEditor', () => {
 
     expect(await screen.findByText('Equalizer — reacts to sound during live playback, not shown here')).toBeInTheDocument();
   });
+
+  it('applies the equalizer color as its own fill layer instead of opacity on the whole box, so the label/resize handle stay at full opacity', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+    });
+    renderEditor();
+
+    const label = await screen.findByText('Equalizer');
+    const box = label.parentElement as HTMLElement;
+
+    // CSS opacity composites the whole subtree — the outer interactive box (which also holds
+    // the label and resize handle as children) must not carry it, or those would be dimmed too.
+    expect(box.style.opacity).toBe('');
+
+    // The translucent color swatch lives in its own child layer instead.
+    const fillLayer = Array.from(box.children).find(
+      (child) => (child as HTMLElement).style.opacity === '0.25',
+    ) as HTMLElement | undefined;
+    expect(fillLayer).toBeDefined();
+    expect(fillLayer!.style.backgroundColor).not.toBe('');
+    expect(fillLayer!.textContent).toBe('');
+  });
 });
