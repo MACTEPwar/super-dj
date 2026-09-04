@@ -57,14 +57,19 @@ angular polyline, 400×150 output.
   main thread: cheap-per-call isn't free at N concurrent streams × 30fps,
   and this keeps one stream's render from stalling another stream's
   audio/video feeding or the HTTP server.
-- **Open verification item, not yet checked:** whether resvg's raw pixel
-  buffer (tiny-skia backed) is premultiplied or straight alpha.
-  `PersistentEncoder` needs to know this to declare the right ffmpeg
-  input handling — get it wrong and semi-transparent strokes come out
-  visibly tinted/darkened once composited. Must be confirmed with a real
-  round-trip (render → feed raw bytes to ffmpeg → inspect actual output
-  pixels), the same way this session's earlier canvas-alpha z-order fix
-  was verified with a hand-built RGBA buffer, before this is done.
+- **Verified (real round-trip, not assumed): resvg's raw pixel buffer is
+  premultiplied alpha.** Rendered a 50%-alpha red rectangle
+  (`fill="#ff0000" fill-opacity="0.5"`); the raw pixel came back
+  `(128, 0, 0, 128)` — half of 255, not 255, which is only possible if
+  the color channels were already multiplied by alpha. Fed those bytes
+  straight into a real `ffmpeg` as `-pix_fmt rgba` and composited over a
+  solid blue background: the result was visibly wrong (`R≈63`, should be
+  `R≈128`) — alpha applied a second time on top of the pixel data being
+  premultiplied already. Un-premultiplying each pixel first
+  (`R = R * 255 / A`, clamped, per channel, skip when `A == 0`) and
+  re-running the same round-trip produced the correct `R≈128`. **Decision:
+  `PulseVisualizer` unpremultiplies resvg's output before writing it to
+  the pipe** — a cheap per-pixel pass, not a filter-graph change.
 
 ## Data model
 
@@ -138,8 +143,8 @@ gets the exact same audio it always did, untouched).
   gains a `pulsePipe` alongside `videoPipe`/`audioPipe`.
 - New ffmpeg input:
   `-f rawvideo -pix_fmt rgba -s <eqWidth>x<eqHeight> -r <fps> -i pipe:5`
-  — pending the premultiplied-alpha verification above; may need an
-  unpremultiply step or a different `-pix_fmt` instead.
+  — valid as straight (non-premultiplied) alpha because `PulseVisualizer`
+  unpremultiplies before writing, per the verified decision above.
 - Filter graph: `[vcanvas_top][pulse]overlay=<eqX>:<eqY>[vout]` replaces
   the MVP's `asplit`/`showfreqs`/`colorkey` chain entirely. Audio mapping
   goes back to the plain `-map 1:a` — no more `asplit`/`[a_out]` split,
@@ -200,12 +205,11 @@ motion anyway.
   cases, now asserting the new pipe/input/filter shape instead of the
   old `showfreqs` one.
 - **Real-binary verification, non-negotiable per this project's own
-  repeated lesson:** (a) the `loadSystemFonts: false` fix — already
-  verified above; (b) the premultiplied-vs-straight-alpha question —
-  still open, must be checked; (c) a full round-trip through real
-  `ffmpeg` with the actual generated args (the same "тестовый" template
-  used for this session's prior real-ffmpeg checks) before calling this
-  done.
+  repeated lesson:** (a) the `loadSystemFonts: false` fix — verified
+  above; (b) the premultiplied-alpha unpremultiply step — verified
+  above; (c) still needed before calling this done: a full round-trip
+  through real `ffmpeg` with the actual generated args (the same
+  "тестовый" template used for this session's prior real-ffmpeg checks).
 
 ## Out of scope (deliberately deferred)
 
