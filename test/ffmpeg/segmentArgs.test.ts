@@ -5,25 +5,32 @@ const timer: TimerOverlay = { x: 10, y: 660, fontSize: 20, color: '#ffffff', tex
 
 describe('buildCanvasFrameArgs', () => {
   const base = {
-    backgroundPath: '/assets/background.png',
     overlayPngPath: '/tmp/super-dj-overlay-dest-1.png',
     fontFile: '/fonts/DejaVuSans-Bold.ttf',
     width: 1280,
     height: 720,
   };
 
-  it('builds a single-frame raw-video render compositing the background and overlay PNG, with no timer by default', () => {
+  // No background compositing here any more — CanvasFeeder used to flatten the overlay PNG onto
+  // a background image itself and emit an opaque yuv420p frame, which meant animated gif overlay
+  // elements (composited natively by ffmpeg, on top of this whole canvas — see
+  // persistentEncoderArgs.ts) could only ever sit UNDER the entire canvas, hiding any title/
+  // playlist text that was supposed to render on top of them. This now emits yuva420p (real
+  // per-pixel transparency, preserved from the Satori/resvg-rendered overlay PNG) so
+  // PersistentEncoder's own filter graph can composite the background/gifs BELOW this canvas and
+  // still have title/playlist/cover show through correctly on top of them — see
+  // buildPersistentEncoderArgs's own background+gif+canvas layering for the other half of this.
+  it('builds a single-frame raw-video render of just the overlay PNG, with real alpha and no timer by default', () => {
     const args = buildCanvasFrameArgs(base);
 
     expect(args).toEqual([
       '-y',
-      '-i', '/assets/background.png',
       '-i', '/tmp/super-dj-overlay-dest-1.png',
-      '-filter_complex', '[0:v]scale=1280:720[bg];[1:v]scale=1280:720[ov];[bg][ov]overlay=0:0[outv]',
+      '-filter_complex', '[0:v]scale=1280:720,format=yuva420p[outv]',
       '-map', '[outv]',
       '-frames:v', '1',
       '-f', 'rawvideo',
-      '-pix_fmt', 'yuv420p',
+      '-pix_fmt', 'yuva420p',
       '-',
     ]);
   });
@@ -33,7 +40,7 @@ describe('buildCanvasFrameArgs', () => {
 
     const filterComplex = args[args.indexOf('-filter_complex') + 1];
     expect(filterComplex).toBe(
-      "[0:v]scale=1280:720[bg];[1:v]scale=1280:720[ov];[bg][ov]overlay=0:0[base];"
+      "[0:v]scale=1280:720,format=yuva420p[base];"
       + "[base]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='0\\:05 / 1\\:05':x=10:y=660:fontsize=20:fontcolor=#ffffff[outv]",
     );
     // No pts-expression escaping — there's no continuous per-track encode process for a live
@@ -49,7 +56,7 @@ describe('buildCanvasFrameArgs', () => {
 
   it('drawtext includes fontfile resolved from the timer style, not the hardcoded default', () => {
     const args = buildCanvasFrameArgs({
-      backgroundPath: 'bg.png', overlayPngPath: 'overlay.png', fontFile: '/unused-legacy-param.ttf',
+      overlayPngPath: 'overlay.png', fontFile: '/unused-legacy-param.ttf',
       width: 1280, height: 720,
       timer: { x: 10, y: 10, fontSize: 20, color: '#ffffff', text: '1:23 / 4:56',
         style: { fontFamily: 'Liberation Sans', bold: true, italic: false } },
@@ -60,7 +67,7 @@ describe('buildCanvasFrameArgs', () => {
 
   it('drawtext includes borderw/bordercolor when the timer style has a stroke', () => {
     const args = buildCanvasFrameArgs({
-      backgroundPath: 'bg.png', overlayPngPath: 'overlay.png', fontFile: '/unused-legacy-param.ttf',
+      overlayPngPath: 'overlay.png', fontFile: '/unused-legacy-param.ttf',
       width: 1280, height: 720,
       timer: { x: 10, y: 10, fontSize: 20, color: '#ffffff', text: 'x',
         style: { fontFamily: 'DejaVu Sans', bold: false, italic: false, stroke: { color: '#000000', width: 2 } } },
@@ -72,7 +79,7 @@ describe('buildCanvasFrameArgs', () => {
 
   it('drawtext includes shadowx/shadowy/shadowcolor when the timer style has a shadow (blur is ignored, drawtext has no equivalent)', () => {
     const args = buildCanvasFrameArgs({
-      backgroundPath: 'bg.png', overlayPngPath: 'overlay.png', fontFile: '/unused-legacy-param.ttf',
+      overlayPngPath: 'overlay.png', fontFile: '/unused-legacy-param.ttf',
       width: 1280, height: 720,
       timer: { x: 10, y: 10, fontSize: 20, color: '#ffffff', text: 'x',
         style: { fontFamily: 'DejaVu Sans', bold: false, italic: false, shadow: { color: '#333333', blur: 10, offsetX: 3, offsetY: 4 } } },

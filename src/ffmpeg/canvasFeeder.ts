@@ -4,7 +4,6 @@ import { buildCanvasFrameArgs, NowPlayingOverlay, TimerOverlay } from './segment
 
 export interface CanvasFeederOptions {
   spawner: Spawner;
-  backgroundPath: string;
   // Fixed on-disk path this feeder writes the current overlay PNG to before every render — same
   // pattern the earlier per-segment pipeline always used, just now feeding a one-shot render
   // instead of a continuous encode.
@@ -52,7 +51,6 @@ export class CanvasFeeder {
       : null;
 
     const args = buildCanvasFrameArgs({
-      backgroundPath: this.options.backgroundPath,
       overlayPngPath: this.options.overlayImagePath,
       fontFile: this.options.fontFile,
       timer,

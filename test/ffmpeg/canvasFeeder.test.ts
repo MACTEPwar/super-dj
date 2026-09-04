@@ -39,7 +39,6 @@ function buildFeeder(overrides: Partial<{ spawner: Spawner; writeFileSync: jest.
   const writeFileSync = overrides.writeFileSync ?? jest.fn();
   const feeder = new CanvasFeeder({
     spawner: overrides.spawner ?? (jest.fn().mockReturnValue(fakeChild()) as Spawner),
-    backgroundPath: '/assets/background.png',
     overlayImagePath: '/tmp/overlay-dest-1.png',
     fontFile: '/fonts/DejaVuSans-Bold.ttf',
     width: 1280,

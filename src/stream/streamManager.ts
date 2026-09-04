@@ -299,7 +299,6 @@ export class StreamManager extends EventEmitter {
         buildOverlay,
         createCanvasFeeder: () => new CanvasFeeder({
           spawner: this.deps.spawner,
-          backgroundPath: this.deps.backgroundImagePath,
           overlayImagePath,
           fontFile: this.deps.fontFile,
           width: VIDEO_WIDTH,
@@ -315,6 +314,7 @@ export class StreamManager extends EventEmitter {
           heartbeatFps: CANVAS_HEARTBEAT_FPS,
           rtmpUrl: session.rtmpUrl,
           streamKey: session.streamKey,
+          backgroundPath: this.deps.backgroundImagePath,
           // Rounded to integers: ffmpeg's showfreqs `s=` (size) option requires integer
           // dimensions and errors out (exit -22) on a fractional value — isValidSize doesn't
           // enforce that (see templateTypes.ts), so a saved template could still carry one.

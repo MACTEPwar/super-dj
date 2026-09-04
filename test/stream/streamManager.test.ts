@@ -374,7 +374,7 @@ describe('StreamManager', () => {
       expect(filterComplex).toContain('overlay=20:31');
     });
 
-    it('passes no equalizer field when the template has none', async () => {
+    it('passes no equalizer field when the template has none, still composites background+canvas but with no showfreqs stage', async () => {
       const { deps, templateRepository, pipeSpawner } = buildDeps();
       const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
       templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl] });
@@ -383,8 +383,8 @@ describe('StreamManager', () => {
       await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
 
       const producerCall = (pipeSpawner as jest.Mock).mock.calls[0];
-      expect(producerCall[1]).not.toContain('-filter_complex');
-      expect(producerCall[1]).toEqual(expect.arrayContaining(['-map', '0:v', '-map', '1:a']));
+      expect(producerCall[1]).not.toContain('showfreqs');
+      expect(producerCall[1]).toEqual(expect.arrayContaining(['-map', '[vcanvas_top]', '-map', '1:a']));
     });
 
     it('falls back to a blank overlay, without throwing, when the render pool rejects', async () => {
@@ -523,7 +523,7 @@ describe('StreamManager', () => {
       expect(filterComplex).toContain('overlay=20:31');
     });
 
-    it('does not add a filter_complex at all when every image element is static', async () => {
+    it('does not add a gif-loop stage when every image element is static (background+canvas compositing still happens)', async () => {
       const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
       const imageEl = { type: 'image', x: 0, y: 0, width: 100, height: 100, assetId: 'asset-1' };
       templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [imageEl] });
@@ -541,7 +541,9 @@ describe('StreamManager', () => {
       await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
 
       const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
-      expect(producerCall).toBeUndefined();
+      expect(producerCall).toBeDefined();
+      const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
+      expect(filterComplex).not.toContain('loop=loop=-1');
     });
   });
 

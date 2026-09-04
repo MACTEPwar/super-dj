@@ -33,15 +33,15 @@ export interface TimerOverlay extends TimerElementPosition {
 }
 
 function overlayFilterComplex(width: number, height: number, fontFile: string, timer: TimerOverlay | null): string {
-  const parts = [
-    `[0:v]scale=${width}:${height}[bg]`,
-    `[1:v]scale=${width}:${height}[ov]`,
-  ];
+  // format=yuva420p keeps this frame's real per-pixel transparency (from the Satori/resvg-
+  // rendered overlay PNG) all the way out to raw stdout — see buildCanvasFrameArgs's doc comment
+  // for why: PersistentEncoder's own filter graph now composites the background image and any
+  // animated-gif elements BELOW this canvas, and relies on this alpha to let them show through
+  // wherever nothing is drawn (and be correctly hidden behind an opaque cover/title/playlist).
   if (!timer) {
-    parts.push('[bg][ov]overlay=0:0[outv]');
-    return parts.join(';');
+    return `[0:v]scale=${width}:${height},format=yuva420p[outv]`;
   }
-  parts.push('[bg][ov]overlay=0:0[base]');
+  const base = `[0:v]scale=${width}:${height},format=yuva420p[base]`;
   const fontfile = resolveFontFile(timer.style.fontFamily, timer.style.bold, timer.style.italic);
   // Escape colons in the text value for ffmpeg drawtext filter syntax
   const escapedText = timer.text.replace(/:/g, '\\:');
@@ -53,33 +53,35 @@ function overlayFilterComplex(width: number, height: number, fontFile: string, t
     drawtext += `:shadowx=${timer.style.shadow.offsetX}:shadowy=${timer.style.shadow.offsetY}:shadowcolor=${timer.style.shadow.color}`;
   }
   drawtext += '[outv]';
-  parts.push(drawtext);
-  return parts.join(';');
+  return `${base};${drawtext}`;
 }
 
-// A single still frame — background + overlay PNG composited, optional drawtext layered on top —
-// rendered once and handed back as raw YUV420p bytes on stdout. Used by CanvasFeeder (see
-// canvasFeeder.ts) both on an actual content change (track switch, pause/resume, a timer tick)
-// and never on any other cadence — CanvasFeeder itself is what resends the same rendered frame on
-// a fixed heartbeat between renders, this function only ever produces ONE new frame per call.
+// A single still frame of JUST the Satori/resvg-rendered overlay PNG (cover/title/playlist/etc,
+// with real transparency preserved), optional drawtext layered on top — rendered once and handed
+// back as raw YUVA420p bytes on stdout. The background image is NOT composited here any more
+// (that moved to PersistentEncoder's own filter graph, alongside any animated-gif elements —
+// see buildPersistentEncoderArgs) precisely so this frame's transparency survives into the raw
+// bytes CanvasFeeder writes to pipe:3, instead of being flattened onto an opaque background before
+// it ever reaches the persistent encoder. Used by CanvasFeeder (see canvasFeeder.ts) both on an
+// actual content change (track switch, pause/resume, a timer tick) and never on any other cadence
+// — CanvasFeeder itself is what resends the same rendered frame on a fixed heartbeat between
+// renders, this function only ever produces ONE new frame per call.
 export function buildCanvasFrameArgs(params: {
-  backgroundPath: string;
   overlayPngPath: string;
   fontFile: string;
   timer?: TimerOverlay | null;
   width: number;
   height: number;
 }): string[] {
-  const { backgroundPath, overlayPngPath, fontFile, width, height } = params;
+  const { overlayPngPath, fontFile, width, height } = params;
   return [
     '-y',
-    '-i', backgroundPath,
     '-i', overlayPngPath,
     '-filter_complex', overlayFilterComplex(width, height, fontFile, params.timer ?? null),
     '-map', '[outv]',
     '-frames:v', '1',
     '-f', 'rawvideo',
-    '-pix_fmt', 'yuv420p',
+    '-pix_fmt', 'yuva420p',
     '-',
   ];
 }

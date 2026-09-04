@@ -9,6 +9,7 @@ export interface PersistentEncoderParams {
   heartbeatFps: number;
   rtmpUrl: string;
   streamKey: string;
+  backgroundPath: string;
   equalizer?: EqualizerConfig;
   gifOverlays?: GifOverlayConfig[];
 }
