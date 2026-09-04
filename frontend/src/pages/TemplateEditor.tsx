@@ -30,6 +30,22 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+// Canvas-relative snap guides: while dragging, an element's own CENTER (not its edge) is
+// snapped toward the canvas center/edges once it's within SNAP_THRESHOLD_PX. Checking the
+// center against [0, CANVAS_WIDTH/2, CANVAS_WIDTH] (and the height equivalent) covers both
+// "snap to canvas center" and "snap to canvas edge" in one pass: a center landing on 0 or
+// CANVAS_WIDTH means the element's near edge sits exactly on that canvas edge, which is the
+// correct edge-snap behavior for the element as a whole, even though it's the center value
+// being compared/snapped, not the edge itself.
+const SNAP_THRESHOLD_PX = 8;
+
+function snapValue(value: number, targets: number[]): { value: number; snapped: boolean } {
+  for (const t of targets) {
+    if (Math.abs(value - t) <= SNAP_THRESHOLD_PX) return { value: t, snapped: true };
+  }
+  return { value, snapped: false };
+}
+
 // Not every test/browser environment implements URL.revokeObjectURL (jsdom doesn't) — guarding
 // it means a missing implementation just leaks the blob URL for that environment's lifetime
 // instead of crashing the component.
@@ -118,6 +134,10 @@ export default function TemplateEditor() {
   const loadedRef = useRef(false);
   const [past, setPast] = useState<TemplateElement[][]>([]);
   const [future, setFuture] = useState<TemplateElement[][]>([]);
+  // Canvas coordinates (not display/scaled pixels) of the currently-active snap guide line per
+  // axis, or null when that axis isn't snapped — set inside onCanvasPointerMove's drag branch,
+  // cleared in endInteraction.
+  const [snapLines, setSnapLines] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   // Captures the "before" snapshot exactly once per gesture/edit-session, guarded so a gesture
   // spanning many pointermove/updateElement calls only ever records its START state — by the
   // time a drag gesture's pointer-up fires, `elements` has already been mutated continuously
@@ -324,7 +344,19 @@ export default function TemplateEditor() {
     if (drag && drag.pointerId === e.pointerId) {
       const dx = (e.clientX - drag.startClientX) / SCALE;
       const dy = (e.clientY - drag.startClientY) / SCALE;
-      updateElement(drag.index, { x: clamp(Math.round(drag.originX + dx), 0, CANVAS_WIDTH), y: clamp(Math.round(drag.originY + dy), 0, CANVAS_HEIGHT) });
+      let x = Math.round(drag.originX + dx);
+      let y = Math.round(drag.originY + dy);
+
+      const el = elements[drag.index];
+      const centerX = x + displayWidth(el) / 2;
+      const centerY = y + displayHeight(el) / 2;
+      const snapX = snapValue(centerX, [0, CANVAS_WIDTH / 2, CANVAS_WIDTH]);
+      const snapY = snapValue(centerY, [0, CANVAS_HEIGHT / 2, CANVAS_HEIGHT]);
+      if (snapX.snapped) x = Math.round(snapX.value - displayWidth(el) / 2);
+      if (snapY.snapped) y = Math.round(snapY.value - displayHeight(el) / 2);
+      setSnapLines({ x: snapX.snapped ? snapX.value : null, y: snapY.snapped ? snapY.value : null });
+
+      updateElement(drag.index, { x: clamp(x, 0, CANVAS_WIDTH), y: clamp(y, 0, CANVAS_HEIGHT) });
       return;
     }
     const resize = resizeRef.current;
@@ -340,6 +372,7 @@ export default function TemplateEditor() {
   function endInteraction(e: ReactPointerEvent<HTMLDivElement>) {
     if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null;
     if (resizeRef.current?.pointerId === e.pointerId) resizeRef.current = null;
+    setSnapLines({ x: null, y: null });
     commitHistoryGesture();
   }
 
@@ -430,6 +463,12 @@ export default function TemplateEditor() {
           onClick={() => setSelectedIndex(null)}
         >
           {previewUrl && <img src={previewUrl} alt="" className="pointer-events-none absolute inset-0 h-full w-full" />}
+          {snapLines.x !== null && (
+            <div data-testid="snap-guide-x" className="pointer-events-none absolute top-0 h-full w-px bg-pink-500" style={{ left: snapLines.x * SCALE }} />
+          )}
+          {snapLines.y !== null && (
+            <div data-testid="snap-guide-y" className="pointer-events-none absolute left-0 w-full h-px bg-pink-500" style={{ top: snapLines.y * SCALE }} />
+          )}
           {elements.length === 0 && (
             <p className="absolute inset-0 flex items-center justify-center px-8 text-center text-sm text-gray-300">
               {t('templateEditor.emptyCanvasHint')}

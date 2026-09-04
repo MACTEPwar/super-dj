@@ -549,4 +549,69 @@ describe('TemplateEditor', () => {
     expect(within(coverRow).getByRole('button', { name: '▼' })).toBeDisabled();
     expect(within(coverRow).getByRole('button', { name: '▲' })).not.toBeDisabled();
   });
+
+  it('dragging an element within 8px of the canvas horizontal center snaps its center exactly to it', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 345, y: 300, width: 200, height: 100 }],
+    });
+    renderEditor();
+    const box = await screen.findByText('Cover', { selector: 'span' });
+    const handle = box.closest('div')!;
+    const canvas = screen.getByRole('group', { name: 'Overlay canvas — drag elements to reposition them' });
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100, clientY: 100 });
+    // dx = (225-100)/0.625 = 200 canvas px -> candidate x = 345+200 = 545, candidate center =
+    // 545+100 = 645 (5px from the canvas horizontal center, 640) -> snaps center to exactly 640,
+    // so x lands at 640 - width/2 = 540, not the unsnapped 545. dy is 0, so y is untouched (its
+    // center, 350, sits 10px from the vertical center target 360 — past the 8px threshold).
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 225, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+
+    const xField = await screen.findByLabelText('X') as HTMLInputElement;
+    expect(xField.value).toBe('540');
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('300');
+  });
+
+  it('dragging more than 8px away from any snap target does not snap', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 345, y: 300, width: 200, height: 100 }],
+    });
+    renderEditor();
+    const box = await screen.findByText('Cover', { selector: 'span' });
+    const handle = box.closest('div')!;
+    const canvas = screen.getByRole('group', { name: 'Overlay canvas — drag elements to reposition them' });
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100, clientY: 100 });
+    // dx = dy = 100/0.625 = 160 canvas px -> candidate x = 505 (center 605, 35px from the 640
+    // center target), candidate y = 460 (center 510, at least 150px from every y target: 0/360/
+    // 720) -> neither axis is within the 8px snap threshold, so both land exactly where dragged.
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+
+    const xField = await screen.findByLabelText('X') as HTMLInputElement;
+    expect(xField.value).toBe('505');
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('460');
+  });
+
+  it('a snap guide line renders while a snap is active, and clears on pointer-up', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 345, y: 300, width: 200, height: 100 }],
+    });
+    renderEditor();
+    const box = await screen.findByText('Cover', { selector: 'span' });
+    const handle = box.closest('div')!;
+    const canvas = screen.getByRole('group', { name: 'Overlay canvas — drag elements to reposition them' });
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 225, clientY: 100 });
+
+    expect(await screen.findByTestId('snap-guide-x')).toBeInTheDocument();
+
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+
+    expect(screen.queryByTestId('snap-guide-x')).not.toBeInTheDocument();
+  });
 });
