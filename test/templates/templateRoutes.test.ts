@@ -2,6 +2,9 @@ jest.mock('../../src/render/renderOverlay', () => ({ renderTemplatePng: jest.fn(
 
 import express from 'express';
 import request from 'supertest';
+import * as fs from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
 import { createTemplateRouter } from '../../src/templates/templateRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
@@ -9,11 +12,16 @@ import { renderTemplatePng } from '../../src/render/renderOverlay';
 const rendererDeps = { fontPath: '/fonts/test.ttf', fontFamily: 'Test', defaultCoverPath: '/assets/default-cover.png' };
 const validElements = [{ type: 'cover', x: 0, y: 0, width: 100, height: 100 }];
 
-function buildApp(templateRepository: any, trackRepository: any = { findById: jest.fn() }, userId = 'user-1') {
+function buildApp(
+  templateRepository: any,
+  trackRepository: any = { findById: jest.fn() },
+  userId = 'user-1',
+  templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn() },
+) {
   const authService: any = { getCurrentUser: jest.fn().mockResolvedValue({ id: userId, email: 'a@example.com' }) };
   const app = express();
   app.use(express.json());
-  app.use('/templates', createTemplateRouter(authService, templateRepository, trackRepository, rendererDeps));
+  app.use('/templates', createTemplateRouter(authService, templateRepository, trackRepository, rendererDeps, templateImageService));
   app.use(errorHandler);
   return app;
 }
@@ -109,7 +117,11 @@ describe('template routes', () => {
 
     it('uses a draft elements array from the body instead of the saved one, without persisting it', async () => {
       const templateRepository: any = ownedTemplateRepo();
-      const draftElements = [{ type: 'title', x: 5, y: 5, width: 50, fontSize: 10, color: '#000' }];
+      const draftElements = [{
+        type: 'title', x: 5, y: 5, width: 50, fontSize: 10,
+        color: { mode: 'solid', color: '#000000' },
+        style: { fontFamily: 'Test', bold: false, italic: false },
+      }];
       const res = await request(buildApp(templateRepository)).post('/templates/t1/preview').send({ elements: draftElements });
 
       expect(res.status).toBe(200);
@@ -149,6 +161,111 @@ describe('template routes', () => {
       const res = await request(buildApp(templateRepository)).post('/templates/t1/preview').send({});
 
       expect(res.status).toBe(500);
+    });
+  });
+
+  describe('POST /templates/:id/images', () => {
+    function ownedTemplateRepo() {
+      return { findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1', name: 'My Theme', elements: validElements }) };
+    }
+
+    it('uploads an image for the template owner and returns the assetId', async () => {
+      const templateRepository: any = ownedTemplateRepo();
+      const templateImageService: any = { upload: jest.fn().mockResolvedValue({ assetId: 'asset-1' }), resolvePath: jest.fn() };
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .post('/templates/t1/images')
+        .attach('image', Buffer.from([0x89, 0x50, 0x4e, 0x47]), { filename: 'logo.png', contentType: 'image/png' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ assetId: 'asset-1' });
+      expect(templateImageService.upload).toHaveBeenCalledWith('user-1', 't1', expect.objectContaining({ originalname: 'logo.png' }));
+    });
+
+    it('404s when the template does not exist', async () => {
+      const templateRepository: any = { findById: jest.fn().mockResolvedValue(null) };
+      const templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn() };
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .post('/templates/missing/images')
+        .attach('image', Buffer.from([0x89, 0x50, 0x4e, 0x47]), { filename: 'logo.png', contentType: 'image/png' });
+
+      expect(res.status).toBe(404);
+      expect(templateImageService.upload).not.toHaveBeenCalled();
+    });
+
+    it('403s for another user\'s template', async () => {
+      const templateRepository: any = { findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'someone-else' }) };
+      const templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn() };
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .post('/templates/t1/images')
+        .attach('image', Buffer.from([0x89, 0x50, 0x4e, 0x47]), { filename: 'logo.png', contentType: 'image/png' });
+
+      expect(res.status).toBe(403);
+      expect(templateImageService.upload).not.toHaveBeenCalled();
+    });
+
+    it('400s when no file is attached', async () => {
+      const templateRepository: any = ownedTemplateRepo();
+      const templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn() };
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .post('/templates/t1/images');
+
+      expect(res.status).toBe(400);
+      expect(templateImageService.upload).not.toHaveBeenCalled();
+    });
+
+    it('400s on a disallowed mimetype', async () => {
+      const templateRepository: any = ownedTemplateRepo();
+      const templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn() };
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .post('/templates/t1/images')
+        .attach('image', Buffer.from('<svg></svg>'), { filename: 'logo.svg', contentType: 'image/svg+xml' });
+
+      expect(res.status).toBe(400);
+      expect(templateImageService.upload).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /templates/:id/images/:assetId', () => {
+    function ownedTemplateRepo() {
+      return { findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1', name: 'My Theme', elements: validElements }) };
+    }
+
+    it('returns the file for the owner', async () => {
+      const filePath = path.join(os.tmpdir(), `template-image-test-${Date.now()}.png`);
+      await fs.writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const templateRepository: any = ownedTemplateRepo();
+      const templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn().mockReturnValue(filePath) };
+
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .get('/templates/t1/images/asset-1');
+
+      expect(res.status).toBe(200);
+      expect(templateImageService.resolvePath).toHaveBeenCalledWith('user-1', 't1', 'asset-1');
+      await fs.unlink(filePath);
+    });
+
+    it('404s for a nonexistent assetId', async () => {
+      const templateRepository: any = ownedTemplateRepo();
+      const templateImageService: any = {
+        upload: jest.fn(),
+        resolvePath: jest.fn().mockReturnValue(path.join(os.tmpdir(), 'definitely-does-not-exist-asset.png')),
+      };
+
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .get('/templates/t1/images/missing-asset');
+
+      expect(res.status).toBe(404);
+    });
+
+    it('403s for another user\'s template', async () => {
+      const templateRepository: any = { findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'someone-else' }) };
+      const templateImageService: any = { upload: jest.fn(), resolvePath: jest.fn() };
+
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .get('/templates/t1/images/asset-1');
+
+      expect(res.status).toBe(403);
+      expect(templateImageService.resolvePath).not.toHaveBeenCalled();
     });
   });
 });

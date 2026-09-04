@@ -21,6 +21,15 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(400).json({ error: err.message });
     return;
   }
+  // res.sendFile() (track covers, template images) forwards a missing-file error to next() as a
+  // plain Error carrying an http-errors-style numeric `status` (404 for ENOENT/ENOTDIR/
+  // ENAMETOOLONG, per the `send` package) rather than an ApiError — respect that instead of
+  // collapsing it to a generic 500. The underlying message isn't echoed back, since it can
+  // contain a filesystem path.
+  if (typeof err === 'object' && err !== null && (err as { status?: unknown }).status === 404) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
   console.error('unexpected error handling request', err);
   res.status(500).json({ error: 'internal server error' });
 }

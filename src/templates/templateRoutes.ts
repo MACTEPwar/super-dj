@@ -1,12 +1,19 @@
 import { Router } from 'express';
+import multer from 'multer';
+import * as os from 'os';
 import { TemplateRepository } from './templateRepository';
 import { isValidTemplateElements, TemplateElement, CANVAS_WIDTH, CANVAS_HEIGHT } from './templateTypes';
+import { TemplateImageService } from './templateImageService';
 import { TrackRepository } from '../tracks/trackRepository';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const upload = multer({ dest: os.tmpdir(), limits: { fileSize: MAX_IMAGE_BYTES } });
+const ALLOWED_IMAGE_MIMETYPES = ['image/png', 'image/jpeg', 'image/gif'];
 
 function toPublicTemplate(t: { id: string; name: string; elements: unknown; createdAt: Date; updatedAt: Date }) {
   return { id: t.id, name: t.name, elements: t.elements, createdAt: t.createdAt, updatedAt: t.updatedAt };
@@ -23,6 +30,7 @@ export function createTemplateRouter(
   templateRepository: TemplateRepository,
   trackRepository: Pick<TrackRepository, 'findById'>,
   rendererDeps: TemplateRendererDeps,
+  templateImageService: TemplateImageService,
 ): Router {
   const router = Router();
   const auth = requireAuth(authService);
@@ -111,6 +119,24 @@ export function createTemplateRouter(
     });
 
     res.status(200).contentType('image/png').send(png);
+  }));
+
+  router.post('/:id/images', auth, upload.single('image'), wrapAsync(async (req, res) => {
+    const owner = userId(req as AuthenticatedRequest);
+    const template = await requireOwnedTemplate(req.params.id, owner);
+    if (!req.file) throw new ApiError(400, 'image file is required');
+    if (!ALLOWED_IMAGE_MIMETYPES.includes(req.file.mimetype)) throw new ApiError(400, 'unsupported image type');
+    const result = await templateImageService.upload(owner, template.id, {
+      originalname: req.file.originalname, path: req.file.path, size: req.file.size,
+    });
+    res.status(200).json(result);
+  }));
+
+  router.get('/:id/images/:assetId', auth, wrapAsync(async (req, res) => {
+    const owner = userId(req as AuthenticatedRequest);
+    const template = await requireOwnedTemplate(req.params.id, owner);
+    const filePath = templateImageService.resolvePath(owner, template.id, req.params.assetId);
+    res.sendFile(filePath);
   }));
 
   return router;

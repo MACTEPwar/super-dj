@@ -20,6 +20,7 @@ import { StreamManager } from './stream/streamManager';
 import { StreamSessionRepository } from './stream/streamSessionRepository';
 import { StreamSessionManager } from './stream/streamSessionManager';
 import { TemplateRepository } from './templates/templateRepository';
+import { TemplateImageService } from './templates/templateImageService';
 import { Spawner, ChildProcessLike, ChildProcessWithPipes, PipeSpawner } from './ffmpeg/types';
 import { createApp } from './api/app';
 
@@ -78,6 +79,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const trackRepository = new TrackRepository(prisma);
   const trackUploadService = new TrackUploadService({ trackRepository, uploadsDir: config.uploadsDir });
+  const templateImageService = new TemplateImageService({ uploadsDir: config.uploadsDir });
   const playlistRepository = new PlaylistRepository(prisma);
   const destinationRepository = new DestinationRepository(prisma);
   const oauthConnectionRepository = new OAuthConnectionRepository(prisma);
@@ -143,6 +145,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     oauthConnectionRepository,
     templateRepository,
     templateRendererDeps,
+    templateImageService,
     frontendOrigin: config.frontendOrigin,
   });
 
