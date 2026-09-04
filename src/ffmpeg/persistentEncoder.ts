@@ -1,5 +1,5 @@
 import { PipeSpawner, ChildProcessWithPipes } from './types';
-import { buildPersistentEncoderArgs, EqualizerConfig } from './persistentEncoderArgs';
+import { buildPersistentEncoderArgs, EqualizerConfig, GifOverlayConfig } from './persistentEncoderArgs';
 
 export interface PersistentEncoderParams {
   spawner: PipeSpawner;
@@ -10,6 +10,7 @@ export interface PersistentEncoderParams {
   rtmpUrl: string;
   streamKey: string;
   equalizer?: EqualizerConfig;
+  gifOverlays?: GifOverlayConfig[];
 }
 
 // Spawned once in StreamController.start() and never restarted for the life of the session —

@@ -7,8 +7,10 @@ import { DestinationStreamStatus, StreamStatus } from './types';
 import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
 import { AudioRelay } from '../ffmpeg/audioRelay';
 import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
+import { GifOverlayConfig } from '../ffmpeg/persistentEncoderArgs';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
+import { getImageFrameCount } from '../ffmpeg/imageFrameCount';
 import { buildPlaylistWindowLines } from '../ffmpeg/overlayText';
 import { Spawner, PipeSpawner } from '../ffmpeg/types';
 import { ApiError } from '../errors';
@@ -199,12 +201,45 @@ export class StreamManager extends EventEmitter {
       const queue = new PlaylistQueue(tracks);
       const overlayImagePath = path.join(this.deps.fifoDir, `super-dj-overlay-${destinationId}.png`);
 
+      const timerElement = templateElements.find((e): e is TimerElement => e.type === 'timer') ?? null;
+      const equalizerElement = templateElements.find((e): e is EqualizerElement => e.type === 'equalizer') ?? null;
+
+      // A multi-frame (animated) image can't be rendered by Satori/resvg — resvg decodes a GIF
+      // to exactly one static frame, since SVG has no concept of an animated raster embed (see
+      // GifOverlayConfig's doc comment in persistentEncoderArgs.ts). Detected once here, same
+      // "fixed for the life of this session" treatment as timer/equalizer, and excluded from the
+      // Satori bake below so it isn't rendered twice (once, wrongly, as a static Satori image;
+      // once, correctly, as a native ffmpeg overlay).
+      const imageAssetPaths = resolveImageAssets(templateElements, this.deps.templateImageService, destination.userId, options?.templateId ?? '');
+      const animatedImageAssetIds = new Set<string>();
+      const gifOverlays: GifOverlayConfig[] = [];
+      for (const el of templateElements) {
+        if (el.type !== 'image') continue;
+        const filePath = imageAssetPaths[el.assetId];
+        if (!filePath) continue; // invalid assetId — already logged by resolveImageAssets above
+        let frameCount: number;
+        try {
+          frameCount = await getImageFrameCount(filePath);
+        } catch (err) {
+          console.warn(`[stream] failed to probe image element "${el.assetId}" for animation, treating as a static image`, err);
+          continue;
+        }
+        if (frameCount > 1) {
+          animatedImageAssetIds.add(el.assetId);
+          gifOverlays.push({
+            x: Math.round(el.x), y: Math.round(el.y),
+            width: Math.round(el.width), height: Math.round(el.height),
+            filePath, frameCount,
+          });
+        }
+      }
+
       // A timer isn't baked into the rendered PNG (see TimerElement's doc comment) — split it
       // out once here, since the template is fixed for the life of this session, rather than on
       // every buildOverlay() call.
-      const bakedElements = templateElements.filter((e) => e.type !== 'timer' && e.type !== 'equalizer');
-      const timerElement = templateElements.find((e): e is TimerElement => e.type === 'timer') ?? null;
-      const equalizerElement = templateElements.find((e): e is EqualizerElement => e.type === 'equalizer') ?? null;
+      const bakedElements = templateElements.filter((e) =>
+        e.type !== 'timer' && e.type !== 'equalizer' && !(e.type === 'image' && animatedImageAssetIds.has(e.assetId)),
+      );
 
       const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
         const currentIndex = tracks.findIndex((t) => t.name === track.name);
@@ -288,6 +323,7 @@ export class StreamManager extends EventEmitter {
                 color: equalizerElement.color,
               }
             : undefined,
+          gifOverlays,
         }),
         onError: () => {
           const entry = this.lifecycles.get(destinationId);

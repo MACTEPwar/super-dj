@@ -87,4 +87,76 @@ describe('buildPersistentEncoderArgs', () => {
     expect(filterArg).toContain('[vfast][eq]overlay=');
     expect(filterArg).not.toContain('[0:v][eq]overlay=');
   });
+
+  // Root cause (verified against a real ffmpeg binary): resvg (the Satori/image-element render
+  // path) decodes a GIF to exactly one static frame — there is no animated-raster concept in SVG
+  // at all — so an animated GIF used as an 'image' element never moves no matter how often the
+  // overlay PNG is re-rendered. Fix mirrors the equalizer: ffmpeg decodes and loops the GIF
+  // natively as an extra persistent input, entirely bypassing Satori/resvg for that element.
+  it('adds an extra file input and a loop/fps/scale/overlay chain for each gifOverlays entry', () => {
+    const args = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k',
+      gifOverlays: [{ x: 900, y: 40, width: 150, height: 150, filePath: '/data/templates/t1/cover.gif', frameCount: 10 }],
+    });
+
+    expect(args).toEqual(expect.arrayContaining(['-i', '/data/templates/t1/cover.gif']));
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('[0:v]fps=30[vfast]');
+    // input index 2: pipe:3 is 0, pipe:4 is 1, so the first extra file input is 2.
+    // `loop`'s own `size=<frameCount>` (not `-stream_loop` on the input) is required — verified
+    // against a real ffmpeg binary: `-stream_loop -1` on a GIF input left the composited output
+    // frozen on the first frame indefinitely, while `loop=loop=-1:size=<frameCount>` inside the
+    // filter graph genuinely cycled through all of the GIF's frames.
+    expect(filterArg).toContain('[2:v]loop=loop=-1:size=10,fps=30,scale=150:150[gif0]');
+    expect(filterArg).toContain('[vfast][gif0]overlay=900:40[vgif0]');
+    // No equalizer in this test — the gif chain's own last pad is the final video map target,
+    // there's no reason to force a [vout] relabel just to have a fixed name.
+    expect(args).toEqual(expect.arrayContaining(['-map', '[vgif0]', '-map', '1:a']));
+  });
+
+  it('chains multiple gifOverlays entries, one file input and one loop/overlay stage per entry, in array order', () => {
+    const args = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k',
+      gifOverlays: [
+        { x: 10, y: 10, width: 100, height: 100, filePath: '/a.gif', frameCount: 5 },
+        { x: 20, y: 20, width: 200, height: 200, filePath: '/b.gif', frameCount: 8 },
+      ],
+    });
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('[2:v]loop=loop=-1:size=5,fps=30,scale=100:100[gif0]');
+    expect(filterArg).toContain('[vfast][gif0]overlay=10:10[vgif0]');
+    expect(filterArg).toContain('[3:v]loop=loop=-1:size=8,fps=30,scale=200:200[gif1]');
+    // second gif overlays on top of the first gif's own output pad, not back on [vfast].
+    expect(filterArg).toContain('[vgif0][gif1]overlay=20:20[vgif1]');
+    expect(args).toEqual(expect.arrayContaining(['-map', '[vgif1]', '-map', '1:a']));
+  });
+
+  // The equalizer is documented (CLAUDE.md) as always topmost, composited after the canvas is
+  // already flattened — that invariant must hold over gif overlays too, not just over Satori's
+  // own baked elements, so the equalizer's overlay stage must be the LAST one in the chain.
+  it('composites gif overlays first and the equalizer last (on top), when both are present', () => {
+    const args = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k',
+      equalizer: { x: 40, y: 500, width: 400, height: 150, color: '#ff6600' },
+      gifOverlays: [{ x: 900, y: 40, width: 150, height: 150, filePath: '/cover.gif', frameCount: 10 }],
+    });
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('[vfast][gif0]overlay=900:40[vgif0]');
+    // the equalizer's overlay reads the gif chain's own output pad, not [vfast] directly, and
+    // its own output is the fixed [vout] label the encoder always maps as the final video pad.
+    expect(filterArg).toContain('[vgif0][eq]overlay=40:500[vout]');
+    expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '[a_out]']));
+  });
+
+  it('is byte-for-byte identical to the no-gif output when gifOverlays is omitted or empty', () => {
+    const omitted = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k',
+    });
+    const empty = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k', gifOverlays: [],
+    });
+    expect(empty).toEqual(omitted);
+  });
 });

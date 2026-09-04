@@ -1,6 +1,11 @@
 jest.mock('../../src/ffmpeg/duration', () => ({
   getAudioDurationSeconds: jest.fn().mockResolvedValue(100),
 }));
+// Defaults every image element to "static" (1 frame) so every pre-existing image-element test
+// is unaffected — tests that specifically exercise gif-overlay detection override this per-call.
+jest.mock('../../src/ffmpeg/imageFrameCount', () => ({
+  getImageFrameCount: jest.fn().mockResolvedValue(1),
+}));
 jest.mock('../../src/render/renderOverlay', () => ({
   renderTemplatePng: jest.fn().mockResolvedValue(Buffer.from('fake-png')),
 }));
@@ -9,6 +14,7 @@ import { PassThrough } from 'stream';
 import { StreamManager } from '../../src/stream/streamManager';
 import { ApiError } from '../../src/errors';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
+import { getImageFrameCount } from '../../src/ffmpeg/imageFrameCount';
 import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
 import { PlaylistQueue } from '../../src/playlist/queue';
 
@@ -454,6 +460,72 @@ describe('StreamManager', () => {
       expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
         imageAssets: { 'asset-1': '/uploads/user-1/templates/tpl-1/images/asset-1.png' },
       }));
+    });
+
+    // resvg (the Satori render path every other 'image' element uses) decodes a GIF to exactly
+    // one static frame — SVG has no concept of an animated raster embed. A multi-frame image
+    // asset is therefore excluded from the Satori bake entirely and instead composited natively
+    // by PersistentEncoder's own filter graph, exactly like the equalizer's showfreqs branch.
+    it('excludes an animated (multi-frame) image element from the Satori bake and passes it to PersistentEncoder as a gif overlay instead', async () => {
+      const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+      const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+      const gifEl = { type: 'image', x: 900, y: 40, width: 150, height: 150, assetId: 'gif-1' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, gifEl] });
+      templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/gif-1.gif');
+      (getImageFrameCount as jest.Mock).mockResolvedValue(10);
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(getImageFrameCount).toHaveBeenCalledWith('/uploads/user-1/templates/tpl-1/images/gif-1.gif');
+      // Only the static cover element reaches Satori — the gif is dropped from both `elements`
+      // and `imageAssets`, or it would be rendered twice (once, wrongly, as a frozen Satori
+      // image; once, correctly, as a native ffmpeg overlay).
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
+        elements: [coverEl],
+        imageAssets: {},
+      }));
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      expect(producerCall).toBeDefined();
+      const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
+      expect(filterComplex).toContain('loop=loop=-1:size=10,fps=30,scale=150:150');
+      expect(filterComplex).toContain('overlay=900:40');
+    });
+
+    it('rounds a fractional gif-overlay x/y/width/height to integers before it reaches ffmpeg args', async () => {
+      // Same reasoning as the equalizer's own rounding fix: ffmpeg's `scale=` requires integer
+      // dimensions, and isValidSize doesn't enforce integers for 'image' elements.
+      const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+      const gifEl = { type: 'image', x: 20.4, y: 30.6, width: 400.5, height: 150.5, assetId: 'gif-1' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [gifEl] });
+      templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/gif-1.gif');
+      (getImageFrameCount as jest.Mock).mockResolvedValue(6);
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      expect(producerCall).toBeDefined();
+      const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
+      expect(filterComplex).toContain('loop=loop=-1:size=6,fps=30,scale=401:151');
+      expect(filterComplex).toContain('overlay=20:31');
+    });
+
+    it('does not add a filter_complex at all when every image element is static', async () => {
+      const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+      const imageEl = { type: 'image', x: 0, y: 0, width: 100, height: 100, assetId: 'asset-1' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [imageEl] });
+      templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/asset-1.png');
+      // jest.mock's module-level mock isn't reset between tests in this file — reassert the
+      // "static" default explicitly rather than relying on it not having been overridden by an
+      // earlier test in this same describe block.
+      (getImageFrameCount as jest.Mock).mockResolvedValue(1);
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      expect(producerCall).toBeUndefined();
     });
   });
 
