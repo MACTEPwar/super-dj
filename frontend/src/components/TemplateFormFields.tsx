@@ -66,8 +66,21 @@ export function ColorField({ label, value, onChange, onFocus, onBlur }: { label:
 // Solid/gradient toggle + the fields for whichever mode is active. Built on ColorField/NumberField
 // above so both stay in one file — a caller with several ColorValue fields on one element (e.g.
 // a future overlayOverride.color/.backgroundColor pair) passes a distinct `label` per instance.
-export function ColorValueField({ label, value, onChange }: { label: string; value: ColorValue; onChange: (v: ColorValue) => void }) {
+export function ColorValueField({ label, value, onChange, onFocus, onBlur }: { label: string; value: ColorValue; onChange: (v: ColorValue) => void; onFocus?: () => void; onBlur?: () => void }) {
   const { t } = useTranslation();
+
+  // The solid/gradient toggle buttons are an instantaneous, one-shot click — there's no separate
+  // "user is mid-edit" moment to bracket the way a focus-then-blur gesture has one. Firing
+  // onFocus() immediately followed by onBlur() around the onChange reuses the exact same
+  // gesture-grouping prop plumbing every ColorField/NumberField call below already gets, so a
+  // toggle click still produces exactly one undo-stack entry (a zero-duration gesture) instead of
+  // needing a third callback prop just for this component.
+  function handleModeToggle(next: ColorValue) {
+    onFocus?.();
+    onChange(next);
+    onBlur?.();
+  }
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between text-xs text-gray-600">
@@ -75,18 +88,18 @@ export function ColorValueField({ label, value, onChange }: { label: string; val
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => onChange({ mode: 'solid', color: value.mode === 'solid' ? value.color : '#ffffff' })}
+            onClick={() => handleModeToggle({ mode: 'solid', color: value.mode === 'solid' ? value.color : '#ffffff' })}
             className={value.mode === 'solid' ? 'font-semibold underline' : ''}
           >{t('templateEditor.colorModeSolid')}</button>
           <button
             type="button"
-            onClick={() => onChange({ mode: 'gradient', stops: value.mode === 'gradient' ? value.stops : ['#ffffff', '#000000'], angleDeg: value.mode === 'gradient' ? value.angleDeg : 0 })}
+            onClick={() => handleModeToggle({ mode: 'gradient', stops: value.mode === 'gradient' ? value.stops : ['#ffffff', '#000000'], angleDeg: value.mode === 'gradient' ? value.angleDeg : 0 })}
             className={value.mode === 'gradient' ? 'font-semibold underline' : ''}
           >{t('templateEditor.colorModeGradient')}</button>
         </div>
       </div>
       {value.mode === 'solid' && (
-        <ColorField label={t('templateEditor.fieldColor')} value={value.color} onChange={(v) => onChange({ mode: 'solid', color: v })} />
+        <ColorField label={t('templateEditor.fieldColor')} value={value.color} onChange={(v) => onChange({ mode: 'solid', color: v })} onFocus={onFocus} onBlur={onBlur} />
       )}
       {value.mode === 'gradient' && (
         <>
@@ -100,9 +113,11 @@ export function ColorValueField({ label, value, onChange }: { label: string; val
                 stops[i] = v;
                 onChange({ mode: 'gradient', stops, angleDeg: value.angleDeg });
               }}
+              onFocus={onFocus}
+              onBlur={onBlur}
             />
           ))}
-          <NumberField label={t('templateEditor.fieldGradientAngle')} value={value.angleDeg} max={360} onChange={(v) => onChange({ ...value, angleDeg: v })} />
+          <NumberField label={t('templateEditor.fieldGradientAngle')} value={value.angleDeg} max={360} onChange={(v) => onChange({ ...value, angleDeg: v })} onFocus={onFocus} onBlur={onBlur} />
         </>
       )}
     </div>

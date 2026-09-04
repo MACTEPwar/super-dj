@@ -574,7 +574,7 @@ export default function TemplateEditor() {
               )}
 
               {(selected.type === 'title' || selected.type === 'playlist' || selected.type === 'text') && (
-                <ColorValueField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
+                <ColorValueField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
               {(selected.type === 'timer' || selected.type === 'equalizer') && (
                 <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />

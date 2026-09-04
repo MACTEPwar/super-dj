@@ -360,6 +360,81 @@ describe('TemplateEditor', () => {
     expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
   });
 
+  it('undo/redo round-trips a gradient stop color edit made through ColorValueField', async () => {
+    // ColorValueField (the solid/gradient picker used for title/playlist/text colors) is a
+    // separate wrapper around ColorField/NumberField, with its own { onFocus, onBlur } props that
+    // must be threaded down to its internal fields for a focus-then-blur gesture edit (e.g. typing
+    // a gradient stop's hex value) to land on the undo stack at all.
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'title', x: 10, y: 10, width: 400, fontSize: 30,
+        color: { mode: 'gradient', stops: ['#ffffff', '#000000'], angleDeg: 0 },
+        style: DEFAULT_STYLE,
+      }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title'));
+    // A plain click-to-select currently pushes its own (pre-existing, out-of-scope for this fix —
+    // see the "Known follow-ups" note on click-to-select wiping the redo stack) no-op history
+    // entry via startDrag/endInteraction, whose "before" snapshot happens to carry these same
+    // pre-edit stop colors. Left in place, undoing the color edit below would "pass" by coincidence
+    // — reverting to that unrelated no-op snapshot rather than because the edit itself was ever
+    // recorded. Clear it first so the test isolates exactly what the gradient-stop edit
+    // contributes to the undo stack.
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled());
+
+    const stop1 = await screen.findByLabelText('Stop 1');
+    fireEvent.focus(stop1);
+    fireEvent.change(stop1, { target: { value: '#123456' } });
+    fireEvent.blur(stop1);
+
+    expect(screen.getAllByDisplayValue('#123456').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Undo' })).not.toBeDisabled();
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+
+    await waitFor(() => expect(screen.getAllByDisplayValue('#ffffff').length).toBeGreaterThan(0));
+    expect(screen.queryAllByDisplayValue('#123456')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+  });
+
+  it('the solid/gradient mode-toggle click on ColorValueField produces exactly one undo step', async () => {
+    // The toggle buttons call onChange directly from an onClick — an instantaneous one-shot
+    // change, not a focus/blur gesture — so this exercises the separate handleModeToggle path
+    // (onFocus() then onChange() then onBlur() back-to-back) rather than the focus/blur wiring
+    // the test above covers.
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'title', x: 10, y: 10, width: 400, fontSize: 30,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: DEFAULT_STYLE,
+      }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title'));
+    // A plain click-to-select currently pushes its own (pre-existing, out-of-scope for this fix —
+    // see the "Known follow-ups" note on click-to-select wiping the redo stack) no-op history
+    // entry via startDrag/endInteraction. Undo it first so this test starts from a clean, empty
+    // undo stack and isolates exactly what the mode-toggle click itself contributes.
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled());
+
+    await userEvent.click(screen.getByText('Gradient'));
+
+    expect(await screen.findByText('Stop 1')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Undo' })).not.toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+
+    // Back to solid mode, and — since exactly one entry was pushed for the single click — nothing
+    // further left to undo.
+    await waitFor(() => expect(screen.queryByText('Stop 1')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+  });
+
   it('applies the equalizer color as its own fill layer instead of opacity on the whole box, so the label/resize handle stay at full opacity', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
