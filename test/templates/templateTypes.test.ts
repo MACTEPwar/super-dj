@@ -253,4 +253,31 @@ describe('isValidTemplateElement — equalizer', () => {
       type: 'equalizer', x: 10, y: 10, color: '#ffffff',
     })).toBe(false);
   });
+
+  // ffmpeg's showfreqs `s=` (size) option requires integer dimensions — a fractional width/
+  // height used to pass this validation and only fail later, at stream-start, deep inside
+  // ffmpeg's filtergraph build. Reject it here instead, so a malformed template can't be saved.
+  it('rejects an equalizer with a non-integer width', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, width: 400.5, height: 150, color: '#ffffff',
+    })).toBe(false);
+  });
+
+  it('rejects an equalizer with a non-integer height', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150.5, color: '#ffffff',
+    })).toBe(false);
+  });
+
+  it('rejects an equalizer with a non-integer x', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10.5, y: 10, width: 400, height: 150, color: '#ffffff',
+    })).toBe(false);
+  });
+
+  it('rejects an equalizer with a non-integer y', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10.5, width: 400, height: 150, color: '#ffffff',
+    })).toBe(false);
+  });
 });

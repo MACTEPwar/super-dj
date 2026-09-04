@@ -20,7 +20,13 @@ export function NumberField({ label, value, onChange, min = 0, max }: { label: s
         max={max}
         onChange={(e) => {
           const n = Number(e.target.value);
-          if (Number.isFinite(n)) onChange(clamp(n, min, max));
+          // Rounded before clamping/storing, not just before display (the input's `value` above
+          // already rounds for display, but onChange used to pass the raw fractional value
+          // through — round-tripping a typed "400.5" back as a state value of 400.5 even though
+          // the field visibly showed "401"). Every current caller (x/y/width/height/fontSize/
+          // strokeWidth/shadow blur+offsets/gradient angle) is a whole-pixel or whole-degree
+          // value with no legitimate use for fractional precision.
+          if (Number.isFinite(n)) onChange(clamp(Math.round(n), min, max));
         }}
         className="mt-1 w-full rounded border px-2 py-1 text-sm"
       />

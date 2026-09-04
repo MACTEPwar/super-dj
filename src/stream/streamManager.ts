@@ -275,8 +275,18 @@ export class StreamManager extends EventEmitter {
           heartbeatFps: CANVAS_HEARTBEAT_FPS,
           rtmpUrl: session.rtmpUrl,
           streamKey: session.streamKey,
+          // Rounded to integers: ffmpeg's showfreqs `s=` (size) option requires integer
+          // dimensions and errors out (exit -22) on a fractional value — isValidSize doesn't
+          // enforce that (see templateTypes.ts), so a saved template could still carry one.
+          // x/y are rounded too for consistency, even though overlay's x/y accept fractional
+          // expressions — an equalizer element's position/size should just always be whole
+          // pixels.
           equalizer: equalizerElement
-            ? { x: equalizerElement.x, y: equalizerElement.y, width: equalizerElement.width, height: equalizerElement.height, color: equalizerElement.color }
+            ? {
+                x: Math.round(equalizerElement.x), y: Math.round(equalizerElement.y),
+                width: Math.round(equalizerElement.width), height: Math.round(equalizerElement.height),
+                color: equalizerElement.color,
+              }
             : undefined,
         }),
         onError: () => {

@@ -342,6 +342,27 @@ describe('StreamManager', () => {
       expect(filterComplex).toContain('overlay=20:30');
     });
 
+    it('rounds a fractional equalizer x/y/width/height to integers before it reaches ffmpeg args', async () => {
+      // ffmpeg's showfreqs `s=` (size) option requires integer dimensions — a fractional
+      // width/height passes template validation (isValidSize has no integer constraint) but
+      // crashes ffmpeg at filtergraph-build time (verified against a real local ffmpeg binary:
+      // exit -22, "Error applying option 's' to filter 'showfreqs'"). StreamManager must round
+      // before building the EqualizerConfig it hands to PersistentEncoder.
+      const { deps, templateRepository, pipeSpawner } = buildDeps();
+      const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+      const equalizerEl = { type: 'equalizer', x: 20.4, y: 30.6, width: 400.5, height: 150.5, color: '#00ff00' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, equalizerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      expect(producerCall).toBeDefined();
+      const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
+      expect(filterComplex).toContain('showfreqs=s=401x151:mode=bar:colors=#00ff00');
+      expect(filterComplex).toContain('overlay=20:31');
+    });
+
     it('passes no equalizer field when the template has none', async () => {
       const { deps, templateRepository, pipeSpawner } = buildDeps();
       const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };

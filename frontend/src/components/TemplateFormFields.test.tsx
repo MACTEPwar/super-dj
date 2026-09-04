@@ -22,6 +22,28 @@ describe('NumberField', () => {
 
     expect(onChange).toHaveBeenCalledWith(10);
   });
+
+  // The equalizer element's width/height must be whole pixels — ffmpeg's showfreqs `s=` (size)
+  // option requires integer dimensions, and only the DISPLAYED value used to be rounded, not
+  // the value actually stored/passed to onChange, so a fractional value silently round-tripped
+  // through state.
+  it('rounds a fractional typed value to the nearest integer before calling onChange', () => {
+    const onChange = vi.fn();
+    render(<NumberField label="Width" value={50} min={10} max={1000} onChange={onChange} />);
+
+    fireEvent.change(screen.getByLabelText('Width'), { target: { value: '400.5' } });
+
+    expect(onChange).toHaveBeenCalledWith(401);
+  });
+
+  it('rounds a fractional value before clamping it to max', () => {
+    const onChange = vi.fn();
+    render(<NumberField label="Width" value={50} min={10} max={100} onChange={onChange} />);
+
+    fireEvent.change(screen.getByLabelText('Width'), { target: { value: '100.6' } });
+
+    expect(onChange).toHaveBeenCalledWith(100);
+  });
 });
 
 describe('ColorField', () => {

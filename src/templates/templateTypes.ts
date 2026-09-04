@@ -174,7 +174,15 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
     return isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidColor(el.color) && isValidTextStyle(el.style);
   }
   if (el.type === 'equalizer') {
-    return isValidSize(el.width, CANVAS_WIDTH) && isValidSize(el.height, CANVAS_HEIGHT) && isValidColor(el.color);
+    // Equalizer-specific, not folded into the shared isValidPosition/isValidSize used by every
+    // other element type: ffmpeg's showfreqs `s=` (size) option requires integer width/height,
+    // and this element's position/size should just always be whole pixels — but other element
+    // types (e.g. a future fractional angle/offset) have no such requirement, so this stays a
+    // narrow check in this branch rather than a change to the shared functions.
+    return Number.isInteger(el.x) && Number.isInteger(el.y)
+      && isValidSize(el.width, CANVAS_WIDTH) && Number.isInteger(el.width)
+      && isValidSize(el.height, CANVAS_HEIGHT) && Number.isInteger(el.height)
+      && isValidColor(el.color);
   }
   if (el.type === 'text') {
     if (typeof el.text !== 'string' || el.text.length === 0 || el.text.length > MAX_TEXT_LENGTH) return false;
