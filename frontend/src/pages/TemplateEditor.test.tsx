@@ -3,10 +3,12 @@ import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Route, Routes } from 'react-router-dom';
 import TemplateEditor from './TemplateEditor';
-import { templatesApi } from '../api/templates';
+import { getFontFamilies, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
 import { renderWithProviders } from '../test/renderWithProviders';
 
 vi.mock('../api/templates');
+
+const DEFAULT_STYLE = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
 
 function renderEditor() {
   return renderWithProviders(
@@ -18,6 +20,8 @@ function renderEditor() {
 describe('TemplateEditor', () => {
   beforeEach(() => {
     vi.mocked(templatesApi.previewBlobUrl).mockResolvedValue('blob:mock-preview');
+    vi.mocked(getFontFamilies).mockResolvedValue(['DejaVu Sans', 'Liberation Sans']);
+    vi.mocked(templateImageUrl).mockImplementation((templateId, assetId) => `blob:template-image/${templateId}/${assetId}`);
   });
 
   it('loads the template and shows its existing elements on the canvas', async () => {
@@ -25,7 +29,7 @@ describe('TemplateEditor', () => {
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
       elements: [
         { type: 'cover', x: 40, y: 40, width: 200, height: 200 },
-        { type: 'title', x: 300, y: 40, width: 500, fontSize: 32, color: '#ffffff' },
+        { type: 'title', x: 300, y: 40, width: 500, fontSize: 32, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
       ],
     });
     renderEditor();
@@ -65,7 +69,7 @@ describe('TemplateEditor', () => {
   it('editing a field in the properties panel updates the element, and Save persists the full element list', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
-      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: '#ffffff' }],
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
     });
     vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
     renderEditor();
@@ -81,7 +85,7 @@ describe('TemplateEditor', () => {
 
     await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
       name: 'My Theme',
-      elements: [{ type: 'title', x: 99, y: 10, width: 400, fontSize: 30, color: '#ffffff' }],
+      elements: [{ type: 'title', x: 99, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
     }));
   });
 
@@ -118,5 +122,90 @@ describe('TemplateEditor', () => {
     fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100, clientY: 100 });
 
     expect(await screen.findByLabelText('X')).toBeInTheDocument();
+  });
+
+  it('adding a text element inserts it with default text', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await screen.findByText('Add an element above to get started.');
+
+    await userEvent.click(screen.getByText('+ Add Text'));
+
+    const textField = await screen.findByLabelText('Text content');
+    expect(textField).toHaveValue('New text');
+  });
+
+  it('clicking "add image" triggers the hidden file input', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await screen.findByText('Add an element above to get started.');
+    const clickSpy = vi.spyOn(HTMLInputElement.prototype, 'click');
+
+    await userEvent.click(screen.getByText('+ Add Image'));
+
+    expect(clickSpy).toHaveBeenCalled();
+  });
+
+  it('a successful upload appends an image element with the returned assetId', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    vi.mocked(uploadTemplateImage).mockResolvedValue({ assetId: 'asset-123' });
+    renderEditor();
+    await screen.findByText('Add an element above to get started.');
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['x'], 'logo.png', { type: 'image/png' });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => expect(uploadTemplateImage).toHaveBeenCalledWith('t1', file));
+    expect(await screen.findByText('Replace image')).toBeInTheDocument();
+    expect(templateImageUrl).toHaveBeenCalledWith('t1', 'asset-123');
+  });
+
+  it('selecting a title element shows the font-family select populated from the fonts query', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+
+    await userEvent.click(await screen.findByText('Title'));
+
+    const select = await screen.findByLabelText('Font') as HTMLSelectElement;
+    expect(select.value).toBe('DejaVu Sans');
+    expect(screen.getByRole('option', { name: 'DejaVu Sans' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Liberation Sans' })).toBeInTheDocument();
+  });
+
+  it('toggling gradient mode shows/hides the stop color fields', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title'));
+    expect(screen.queryByText('Stop 1')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByText('Gradient'));
+
+    expect(await screen.findByText('Stop 1')).toBeInTheDocument();
+    expect(screen.getByText('Stop 2')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByText('Solid'));
+
+    expect(screen.queryByText('Stop 1')).not.toBeInTheDocument();
+  });
+
+  it('timer selection never shows a gradient toggle', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'timer', x: 10, y: 10, fontSize: 30, color: '#ffffff', style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+
+    await userEvent.click(await screen.findByText('Timer'));
+
+    expect(await screen.findByLabelText('Color')).toBeInTheDocument();
+    expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
+    expect(screen.queryByText('Solid')).not.toBeInTheDocument();
   });
 });

@@ -1,11 +1,12 @@
-import { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { templatesApi, TemplateElement } from '../api/templates';
+import { getFontFamilies, TemplateElement, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
 import { ApiError } from '../api/client';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { ColorField, ColorValueField, NumberField } from '../components/TemplateFormFields';
 
 // Mirrors src/templates/templateTypes.ts on the backend — kept in sync by hand rather than
 // shared code (no shared package between frontend/backend in this project). Clamping to these
@@ -18,6 +19,12 @@ const DISPLAY_WIDTH = 800;
 const DISPLAY_HEIGHT = (DISPLAY_WIDTH * CANVAS_HEIGHT) / CANVAS_WIDTH;
 const SCALE = DISPLAY_WIDTH / CANVAS_WIDTH;
 const PREVIEW_DEBOUNCE_MS = 400;
+const DEFAULT_FONT_FAMILY = 'DejaVu Sans';
+
+// 'image' is deliberately excluded here — it needs an uploaded assetId before an element can
+// exist at all, so it's added through its own dedicated upload button/mutation (see
+// onAddImageClick below) rather than through defaultElement()/the generic add-element loop.
+type AddableType = Exclude<TemplateElement['type'], 'image'>;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -30,24 +37,42 @@ function revokePreviewUrl(url: string): void {
   if (typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(url);
 }
 
-function defaultElement(type: TemplateElement['type']): TemplateElement {
+function defaultElement(type: AddableType, t: (key: string) => string): TemplateElement {
   switch (type) {
     case 'cover':
       return { type: 'cover', x: 40, y: 40, width: 300, height: 300 };
     case 'title':
-      return { type: 'title', x: 360, y: 40, width: 600, fontSize: 40, color: '#ffffff' };
+      return {
+        type: 'title', x: 360, y: 40, width: 600, fontSize: 40,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: DEFAULT_FONT_FAMILY, bold: false, italic: false },
+      };
     case 'playlist':
-      return { type: 'playlist', x: 360, y: 140, width: 600, fontSize: 22, color: '#ffffff' };
+      return {
+        type: 'playlist', x: 360, y: 140, width: 600, fontSize: 22,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: DEFAULT_FONT_FAMILY, bold: false, italic: false },
+      };
     case 'timer':
-      return { type: 'timer', x: 360, y: 260, fontSize: 28, color: '#ffffff' };
+      return {
+        type: 'timer', x: 360, y: 260, fontSize: 28, color: '#ffffff',
+        style: { fontFamily: DEFAULT_FONT_FAMILY, bold: false, italic: false },
+      };
+    case 'text':
+      return {
+        type: 'text', x: 100, y: 100, width: 400, fontSize: 24,
+        text: t('templateEditor.defaultText'),
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: DEFAULT_FONT_FAMILY, bold: false, italic: false },
+      };
   }
 }
 
-// Non-cover elements have no stored height (drawtext/flex text sizes itself) — this is purely
-// the editor's own interactive box height, derived from fontSize so bigger text gets a bigger
-// (rough) selection target.
+// Non-cover/image elements have no stored height (drawtext/flex text sizes itself) — this is
+// purely the editor's own interactive box height, derived from fontSize so bigger text gets a
+// bigger (rough) selection target.
 function displayHeight(el: TemplateElement): number {
-  return el.type === 'cover' ? el.height : Math.round(el.fontSize * 1.6);
+  return el.type === 'cover' || el.type === 'image' ? el.height : Math.round(el.fontSize * 1.6);
 }
 
 function displayWidth(el: TemplateElement): number {
@@ -72,54 +97,13 @@ interface ResizeState {
   originHeight: number | null;
 }
 
-function NumberField({ label, value, onChange, min = 0, max }: { label: string; value: number; onChange: (v: number) => void; min?: number; max: number }) {
-  return (
-    <label className="block text-xs text-gray-600">
-      {label}
-      <input
-        type="number"
-        value={Math.round(value)}
-        min={min}
-        max={max}
-        onChange={(e) => {
-          const n = Number(e.target.value);
-          if (Number.isFinite(n)) onChange(clamp(n, min, max));
-        }}
-        className="mt-1 w-full rounded border px-2 py-1 text-sm"
-      />
-    </label>
-  );
-}
-
-function ColorField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  const isSimpleHex = /^#[0-9a-fA-F]{6}$/.test(value);
-  return (
-    <label className="block text-xs text-gray-600">
-      {label}
-      <div className="mt-1 flex items-center gap-2">
-        <input
-          type="color"
-          value={isSimpleHex ? value : '#ffffff'}
-          onChange={(e) => onChange(e.target.value)}
-          className="h-8 w-8 shrink-0 cursor-pointer rounded border p-0"
-        />
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="w-full rounded border px-2 py-1 text-sm"
-        />
-      </div>
-    </label>
-  );
-}
-
 export default function TemplateEditor() {
   const { id } = useParams<{ id: string }>();
   const templateId = id!;
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const templateQuery = useQuery({ queryKey: ['templates', templateId], queryFn: () => templatesApi.get(templateId) });
+  const fontFamiliesQuery = useQuery({ queryKey: ['fontFamilies'], queryFn: getFontFamilies });
   usePageTitle(templateQuery.data?.name ?? t('templateEditor.title'));
 
   const [name, setName] = useState('');
@@ -130,6 +114,10 @@ export default function TemplateEditor() {
   const dragRef = useRef<DragState | null>(null);
   const resizeRef = useRef<ResizeState | null>(null);
   const loadedRef = useRef(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  // null means "append a new image element"; a real index means "replace this element's assetId"
+  // (set by onReplaceImageClick, consumed by uploadImageMutation.onSuccess below).
+  const [replaceTargetIndex, setReplaceTargetIndex] = useState<number | null>(null);
 
   useEffect(() => {
     if (templateQuery.data && !loadedRef.current) {
@@ -171,12 +159,45 @@ export default function TemplateEditor() {
     onError: (err) => toast.error(err instanceof ApiError ? err.message : t('templateEditor.saveFailed')),
   });
 
+  const uploadImageMutation = useMutation({
+    mutationFn: (file: File) => uploadTemplateImage(templateId, file),
+    onSuccess: ({ assetId }) => {
+      if (replaceTargetIndex !== null) {
+        updateElement(replaceTargetIndex, { assetId });
+        setReplaceTargetIndex(null);
+      } else {
+        setElements((els) => [...els, { type: 'image', x: 100, y: 100, width: 200, height: 200, assetId }]);
+        setSelectedIndex(elements.length);
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : t('templateEditor.imageUploadFailed'));
+      setReplaceTargetIndex(null);
+    },
+  });
+
+  function onAddImageClick() {
+    setReplaceTargetIndex(null);
+    imageInputRef.current?.click();
+  }
+
+  function onReplaceImageClick() {
+    setReplaceTargetIndex(selectedIndex);
+    imageInputRef.current?.click();
+  }
+
+  function onImageFileChosen(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) uploadImageMutation.mutate(file);
+    e.target.value = '';
+  }
+
   function updateElement(index: number, patch: Partial<TemplateElement>) {
     setElements((els) => els.map((el, i) => (i === index ? ({ ...el, ...patch } as TemplateElement) : el)));
   }
 
-  function addElement(type: TemplateElement['type']) {
-    setElements((els) => [...els, defaultElement(type)]);
+  function addElement(type: AddableType) {
+    setElements((els) => [...els, defaultElement(type, t)]);
     setSelectedIndex(elements.length);
   }
 
@@ -235,7 +256,7 @@ export default function TemplateEditor() {
       startClientX: e.clientX,
       startClientY: e.clientY,
       originWidth: displayWidth(el),
-      originHeight: el.type === 'cover' ? el.height : null,
+      originHeight: el.type === 'cover' || el.type === 'image' ? el.height : null,
     };
   }
 
@@ -260,11 +281,21 @@ export default function TemplateEditor() {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {(['cover', 'title', 'playlist', 'timer'] as const).map((type) => (
+        {(['cover', 'title', 'playlist', 'timer', 'text'] as const).map((type) => (
           <button key={type} onClick={() => addElement(type)} className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50">
             {t('templateEditor.addElement', { type: t(`templateEditor.elementType.${type}`) })}
           </button>
         ))}
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif"
+          className="hidden"
+          onChange={onImageFileChosen}
+        />
+        <button onClick={onAddImageClick} className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50">
+          {t('templateEditor.addElement', { type: t('templateEditor.elementType.image') })}
+        </button>
       </div>
 
       <div className="flex flex-wrap items-start gap-4">
@@ -321,15 +352,129 @@ export default function TemplateEditor() {
               {selected.type !== 'timer' && (
                 <NumberField label={t('templateEditor.fieldWidth')} value={selected.width} min={10} max={CANVAS_WIDTH} onChange={(v) => updateElement(selectedIndex!, { width: v })} />
               )}
-              {selected.type === 'cover' && (
+              {(selected.type === 'cover' || selected.type === 'image') && (
                 <NumberField label={t('templateEditor.fieldHeight')} value={selected.height} min={10} max={CANVAS_HEIGHT} onChange={(v) => updateElement(selectedIndex!, { height: v })} />
               )}
-              {selected.type !== 'cover' && (
+              {selected.type !== 'cover' && selected.type !== 'image' && (
                 <NumberField label={t('templateEditor.fieldFontSize')} value={selected.fontSize} min={8} max={MAX_FONT_SIZE} onChange={(v) => updateElement(selectedIndex!, { fontSize: v })} />
               )}
-              {selected.type !== 'cover' && (
+
+              {selected.type === 'text' && (
+                <label className="block text-xs text-gray-600">
+                  {t('templateEditor.fieldText')}
+                  <textarea
+                    value={selected.text}
+                    onChange={(e) => updateElement(selectedIndex!, { text: e.target.value })}
+                    className="mt-1 w-full rounded border px-2 py-1 text-sm"
+                  />
+                </label>
+              )}
+
+              {selected.type === 'image' && (
+                <>
+                  <img src={templateImageUrl(templateId, selected.assetId)} alt="" className="w-full rounded border" />
+                  <button onClick={onReplaceImageClick} className="text-sm text-blue-600">{t('templateEditor.replaceImage')}</button>
+                </>
+              )}
+
+              {'style' in selected && (
+                <>
+                  <label className="block text-xs text-gray-600">
+                    {t('templateEditor.fieldFontFamily')}
+                    <select
+                      value={selected.style.fontFamily}
+                      onChange={(e) => updateElement(selectedIndex!, { style: { ...selected.style, fontFamily: e.target.value } })}
+                      className="mt-1 w-full rounded border px-2 py-1 text-sm"
+                    >
+                      {fontFamiliesQuery.data?.map((f) => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => updateElement(selectedIndex!, { style: { ...selected.style, bold: !selected.style.bold } })}
+                      className={selected.style.bold ? 'font-bold underline' : ''}
+                    >{t('templateEditor.bold')}</button>
+                    <button
+                      onClick={() => updateElement(selectedIndex!, { style: { ...selected.style, italic: !selected.style.italic } })}
+                      className={selected.style.italic ? 'italic underline' : ''}
+                    >{t('templateEditor.italic')}</button>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={selected.style.stroke !== undefined}
+                      onChange={(e) => updateElement(selectedIndex!, {
+                        style: { ...selected.style, stroke: e.target.checked ? { color: '#000000', width: 2 } : undefined },
+                      })}
+                    />
+                    {t('templateEditor.fieldStroke')}
+                  </label>
+                  {selected.style.stroke && (
+                    <>
+                      <ColorField
+                        label={t('templateEditor.fieldColor')}
+                        value={selected.style.stroke.color}
+                        onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, stroke: { ...selected.style.stroke!, color: v } } })}
+                      />
+                      <NumberField
+                        label={t('templateEditor.fieldStrokeWidth')}
+                        value={selected.style.stroke.width}
+                        min={1}
+                        max={20}
+                        onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, stroke: { ...selected.style.stroke!, width: v } } })}
+                      />
+                    </>
+                  )}
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={selected.style.shadow !== undefined}
+                      onChange={(e) => updateElement(selectedIndex!, {
+                        style: { ...selected.style, shadow: e.target.checked ? { color: '#000000', blur: 4, offsetX: 2, offsetY: 2 } : undefined },
+                      })}
+                    />
+                    {t('templateEditor.fieldShadow')}
+                  </label>
+                  {selected.style.shadow && (
+                    <>
+                      <ColorField
+                        label={t('templateEditor.fieldColor')}
+                        value={selected.style.shadow.color}
+                        onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, color: v } } })}
+                      />
+                      <NumberField
+                        label={t('templateEditor.fieldShadowBlur')}
+                        value={selected.style.shadow.blur}
+                        min={0}
+                        max={50}
+                        onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, blur: v } } })}
+                      />
+                      <NumberField
+                        label={t('templateEditor.fieldShadowOffsetX')}
+                        value={selected.style.shadow.offsetX}
+                        min={-50}
+                        max={50}
+                        onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, offsetX: v } } })}
+                      />
+                      <NumberField
+                        label={t('templateEditor.fieldShadowOffsetY')}
+                        value={selected.style.shadow.offsetY}
+                        min={-50}
+                        max={50}
+                        onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, offsetY: v } } })}
+                      />
+                    </>
+                  )}
+                </>
+              )}
+
+              {(selected.type === 'title' || selected.type === 'playlist' || selected.type === 'text') && (
+                <ColorValueField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
+              )}
+              {selected.type === 'timer' && (
                 <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
               )}
+
               <button onClick={() => removeElement(selectedIndex!)} className="text-sm text-red-600">{t('templateEditor.removeElement')}</button>
             </>
           )}
