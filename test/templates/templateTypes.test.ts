@@ -1,4 +1,4 @@
-import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
+import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, isValidColorValue } from '../../src/templates/templateTypes';
 
 describe('isValidTemplateElement', () => {
   it('accepts a valid cover element', () => {
@@ -74,5 +74,106 @@ describe('isValidTemplateElements', () => {
 
   it('DEFAULT_TEMPLATE_ELEMENTS (used when a stream starts with no templateId) is itself valid', () => {
     expect(isValidTemplateElements(DEFAULT_TEMPLATE_ELEMENTS)).toBe(true);
+  });
+});
+
+describe('isValidTemplateElement — ColorValue and TextStyle', () => {
+  const baseStyle = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
+
+  it('accepts a title with a solid color and minimal style', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: baseStyle,
+    })).toBe(true);
+  });
+
+  it('accepts a title with a 3-stop gradient', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'gradient', stops: ['#ff0000', '#00ff00', '#0000ff'], angleDeg: 45 },
+      style: baseStyle,
+    })).toBe(true);
+  });
+
+  it('rejects a gradient with an out-of-range angle', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'gradient', stops: ['#ff0000', '#00ff00'], angleDeg: 361 },
+      style: baseStyle,
+    })).toBe(false);
+  });
+
+  it('rejects a gradient with an invalid stop color', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'gradient', stops: ['#ff0000', 'not-a-color'], angleDeg: 0 },
+      style: baseStyle,
+    })).toBe(false);
+  });
+
+  it('accepts a style with stroke and shadow', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { ...baseStyle, bold: true, italic: true,
+        stroke: { color: '#000000', width: 2 },
+        shadow: { color: '#000000', blur: 4, offsetX: 1, offsetY: 1 } },
+    })).toBe(true);
+  });
+
+  it('rejects a half-filled shadow', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { ...baseStyle, shadow: { color: '#000000', blur: 4 } as unknown },
+    })).toBe(false);
+  });
+
+  it('rejects a timer with a gradient color (timer color must be a plain string)', () => {
+    expect(isValidTemplateElement({
+      type: 'timer', x: 10, y: 10, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: baseStyle,
+    })).toBe(false);
+  });
+
+  it('accepts a timer with a plain hex color string and a style', () => {
+    expect(isValidTemplateElement({
+      type: 'timer', x: 10, y: 10, fontSize: 20,
+      color: '#ffffff',
+      style: baseStyle,
+    })).toBe(true);
+  });
+
+  it('accepts a text element', () => {
+    expect(isValidTemplateElement({
+      type: 'text', x: 10, y: 10, width: 300, fontSize: 24,
+      text: 'now streaming',
+      color: { mode: 'solid', color: '#ffffff' },
+      style: baseStyle,
+    })).toBe(true);
+  });
+
+  it('rejects a text element with an empty text field', () => {
+    expect(isValidTemplateElement({
+      type: 'text', x: 10, y: 10, width: 300, fontSize: 24,
+      text: '',
+      color: { mode: 'solid', color: '#ffffff' },
+      style: baseStyle,
+    })).toBe(false);
+  });
+
+  it('accepts an image element', () => {
+    expect(isValidTemplateElement({
+      type: 'image', x: 10, y: 10, width: 200, height: 200,
+      assetId: '3fa2c1e0-1234-4a5b-9c0d-abcdef123456',
+    })).toBe(true);
+  });
+
+  it('rejects an image element with a non-string assetId', () => {
+    expect(isValidTemplateElement({
+      type: 'image', x: 10, y: 10, width: 200, height: 200, assetId: 123,
+    })).toBe(false);
   });
 });
