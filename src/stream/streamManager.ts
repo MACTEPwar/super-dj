@@ -202,7 +202,7 @@ export class StreamManager extends EventEmitter {
           durationSeconds,
           overlayPng,
           timer: timerElement
-            ? { x: timerElement.x, y: timerElement.y, fontSize: timerElement.fontSize, color: timerElement.color }
+            ? { x: timerElement.x, y: timerElement.y, fontSize: timerElement.fontSize, color: timerElement.color, style: timerElement.style }
             : null,
         };
       };

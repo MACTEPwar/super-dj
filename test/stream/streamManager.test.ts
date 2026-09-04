@@ -304,7 +304,8 @@ describe('StreamManager', () => {
     it('splits a timer element out of what gets rendered into the PNG, and surfaces it separately on the overlay', async () => {
       const { deps, templateRepository, spawner } = buildDeps();
       const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
-      const timerEl = { type: 'timer', x: 5, y: 5, fontSize: 20, color: '#ffffff' };
+      const timerEl = { type: 'timer', x: 5, y: 5, fontSize: 20, color: '#ffffff',
+        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
       templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, timerEl] });
       const manager = new StreamManager(deps as any);
 

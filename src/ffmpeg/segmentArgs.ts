@@ -1,8 +1,12 @@
+import { TextStyle } from '../templates/templateTypes';
+import { resolveFontFile } from '../render/fontRegistry';
+
 export interface TimerElementPosition {
   x: number;
   y: number;
   fontSize: number;
   color: string;
+  style: TextStyle;
 }
 
 export interface NowPlayingOverlay {
@@ -38,7 +42,18 @@ function overlayFilterComplex(width: number, height: number, fontFile: string, t
     return parts.join(';');
   }
   parts.push('[bg][ov]overlay=0:0[base]');
-  parts.push(`[base]drawtext=fontfile=${fontFile}:text='${timer.text}':x=${timer.x}:y=${timer.y}:fontsize=${timer.fontSize}:fontcolor=${timer.color}[outv]`);
+  const fontfile = resolveFontFile(timer.style.fontFamily, timer.style.bold, timer.style.italic);
+  // Escape colons in the text value for ffmpeg drawtext filter syntax
+  const escapedText = timer.text.replace(/:/g, '\\:');
+  let drawtext = `[base]drawtext=fontfile=${fontfile}:text='${escapedText}':x=${timer.x}:y=${timer.y}:fontsize=${timer.fontSize}:fontcolor=${timer.color}`;
+  if (timer.style.stroke) {
+    drawtext += `:borderw=${timer.style.stroke.width}:bordercolor=${timer.style.stroke.color}`;
+  }
+  if (timer.style.shadow) {
+    drawtext += `:shadowx=${timer.style.shadow.offsetX}:shadowy=${timer.style.shadow.offsetY}:shadowcolor=${timer.style.shadow.color}`;
+  }
+  drawtext += '[outv]';
+  parts.push(drawtext);
   return parts.join(';');
 }
 
