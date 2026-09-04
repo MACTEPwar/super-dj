@@ -1,20 +1,22 @@
 import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, isValidColorValue } from '../../src/templates/templateTypes';
 
 describe('isValidTemplateElement', () => {
+  const baseStyle = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
+
   it('accepts a valid cover element', () => {
     expect(isValidTemplateElement({ type: 'cover', x: 0, y: 0, width: 100, height: 100 })).toBe(true);
   });
 
   it('accepts a valid title element', () => {
-    expect(isValidTemplateElement({ type: 'title', x: 0, y: 0, width: 100, fontSize: 24, color: '#fff' })).toBe(true);
+    expect(isValidTemplateElement({ type: 'title', x: 0, y: 0, width: 100, fontSize: 24, color: { mode: 'solid', color: '#ffffff' }, style: baseStyle })).toBe(true);
   });
 
   it('accepts a valid playlist element', () => {
-    expect(isValidTemplateElement({ type: 'playlist', x: 0, y: 0, width: 100, fontSize: 18, color: '#fff' })).toBe(true);
+    expect(isValidTemplateElement({ type: 'playlist', x: 0, y: 0, width: 100, fontSize: 18, color: { mode: 'solid', color: '#ffffff' }, style: baseStyle })).toBe(true);
   });
 
   it('accepts a valid timer element (no width, unlike title/playlist)', () => {
-    expect(isValidTemplateElement({ type: 'timer', x: 0, y: 0, fontSize: 18, color: '#fff' })).toBe(true);
+    expect(isValidTemplateElement({ type: 'timer', x: 0, y: 0, fontSize: 18, color: '#ffffff', style: baseStyle })).toBe(true);
   });
 
   it('rejects a timer element missing color', () => {
