@@ -63,7 +63,7 @@ export interface StreamManagerDeps {
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   trackRepository: Pick<TrackRepository, 'listByUser'>;
   templateRepository: Pick<TemplateRepository, 'findById'>;
-  templateImageService: Pick<TemplateImageService, 'resolvePath'>;
+  templateImageService: Pick<TemplateImageService, 'resolvePath' | 'resolveOriginalPath'>;
   providers: Record<string, StreamDestinationProvider>;
 }
 
@@ -210,16 +210,21 @@ export class StreamManager extends EventEmitter {
       // "fixed for the life of this session" treatment as timer/equalizer, and excluded from the
       // Satori bake below so it isn't rendered twice (once, wrongly, as a static Satori image;
       // once, correctly, as a native ffmpeg overlay).
-      const imageAssetPaths = resolveImageAssets(templateElements, this.deps.templateImageService, destination.userId, options?.templateId ?? '');
+      // Probed (and, if animated, played) from templateImageService.resolveOriginalPath() — NOT
+      // resolvePath()'s `${assetId}.png`, which TemplateImageService.upload() already flattened
+      // to a single frame via `ffmpeg -frames:v 1` at upload time. Probing/playing that flattened
+      // copy would never find more than 1 frame no matter how the ffmpeg args below are built —
+      // a real bug caught only by checking the actual file on disk against a real deployed
+      // template, not by reasoning about the filter graph in isolation.
       const animatedImageAssetIds = new Set<string>();
       const gifOverlays: GifOverlayConfig[] = [];
       for (const el of templateElements) {
         if (el.type !== 'image') continue;
-        const filePath = imageAssetPaths[el.assetId];
-        if (!filePath) continue; // invalid assetId — already logged by resolveImageAssets above
+        const originalPath = await this.deps.templateImageService.resolveOriginalPath(destination.userId, options?.templateId ?? '', el.assetId);
+        if (!originalPath) continue; // no original on disk (e.g. an asset uploaded before this existed) — stays static
         let frameCount: number;
         try {
-          frameCount = await getImageFrameCount(filePath);
+          frameCount = await getImageFrameCount(originalPath);
         } catch (err) {
           console.warn(`[stream] failed to probe image element "${el.assetId}" for animation, treating as a static image`, err);
           continue;
@@ -229,7 +234,7 @@ export class StreamManager extends EventEmitter {
           gifOverlays.push({
             x: Math.round(el.x), y: Math.round(el.y),
             width: Math.round(el.width), height: Math.round(el.height),
-            filePath, frameCount,
+            filePath: originalPath, frameCount,
           });
         }
       }

@@ -87,7 +87,12 @@ function buildDeps() {
     audioPipe: new PassThrough(),
   });
   const templateRepository = { findById: jest.fn() };
-  const templateImageService = { resolvePath: jest.fn().mockReturnValue('/uploads/user-1/templates/tpl-1/images/asset-1.png') };
+  const templateImageService = {
+    resolvePath: jest.fn().mockReturnValue('/uploads/user-1/templates/tpl-1/images/asset-1.png'),
+    // Defaults to "no original found" (a plain static image, the common case) — tests exercising
+    // gif-overlay detection override this to resolve a real-ish original file path instead.
+    resolveOriginalPath: jest.fn().mockResolvedValue(null),
+  };
   return {
     deps: {
       spawner, pipeSpawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
@@ -471,13 +476,20 @@ describe('StreamManager', () => {
       const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
       const gifEl = { type: 'image', x: 900, y: 40, width: 150, height: 150, assetId: 'gif-1' };
       templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, gifEl] });
-      templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/gif-1.gif');
+      // Detection/playback must go through the ORIGINAL upload (resolveOriginalPath), never the
+      // resolvePath()'d .png — TemplateImageService.upload() already flattened that .png to a
+      // single frame via `ffmpeg -frames:v 1`, so probing/looping it could never find more than
+      // one frame no matter how the ffmpeg args are built. This is exactly the real bug a live
+      // deployed template caught: the gif overlay branch never appeared because the code was
+      // (before this fix) probing resolvePath()'s already-flattened file instead of this one.
+      templateImageService.resolveOriginalPath.mockResolvedValue('/uploads/user-1/templates/tpl-1/images/gif-1.original.gif');
       (getImageFrameCount as jest.Mock).mockResolvedValue(10);
       const manager = new StreamManager(deps as any);
 
       await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
 
-      expect(getImageFrameCount).toHaveBeenCalledWith('/uploads/user-1/templates/tpl-1/images/gif-1.gif');
+      expect(templateImageService.resolveOriginalPath).toHaveBeenCalledWith('user-1', 'tpl-1', 'gif-1');
+      expect(getImageFrameCount).toHaveBeenCalledWith('/uploads/user-1/templates/tpl-1/images/gif-1.original.gif');
       // Only the static cover element reaches Satori — the gif is dropped from both `elements`
       // and `imageAssets`, or it would be rendered twice (once, wrongly, as a frozen Satori
       // image; once, correctly, as a native ffmpeg overlay).
@@ -498,7 +510,7 @@ describe('StreamManager', () => {
       const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
       const gifEl = { type: 'image', x: 20.4, y: 30.6, width: 400.5, height: 150.5, assetId: 'gif-1' };
       templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [gifEl] });
-      templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/gif-1.gif');
+      templateImageService.resolveOriginalPath.mockResolvedValue('/uploads/user-1/templates/tpl-1/images/gif-1.original.gif');
       (getImageFrameCount as jest.Mock).mockResolvedValue(6);
       const manager = new StreamManager(deps as any);
 
@@ -516,6 +528,10 @@ describe('StreamManager', () => {
       const imageEl = { type: 'image', x: 0, y: 0, width: 100, height: 100, assetId: 'asset-1' };
       templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [imageEl] });
       templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/asset-1.png');
+      // A real original DOES exist on disk (unlike the "predates this feature" case, which
+      // resolveOriginalPath's own null-default already covers) — it's just genuinely a 1-frame
+      // (static) image, so ffprobe reporting 1 frame must still suppress the gif-overlay branch.
+      templateImageService.resolveOriginalPath.mockResolvedValue('/uploads/user-1/templates/tpl-1/images/asset-1.original.png');
       // jest.mock's module-level mock isn't reset between tests in this file — reassert the
       // "static" default explicitly rather than relying on it not having been overridden by an
       // earlier test in this same describe block.

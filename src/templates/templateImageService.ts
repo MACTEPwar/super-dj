@@ -17,6 +17,7 @@ export interface TemplateImageServiceDeps {
   moveFile?: (from: string, to: string) => Promise<void>;
   runFfmpeg?: (originalPath: string, outPngPath: string) => Promise<void>;
   generateId?: () => string;
+  readdir?: (dir: string) => Promise<string[]>;
 }
 
 // Thrown by resolvePath() when the caller-supplied assetId doesn't resolve to a plain filename
@@ -34,8 +35,10 @@ export class TemplateImageService {
   private readonly moveFile: (from: string, to: string) => Promise<void>;
   private readonly runFfmpeg: (originalPath: string, outPngPath: string) => Promise<void>;
   private readonly generateId: () => string;
+  private readonly readdir: (dir: string) => Promise<string[]>;
 
   constructor(private readonly deps: TemplateImageServiceDeps) {
+    this.readdir = deps.readdir ?? ((dir) => fsPromises.readdir(dir));
     this.moveFile = deps.moveFile ?? (async (from, to) => {
       await fsPromises.mkdir(path.dirname(to), { recursive: true });
       try {
@@ -80,15 +83,42 @@ export class TemplateImageService {
   // images directory and verify the result is still a direct child of that directory before ever
   // returning it, rather than trusting string content (e.g. a naive `.includes('..')` check can be
   // bypassed by encoded or absolute-path variants depending on how it's applied; this instead
-  // normalizes via path.resolve and checks real containment).
-  resolvePath(userId: string, templateId: string, assetId: string): string {
-    const dir = this.imagesDir(userId, templateId);
+  // normalizes via path.resolve and checks real containment). Shared by resolvePath() and
+  // resolveOriginalPath() below — an assetId unsafe for one filename in this directory is unsafe
+  // for any other filename in it too.
+  private assertSafeAssetId(dir: string, assetId: string): void {
     const resolvedDir = path.resolve(dir);
-    const resolvedPath = path.resolve(dir, `${assetId}.png`);
+    const resolvedPath = path.resolve(dir, assetId);
     const relative = path.relative(resolvedDir, resolvedPath);
     if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative) || relative.includes('/')) {
       throw new InvalidAssetIdError(assetId);
     }
-    return resolvedPath;
+  }
+
+  resolvePath(userId: string, templateId: string, assetId: string): string {
+    const dir = this.imagesDir(userId, templateId);
+    this.assertSafeAssetId(dir, assetId);
+    return path.resolve(dir, `${assetId}.png`);
+  }
+
+  // upload() keeps the untouched original (whatever its extension) alongside the flattened .png
+  // resolvePath() always points at — needed to probe/play a multi-frame (animated) original with
+  // ffmpeg directly, since the .png has already been flattened to a single frame. The extension
+  // isn't known ahead of time, so this lists the directory rather than guessing it. Returns null
+  // (not a throw) for "no original found" — an asset uploaded before this method existed, or a
+  // missing images directory — so a caller can fall back to treating the image as static rather
+  // than failing outright.
+  async resolveOriginalPath(userId: string, templateId: string, assetId: string): Promise<string | null> {
+    const dir = this.imagesDir(userId, templateId);
+    this.assertSafeAssetId(dir, assetId);
+    const resolvedDir = path.resolve(dir);
+    let entries: string[];
+    try {
+      entries = await this.readdir(resolvedDir);
+    } catch {
+      return null;
+    }
+    const match = entries.find((name) => name.startsWith(`${assetId}.original.`));
+    return match ? path.join(resolvedDir, match) : null;
   }
 }
