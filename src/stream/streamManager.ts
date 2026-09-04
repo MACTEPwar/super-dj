@@ -17,7 +17,7 @@ import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
 import { TemplateImageService, InvalidAssetIdError } from '../templates/templateImageService';
-import { TemplateElement, TimerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
+import { TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 import { SessionOverlayCache } from './sessionOverlayCache';
@@ -202,8 +202,9 @@ export class StreamManager extends EventEmitter {
       // A timer isn't baked into the rendered PNG (see TimerElement's doc comment) — split it
       // out once here, since the template is fixed for the life of this session, rather than on
       // every buildOverlay() call.
-      const bakedElements = templateElements.filter((e) => e.type !== 'timer');
+      const bakedElements = templateElements.filter((e) => e.type !== 'timer' && e.type !== 'equalizer');
       const timerElement = templateElements.find((e): e is TimerElement => e.type === 'timer') ?? null;
+      const equalizerElement = templateElements.find((e): e is EqualizerElement => e.type === 'equalizer') ?? null;
 
       const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
         const currentIndex = tracks.findIndex((t) => t.name === track.name);
@@ -274,6 +275,9 @@ export class StreamManager extends EventEmitter {
           heartbeatFps: CANVAS_HEARTBEAT_FPS,
           rtmpUrl: session.rtmpUrl,
           streamKey: session.streamKey,
+          equalizer: equalizerElement
+            ? { x: equalizerElement.x, y: equalizerElement.y, width: equalizerElement.width, height: equalizerElement.height, color: equalizerElement.color }
+            : undefined,
         }),
         onError: () => {
           const entry = this.lifecycles.get(destinationId);

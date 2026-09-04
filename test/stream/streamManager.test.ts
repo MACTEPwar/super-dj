@@ -322,6 +322,39 @@ describe('StreamManager', () => {
       expect(filterComplex).toContain('x=5:y=5:fontsize=20:fontcolor=#ffffff');
     });
 
+    it('passes the template equalizer element config through to PersistentEncoder construction', async () => {
+      const { deps, templateRepository, pipeSpawner } = buildDeps();
+      const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+      const equalizerEl = { type: 'equalizer', x: 20, y: 30, width: 200, height: 100, color: '#00ff00' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, equalizerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      // The equalizer isn't baked into the PNG either — it reaches ffmpeg as a native showfreqs
+      // filter graph in PersistentEncoder's own args, which only this test suite can observe
+      // indirectly via the pipe-spawned encoder's filter_complex arg (mirrors the timer test above).
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ elements: [coverEl] }));
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      expect(producerCall).toBeDefined();
+      const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
+      expect(filterComplex).toContain('showfreqs=s=200x100:mode=bar:colors=#00ff00');
+      expect(filterComplex).toContain('overlay=20:30');
+    });
+
+    it('passes no equalizer field when the template has none', async () => {
+      const { deps, templateRepository, pipeSpawner } = buildDeps();
+      const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls[0];
+      expect(producerCall[1]).not.toContain('-filter_complex');
+      expect(producerCall[1]).toEqual(expect.arrayContaining(['-map', '0:v', '-map', '1:a']));
+    });
+
     it('falls back to a blank overlay, without throwing, when the render pool rejects', async () => {
       const { deps } = buildDeps();
       (renderTemplatePng as jest.Mock).mockRejectedValueOnce(new Error('pool exploded'));
