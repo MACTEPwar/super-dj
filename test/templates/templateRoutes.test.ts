@@ -61,6 +61,13 @@ describe('template routes', () => {
     expect(templateRepository.listByUser).toHaveBeenCalledWith('user-1');
   });
 
+  it('GET /templates/fonts returns the available font families', async () => {
+    const templateRepository: any = {};
+    const res = await request(buildApp(templateRepository)).get('/templates/fonts');
+    expect(res.status).toBe(200);
+    expect(res.body.families).toEqual(expect.arrayContaining(['DejaVu Sans', 'Liberation Sans']));
+  });
+
   it('GET /templates/:id returns 403 for a template owned by someone else', async () => {
     const templateRepository: any = { findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'someone-else' }) };
     const res = await request(buildApp(templateRepository)).get('/templates/t1');

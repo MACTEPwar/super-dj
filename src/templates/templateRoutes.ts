@@ -10,6 +10,7 @@ import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
+import { FONT_FAMILIES } from '../render/fontRegistry';
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: MAX_IMAGE_BYTES } });
@@ -56,6 +57,10 @@ export function createTemplateRouter(
     const templates = await templateRepository.listByUser(userId(req as AuthenticatedRequest));
     res.status(200).json(templates.map(toPublicTemplate));
   }));
+
+  router.get('/fonts', auth, (_req, res) => {
+    res.status(200).json({ families: FONT_FAMILIES });
+  });
 
   router.get('/:id', auth, wrapAsync(async (req, res) => {
     const template = await requireOwnedTemplate(req.params.id, userId(req as AuthenticatedRequest));
