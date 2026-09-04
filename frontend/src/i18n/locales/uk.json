@@ -42,7 +42,17 @@
     "delete": "Видалити",
     "deleteFailed": "Не вдалося видалити трек",
     "deleteConfirmTitle": "Видалити цей трек?",
-    "deleteConfirmDescription": "Його буде прибрано з бібліотеки та з усіх плейлистів, де він використовується. Це не можна скасувати."
+    "deleteConfirmDescription": "Його буде прибрано з бібліотеки та з усіх плейлистів, де він використовується. Це не можна скасувати.",
+    "overlayOverride": "Оверлей",
+    "overlayOverrideTitle": "Перевизначення кольору оверлею",
+    "overlayOverrideColorToggle": "Перевизначити колір тексту для цього трека",
+    "overlayOverrideColorLabel": "Колір тексту",
+    "overlayOverrideBackgroundToggle": "Перевизначити колір фону для цього трека",
+    "overlayOverrideBackgroundLabel": "Колір фону",
+    "overlayOverrideSave": "Зберегти",
+    "overlayOverrideSaving": "Збереження…",
+    "overlayOverrideSaved": "Перевизначення оверлею збережено",
+    "overlayOverrideSaveFailed": "Не вдалося зберегти перевизначення оверлею"
   },
   "addTrackDrawer": {
     "title": "Додати трек",

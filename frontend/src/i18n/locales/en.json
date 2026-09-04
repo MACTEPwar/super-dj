@@ -42,7 +42,17 @@
     "delete": "Delete",
     "deleteFailed": "Failed to delete track",
     "deleteConfirmTitle": "Delete this track?",
-    "deleteConfirmDescription": "This removes it from your library and from any playlists that use it. This can't be undone."
+    "deleteConfirmDescription": "This removes it from your library and from any playlists that use it. This can't be undone.",
+    "overlayOverride": "Overlay",
+    "overlayOverrideTitle": "Overlay color override",
+    "overlayOverrideColorToggle": "Override text color for this track",
+    "overlayOverrideColorLabel": "Text color",
+    "overlayOverrideBackgroundToggle": "Override background color for this track",
+    "overlayOverrideBackgroundLabel": "Background color",
+    "overlayOverrideSave": "Save",
+    "overlayOverrideSaving": "Saving…",
+    "overlayOverrideSaved": "Overlay override saved",
+    "overlayOverrideSaveFailed": "Failed to save overlay override"
   },
   "addTrackDrawer": {
     "title": "Add Track",
