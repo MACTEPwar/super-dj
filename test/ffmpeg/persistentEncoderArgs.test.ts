@@ -28,4 +28,29 @@ describe('buildPersistentEncoderArgs', () => {
     expect(reIndex).toBeGreaterThan(pipe3Index);
     expect(reIndex).toBeLessThan(pipe4Index);
   });
+
+  it('is byte-for-byte identical to the no-equalizer output when equalizer is omitted', () => {
+    const withoutField = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k',
+    });
+    const withUndefined = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k', equalizer: undefined,
+    });
+    expect(withUndefined).toEqual(withoutField);
+  });
+
+  it('adds a filter_complex with asplit/showfreqs/overlay and maps [vout]/[a_out] when equalizer is present', () => {
+    const args = buildPersistentEncoderArgs({
+      width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://x', streamKey: 'k',
+      equalizer: { x: 40, y: 500, width: 400, height: 150, color: '#ff6600' },
+    });
+    const filterIndex = args.indexOf('-filter_complex');
+    expect(filterIndex).toBeGreaterThan(-1);
+    const filterArg = args[filterIndex + 1];
+    expect(filterArg).toContain('[1:a]asplit=2[a_out][a_viz]');
+    expect(filterArg).toContain('showfreqs=s=400x150:mode=bar:colors=#ff6600');
+    expect(filterArg).toContain('overlay=40:500');
+    expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '[a_out]']));
+    expect(args).not.toEqual(expect.arrayContaining(['-map', '0:v']));
+  });
 });
