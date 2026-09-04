@@ -123,6 +123,16 @@ interface ResizeState {
   originHeight: number | null;
 }
 
+// What an undo/redo snapshot captures — widened from just `elements` to also include
+// `selectedIndex`, since several one-shot actions (addElement, duplicateElement, moveElement)
+// treat selection as part of "the state that changed": undo/redo must restore both together, or
+// selectedIndex is left dangling (pointing past the end of a shrunk array — see the arrow-key
+// nudge guard below) or pointing at the wrong element after the array reverts underneath it.
+interface HistorySnapshot {
+  elements: TemplateElement[];
+  selectedIndex: number | null;
+}
+
 export default function TemplateEditor() {
   const { id } = useParams<{ id: string }>();
   const templateId = id!;
@@ -140,8 +150,8 @@ export default function TemplateEditor() {
   const dragRef = useRef<DragState | null>(null);
   const resizeRef = useRef<ResizeState | null>(null);
   const loadedRef = useRef(false);
-  const [past, setPast] = useState<TemplateElement[][]>([]);
-  const [future, setFuture] = useState<TemplateElement[][]>([]);
+  const [past, setPast] = useState<HistorySnapshot[]>([]);
+  const [future, setFuture] = useState<HistorySnapshot[]>([]);
   // Canvas coordinates (not display/scaled pixels) of the currently-active snap guide line per
   // axis, or null when that axis isn't snapped — set inside onCanvasPointerMove's drag branch,
   // cleared in endInteraction.
@@ -151,7 +161,7 @@ export default function TemplateEditor() {
   // time a drag gesture's pointer-up fires, `elements` has already been mutated continuously
   // throughout the drag, so the "before the drag" state must be captured at gesture start, not
   // gesture end.
-  const gestureSnapshotRef = useRef<TemplateElement[] | null>(null);
+  const gestureSnapshotRef = useRef<HistorySnapshot | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   // null means "append a new image element"; a real index means "replace this element's assetId"
   // (set by onReplaceImageClick, consumed by uploadImageMutation.onSuccess below).
@@ -235,7 +245,7 @@ export default function TemplateEditor() {
   }
 
   function beginHistoryGesture() {
-    if (gestureSnapshotRef.current === null) gestureSnapshotRef.current = elements;
+    if (gestureSnapshotRef.current === null) gestureSnapshotRef.current = { elements, selectedIndex };
   }
 
   function commitHistoryGesture() {
@@ -247,9 +257,10 @@ export default function TemplateEditor() {
   }
 
   // For one-shot actions with no separate "gesture" phase (add/remove/duplicate) — captures the
-  // CURRENT elements as the undo target, then the caller applies its change immediately after.
+  // CURRENT elements + selectedIndex as the undo target, then the caller applies its change
+  // immediately after.
   function commitHistoryNow() {
-    setPast((p) => [...p, elements]);
+    setPast((p) => [...p, { elements, selectedIndex }]);
     setFuture([]);
   }
 
@@ -257,23 +268,25 @@ export default function TemplateEditor() {
   // setFuture/setElements inside ...})) — React may invoke an updater function more than once
   // (StrictMode's dev-mode double-invoke check being the concrete case that would bite here),
   // which would double-fire the nested setFuture/setElements calls too. Reading `past`/`future`/
-  // `elements` directly from the surrounding closure is correct because undo/redo are plain
-  // event-handler functions re-created fresh every render (not stored across renders), so they
-  // always see the current values.
+  // `elements`/`selectedIndex` directly from the surrounding closure is correct because undo/redo
+  // are plain event-handler functions re-created fresh every render (not stored across renders),
+  // so they always see the current values.
   function undo() {
     if (past.length === 0) return;
     const previous = past[past.length - 1];
-    setFuture((f) => [elements, ...f]);
+    setFuture((f) => [{ elements, selectedIndex }, ...f]);
     setPast((p) => p.slice(0, -1));
-    setElements(previous);
+    setElements(previous.elements);
+    setSelectedIndex(previous.selectedIndex);
   }
 
   function redo() {
     if (future.length === 0) return;
     const next = future[0];
-    setPast((p) => [...p, elements]);
+    setPast((p) => [...p, { elements, selectedIndex }]);
     setFuture((f) => f.slice(1));
-    setElements(next);
+    setElements(next.elements);
+    setSelectedIndex(next.selectedIndex);
   }
 
   const canUndo = past.length > 0;
@@ -282,15 +295,16 @@ export default function TemplateEditor() {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const tag = (document.activeElement as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return; // Ctrl+Z inside a text field should be that field's own native undo
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // Ctrl+Z / arrow keys inside a form field should be that field's own native behavior
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
       if (selectedIndex !== null && e.key in ARROW_KEYS) {
+        const el = elements[selectedIndex];
+        if (!el) return; // defensive guard — should be unreachable now that undo/redo restore selectedIndex too, but cheap insurance
         e.preventDefault();
         const [dx, dy] = ARROW_KEYS[e.key];
         const step = e.shiftKey ? 10 : 1;
         commitHistoryNow();
-        const el = elements[selectedIndex];
         updateElement(selectedIndex, {
           x: clamp(el.x + dx * step, 0, CANVAS_WIDTH),
           y: clamp(el.y + dy * step, 0, CANVAS_HEIGHT),
@@ -363,8 +377,15 @@ export default function TemplateEditor() {
 
   function startDrag(e: ReactPointerEvent<HTMLDivElement>, index: number) {
     e.stopPropagation();
-    beginHistoryGesture();
     setSelectedIndex(index);
+    // Not a plain beginHistoryGesture() call: selecting the element being dragged is the intended,
+    // permanent effect of starting a drag on it (same as addElement's/duplicateElement's own
+    // post-action selection-following — not something undo should revert), so the gesture's
+    // undo-target selectedIndex must already be `index`, not whatever was selected beforehand.
+    // setSelectedIndex above is async (doesn't update the `selectedIndex` closure synchronously),
+    // so beginHistoryGesture() itself would still read the stale pre-drag value here — the ref is
+    // set directly instead, with the same "only the first call in a gesture wins" guard.
+    if (gestureSnapshotRef.current === null) gestureSnapshotRef.current = { elements, selectedIndex: index };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported in every test/browser environment; drag still works within the element's own bounds */ }
     const el = elements[index];
     dragRef.current = { index, pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, originX: el.x, originY: el.y };
@@ -684,7 +705,10 @@ export default function TemplateEditor() {
                       <input
                         type="checkbox"
                         checked={selected.style.overflow === 'ellipsis'}
-                        onChange={(e) => updateElement(selectedIndex!, { style: { ...selected.style, overflow: e.target.checked ? 'ellipsis' : undefined } })}
+                        onChange={(e) => {
+                          commitHistoryNow();
+                          updateElement(selectedIndex!, { style: { ...selected.style, overflow: e.target.checked ? 'ellipsis' : undefined } });
+                        }}
                       />
                       {t('templateEditor.fieldOverflowEllipsis')}
                     </label>

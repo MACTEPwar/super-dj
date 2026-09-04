@@ -809,4 +809,105 @@ describe('TemplateEditor', () => {
     expect(xField.value).toBe('40');
     expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('40');
   });
+
+  // Finding 4: the keyboard listener's focus guard only checked INPUT/TEXTAREA, missing SELECT —
+  // browsing the font-family dropdown with arrow keys also nudged the selected element's position.
+  it('arrow keys do not nudge while focus is inside the font-family select', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+    const fontSelect = await screen.findByLabelText('Font') as HTMLSelectElement;
+    fontSelect.focus();
+
+    fireEvent.keyDown(fontSelect, { key: 'ArrowDown' });
+
+    expect((screen.getByLabelText('X') as HTMLInputElement).value).toBe('10');
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('10');
+  });
+
+  // Finding 1 (Critical): addElement/duplicateElement set selectedIndex to point at the new
+  // element, but undo() never restored selectedIndex — so undoing the add left selectedIndex
+  // pointing past the end of the shrunk array, and the arrow-key nudge handler dereferenced
+  // elements[selectedIndex] unguarded, throwing.
+  it('undoing an added element does not leave a dangling selection, and an arrow key press does not throw', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await screen.findByText('Add an element above to get started.');
+
+    await userEvent.click(screen.getByText('+ Add Cover'));
+    expect(await screen.findByLabelText('X')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(screen.queryByLabelText('X')).not.toBeInTheDocument());
+
+    expect(() => fireEvent.keyDown(window, { key: 'ArrowRight' })).not.toThrow();
+
+    // selectedIndex was correctly restored to "nothing selected" (the pre-add state) — the
+    // properties panel still shows no selection, not a stale/out-of-bounds one.
+    expect(screen.getByText('Select an element on the canvas to edit its position and style.')).toBeInTheDocument();
+  });
+
+  // Finding 2 (Important): moveElement's own selectedIndex-follows-the-moved-element bookkeeping
+  // was never reversed by undo(), so undoing a layers-panel reorder left selectedIndex pointing at
+  // whatever element ended up at that array index post-revert — the properties panel silently
+  // started showing/editing the wrong element.
+  it('undo after reordering via the layers panel restores the original selected element, not whatever is at that index', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+        { type: 'playlist', x: 10, y: 200, width: 400, fontSize: 22, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    });
+    renderEditor();
+    await screen.findByDisplayValue('My Theme');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Title' }));
+    expect(await screen.findByText('Title', { selector: 'div.text-sm.font-medium' })).toBeInTheDocument();
+
+    const titleRow = screen.getByRole('button', { name: 'Title' }).closest('div')!;
+    await userEvent.click(within(titleRow).getByRole('button', { name: '▲' }));
+
+    // moveElement followed the selection to Title's new (frontmost) position — still Title shown.
+    expect(await screen.findByText('Title', { selector: 'div.text-sm.font-medium' })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+
+    // After undo, the array is back to [cover, title, playlist] — selection must follow back to
+    // Title (the element that was actually selected), not stay at the array index it moved to
+    // (which is now Playlist).
+    await waitFor(() => expect(screen.getByText('Title', { selector: 'div.text-sm.font-medium' })).toBeInTheDocument());
+    expect(screen.queryByText('Playlist', { selector: 'div.text-sm.font-medium' })).not.toBeInTheDocument();
+  });
+
+  // Finding 3 (Important): the ellipsis checkbox's onChange called updateElement directly with no
+  // history wiring at all — toggling it didn't push anything onto the undo stack.
+  it('toggling the overflow-ellipsis checkbox pushes an undo step', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+    // A plain click-to-select currently pushes its own (pre-existing, out-of-scope — see the other
+    // undo/redo tests above) no-op history entry via startDrag/endInteraction. Clear it first so
+    // this test isolates exactly what the checkbox toggle itself contributes.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).not.toBeDisabled());
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled());
+
+    const checkbox = await screen.findByLabelText('Truncate with …') as HTMLInputElement;
+    await userEvent.click(checkbox);
+
+    expect(checkbox.checked).toBe(true);
+    expect(screen.getByRole('button', { name: 'Undo' })).not.toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+
+    await waitFor(() => expect((screen.getByLabelText('Truncate with …') as HTMLInputElement).checked).toBe(false));
+  });
 });
