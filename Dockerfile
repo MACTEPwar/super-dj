@@ -13,7 +13,7 @@ RUN npm run build
 
 FROM node:20-bookworm-slim
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
+  && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fonts-liberation \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
