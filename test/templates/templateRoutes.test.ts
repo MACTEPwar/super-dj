@@ -8,6 +8,7 @@ import * as path from 'path';
 import { createTemplateRouter } from '../../src/templates/templateRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
+import { TemplateImageService } from '../../src/templates/templateImageService';
 
 const rendererDeps = { fontPath: '/fonts/test.ttf', fontFamily: 'Test', defaultCoverPath: '/assets/default-cover.png' };
 const validElements = [{ type: 'cover', x: 0, y: 0, width: 100, height: 100 }];
@@ -266,6 +267,18 @@ describe('template routes', () => {
 
       expect(res.status).toBe(403);
       expect(templateImageService.resolvePath).not.toHaveBeenCalled();
+    });
+
+    it('404s a path-traversal-shaped assetId instead of serving a file outside the template images directory', async () => {
+      // Uses the real TemplateImageService (not a resolvePath fake) so this exercises the actual
+      // traversal guard end to end, not just that the route calls resolvePath.
+      const templateRepository: any = ownedTemplateRepo();
+      const templateImageService = new TemplateImageService({ uploadsDir: os.tmpdir() });
+
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService as any))
+        .get('/templates/t1/images/' + encodeURIComponent('../../other-user/templates/other-template/images/x'));
+
+      expect(res.status).toBe(404);
     });
   });
 });

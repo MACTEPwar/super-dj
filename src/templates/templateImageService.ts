@@ -19,6 +19,17 @@ export interface TemplateImageServiceDeps {
   generateId?: () => string;
 }
 
+// Thrown by resolvePath() when the caller-supplied assetId doesn't resolve to a plain filename
+// inside the intended per-user/per-template images directory (path traversal, an embedded path
+// separator, etc.). Kept as a distinct type — rather than a generic Error — so callers (route
+// handlers) can translate it into the appropriate HTTP response without string-matching a message.
+export class InvalidAssetIdError extends Error {
+  constructor(assetId: string) {
+    super(`invalid template image assetId: ${assetId}`);
+    this.name = 'InvalidAssetIdError';
+  }
+}
+
 export class TemplateImageService {
   private readonly moveFile: (from: string, to: string) => Promise<void>;
   private readonly runFfmpeg: (originalPath: string, outPngPath: string) => Promise<void>;
@@ -64,7 +75,20 @@ export class TemplateImageService {
     return { assetId };
   }
 
+  // assetId is attacker-controlled (a raw route parameter, not looked up against any server-side
+  // registry of ids actually issued by upload()) — resolve it against the per-user/per-template
+  // images directory and verify the result is still a direct child of that directory before ever
+  // returning it, rather than trusting string content (e.g. a naive `.includes('..')` check can be
+  // bypassed by encoded or absolute-path variants depending on how it's applied; this instead
+  // normalizes via path.resolve and checks real containment).
   resolvePath(userId: string, templateId: string, assetId: string): string {
-    return path.join(this.imagesDir(userId, templateId), `${assetId}.png`);
+    const dir = this.imagesDir(userId, templateId);
+    const resolvedDir = path.resolve(dir);
+    const resolvedPath = path.resolve(dir, `${assetId}.png`);
+    const relative = path.relative(resolvedDir, resolvedPath);
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative) || relative.includes('/')) {
+      throw new InvalidAssetIdError(assetId);
+    }
+    return resolvedPath;
   }
 }

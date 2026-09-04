@@ -3,7 +3,7 @@ import multer from 'multer';
 import * as os from 'os';
 import { TemplateRepository } from './templateRepository';
 import { isValidTemplateElements, TemplateElement, CANVAS_WIDTH, CANVAS_HEIGHT } from './templateTypes';
-import { TemplateImageService } from './templateImageService';
+import { TemplateImageService, InvalidAssetIdError } from './templateImageService';
 import { TrackRepository } from '../tracks/trackRepository';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { ApiError } from '../errors';
@@ -135,7 +135,13 @@ export function createTemplateRouter(
   router.get('/:id/images/:assetId', auth, wrapAsync(async (req, res) => {
     const owner = userId(req as AuthenticatedRequest);
     const template = await requireOwnedTemplate(req.params.id, owner);
-    const filePath = templateImageService.resolvePath(owner, template.id, req.params.assetId);
+    let filePath: string;
+    try {
+      filePath = templateImageService.resolvePath(owner, template.id, req.params.assetId);
+    } catch (err) {
+      if (err instanceof InvalidAssetIdError) throw new ApiError(404, 'image not found');
+      throw err;
+    }
     res.sendFile(filePath);
   }));
 

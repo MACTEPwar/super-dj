@@ -22,4 +22,16 @@ describe('TemplateImageService', () => {
     expect(service.resolvePath('user-1', 'tpl-1', 'asset-123'))
       .toBe('/data/uploads/user-1/templates/tpl-1/images/asset-123.png');
   });
+
+  it('rejects a path-traversal assetId instead of resolving outside the template images directory', () => {
+    const service = new TemplateImageService({ uploadsDir: '/data/uploads', moveFile: jest.fn(), runFfmpeg: jest.fn(), generateId: () => 'x' });
+    expect(() => service.resolvePath('user-1', 'tpl-1', '../../other-user/templates/other-template/images/x'))
+      .toThrow();
+  });
+
+  it('rejects an assetId containing a path separator, even without any ".." segment', () => {
+    const service = new TemplateImageService({ uploadsDir: '/data/uploads', moveFile: jest.fn(), runFfmpeg: jest.fn(), generateId: () => 'x' });
+    expect(() => service.resolvePath('user-1', 'tpl-1', 'sub/asset'))
+      .toThrow();
+  });
 });
