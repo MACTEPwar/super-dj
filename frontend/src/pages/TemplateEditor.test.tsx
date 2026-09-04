@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Route, Routes } from 'react-router-dom';
 import TemplateEditor from './TemplateEditor';
@@ -53,8 +53,8 @@ describe('TemplateEditor', () => {
     renderEditor();
 
     expect(await screen.findByDisplayValue('My Theme')).toBeInTheDocument();
-    expect(screen.getByText('Cover')).toBeInTheDocument();
-    expect(screen.getByText('Title')).toBeInTheDocument();
+    expect(screen.getByText('Cover', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('Title', { selector: 'span' })).toBeInTheDocument();
   });
 
   it('adding an element selects it and shows the matching fields in the properties panel', async () => {
@@ -91,10 +91,10 @@ describe('TemplateEditor', () => {
     });
     vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
     renderEditor();
-    await screen.findByText('Title');
+    await screen.findByText('Title', { selector: 'span' });
 
     // Selecting the existing element by clicking its box on the canvas.
-    await userEvent.click(screen.getByText('Title'));
+    await userEvent.click(screen.getByText('Title', { selector: 'span' }));
     const xField = await screen.findByLabelText('X');
     await userEvent.clear(xField);
     await userEvent.type(xField, '99');
@@ -113,7 +113,7 @@ describe('TemplateEditor', () => {
       elements: [{ type: 'cover', x: 10, y: 10, width: 100, height: 100 }],
     });
     renderEditor();
-    await userEvent.click(await screen.findByText('Cover'));
+    await userEvent.click(await screen.findByText('Cover', { selector: 'span' }));
     expect(await screen.findByLabelText('Width')).toBeInTheDocument();
 
     await userEvent.click(screen.getByText('Remove element'));
@@ -134,7 +134,7 @@ describe('TemplateEditor', () => {
       elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
     });
     renderEditor();
-    const box = await screen.findByText('Cover');
+    const box = await screen.findByText('Cover', { selector: 'span' });
     const handle = box.closest('div')!;
 
     fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100, clientY: 100 });
@@ -186,7 +186,7 @@ describe('TemplateEditor', () => {
     });
     renderEditor();
 
-    await userEvent.click(await screen.findByText('Title'));
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
 
     const select = await screen.findByLabelText('Font') as HTMLSelectElement;
     expect(select.value).toBe('DejaVu Sans');
@@ -200,7 +200,7 @@ describe('TemplateEditor', () => {
       elements: [{ type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE }],
     });
     renderEditor();
-    await userEvent.click(await screen.findByText('Title'));
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
     expect(screen.queryByText('Stop 1')).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByText('Gradient'));
@@ -220,7 +220,7 @@ describe('TemplateEditor', () => {
     });
     renderEditor();
 
-    await userEvent.click(await screen.findByText('Timer'));
+    await userEvent.click(await screen.findByText('Timer', { selector: 'span' }));
 
     expect(await screen.findByLabelText('Color')).toBeInTheDocument();
     expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
@@ -254,7 +254,7 @@ describe('TemplateEditor', () => {
     });
     renderEditor();
 
-    await userEvent.click(await screen.findByText('Equalizer'));
+    await userEvent.click(await screen.findByText('Equalizer', { selector: 'span' }));
 
     expect(await screen.findByLabelText('Color')).toBeInTheDocument();
     expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
@@ -277,7 +277,7 @@ describe('TemplateEditor', () => {
       elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
     });
     renderEditor();
-    const box = await screen.findByText('Cover');
+    const box = await screen.findByText('Cover', { selector: 'span' });
     const handle = box.closest('div')!;
     const canvas = screen.getByRole('group', { name: 'Overlay canvas — drag elements to reposition them' });
 
@@ -303,7 +303,7 @@ describe('TemplateEditor', () => {
       elements: [{ type: 'timer', x: 10, y: 10, fontSize: 30, color: '#ffffff', style: DEFAULT_STYLE }],
     });
     renderEditor();
-    await userEvent.click(await screen.findByText('Timer'));
+    await userEvent.click(await screen.findByText('Timer', { selector: 'span' }));
 
     const colorField = await screen.findByLabelText('Color');
     fireEvent.focus(colorField);
@@ -329,7 +329,7 @@ describe('TemplateEditor', () => {
       elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
     });
     renderEditor();
-    await userEvent.click(await screen.findByText('Cover'));
+    await userEvent.click(await screen.findByText('Cover', { selector: 'span' }));
     const xField = await screen.findByLabelText('X');
     await userEvent.clear(xField);
     await userEvent.type(xField, '99');
@@ -374,7 +374,7 @@ describe('TemplateEditor', () => {
       }],
     });
     renderEditor();
-    await userEvent.click(await screen.findByText('Title'));
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
     // A plain click-to-select currently pushes its own (pre-existing, out-of-scope for this fix —
     // see the "Known follow-ups" note on click-to-select wiping the redo stack) no-op history
     // entry via startDrag/endInteraction, whose "before" snapshot happens to carry these same
@@ -414,7 +414,7 @@ describe('TemplateEditor', () => {
       }],
     });
     renderEditor();
-    await userEvent.click(await screen.findByText('Title'));
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
     // A plain click-to-select currently pushes its own (pre-existing, out-of-scope for this fix —
     // see the "Known follow-ups" note on click-to-select wiping the redo stack) no-op history
     // entry via startDrag/endInteraction. Undo it first so this test starts from a clean, empty
@@ -442,7 +442,7 @@ describe('TemplateEditor', () => {
     });
     renderEditor();
 
-    const label = await screen.findByText('Equalizer');
+    const label = await screen.findByText('Equalizer', { selector: 'span' });
     const box = label.parentElement as HTMLElement;
 
     // CSS opacity composites the whole subtree — the outer interactive box (which also holds
@@ -456,5 +456,97 @@ describe('TemplateEditor', () => {
     expect(fillLayer).toBeDefined();
     expect(fillLayer!.style.backgroundColor).not.toBe('');
     expect(fillLayer!.textContent).toBe('');
+  });
+
+  it('the layers panel lists elements frontmost-first', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+        { type: 'playlist', x: 10, y: 200, width: 400, fontSize: 22, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    });
+    renderEditor();
+    await screen.findByDisplayValue('My Theme');
+
+    const layersPanel = screen.getByTestId('layers-panel');
+    const layerButtons = within(layersPanel).getAllByRole('button', { name: /^(Cover|Title|Playlist)$/ });
+
+    // elements[elements.length - 1] (playlist) is frontmost — the panel lists frontmost-first,
+    // i.e. the reverse of the underlying array order (cover, title, playlist).
+    expect(layerButtons.map((b) => b.textContent)).toEqual(['Playlist', 'Title', 'Cover']);
+  });
+
+  it('clicking a layer entry selects the same element clicking its canvas box would', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    });
+    renderEditor();
+    await screen.findByDisplayValue('My Theme');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Title' }));
+
+    // Title's fields (font size + font-family select) show up in the properties panel, same as
+    // clicking its canvas box would — cover has neither.
+    expect(await screen.findByLabelText('Font size')).toBeInTheDocument();
+    expect(screen.getByLabelText('Font')).toBeInTheDocument();
+  });
+
+  it('moving a layer up swaps it toward the front of the elements array', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+        { type: 'playlist', x: 10, y: 200, width: 400, fontSize: 22, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await screen.findByDisplayValue('My Theme');
+
+    const titleRow = screen.getByRole('button', { name: 'Title' }).closest('div')!;
+    await userEvent.click(within(titleRow).getByRole('button', { name: '▲' }));
+
+    await userEvent.click(screen.getByText('Save'));
+
+    // title (index 1) swapped with the array-index-adjacent playlist (index 2) — the resulting
+    // array is [cover, playlist, title], moving title toward the end/front.
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'playlist', x: 10, y: 200, width: 400, fontSize: 22, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    }));
+  });
+
+  it('move-up is disabled for the already-frontmost element, move-down disabled for the backmost', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    });
+    renderEditor();
+    await screen.findByDisplayValue('My Theme');
+
+    // title is at index 1 — the frontmost element (elements.length - 1) — so its "move up"
+    // (toward the front) button is disabled; cover is at index 0 — the backmost — so its
+    // "move down" (toward the back) button is disabled.
+    const titleRow = screen.getByRole('button', { name: 'Title' }).closest('div')!;
+    const coverRow = screen.getByRole('button', { name: 'Cover' }).closest('div')!;
+
+    expect(within(titleRow).getByRole('button', { name: '▲' })).toBeDisabled();
+    expect(within(titleRow).getByRole('button', { name: '▼' })).not.toBeDisabled();
+    expect(within(coverRow).getByRole('button', { name: '▼' })).toBeDisabled();
+    expect(within(coverRow).getByRole('button', { name: '▲' })).not.toBeDisabled();
   });
 });

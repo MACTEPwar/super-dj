@@ -276,6 +276,31 @@ export default function TemplateEditor() {
     setSelectedIndex(null);
   }
 
+  // One-shot z-order swap for the layers panel — commits history before applying, same as
+  // addElement/removeElement above, since there's no separate gesture phase to group. `direction`
+  // is +1 to swap toward the next-higher index (the layers panel's "move up"/toward-the-front
+  // button, since elements[elements.length - 1] is frontmost) or -1 toward the next-lower index
+  // ("move down"/toward-the-back).
+  function moveElement(index: number, direction: 1 | -1): void {
+    const target = index + direction;
+    if (target < 0 || target >= elements.length) return;
+    commitHistoryNow();
+    setElements((els) => {
+      const next = [...els];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+    if (selectedIndex === index) setSelectedIndex(target);
+    else if (selectedIndex === target) setSelectedIndex(index);
+  }
+
+  // Only TextElement carries `.text` — the `el.type === 'text'` check is what narrows the
+  // TemplateElement union enough for TypeScript to allow reading it here.
+  function layerLabel(el: TemplateElement): string {
+    if (el.type === 'text') return el.text.slice(0, 20) || t('templateEditor.elementType.text');
+    return t(`templateEditor.elementType.${el.type}`);
+  }
+
   // Selection (click) and drag (pointerdown + pointermove) are handled separately, even though
   // a drag always starts with a pointerdown too — keeping "select" as its own plain click handler
   // means clicking an element to inspect it in the properties panel works the same way as every
@@ -380,6 +405,20 @@ export default function TemplateEditor() {
       </div>
 
       <div className="flex flex-wrap items-start gap-4">
+        <div data-testid="layers-panel" className="w-48 shrink-0 space-y-1 rounded-lg border p-3">
+          <div className="text-sm font-medium">{t('templateEditor.layersTitle')}</div>
+          {elements.map((_, i) => i).reverse().map((i) => (
+            <div key={i} className={`flex items-center justify-between rounded px-2 py-1 text-sm ${selectedIndex === i ? 'bg-blue-50' : ''}`}>
+              <button onClick={() => setSelectedIndex(i)} className="flex-1 truncate text-left">{layerLabel(elements[i])}</button>
+              <div className="flex gap-1">
+                <button onClick={() => moveElement(i, 1)} disabled={i === elements.length - 1} className="disabled:opacity-30">▲</button>
+                <button onClick={() => moveElement(i, -1)} disabled={i === 0} className="disabled:opacity-30">▼</button>
+              </div>
+            </div>
+          ))}
+          {elements.length === 0 && <p className="text-xs text-gray-500">{t('templateEditor.layersEmpty')}</p>}
+        </div>
+
         <div
           role="group"
           aria-label={t('templateEditor.canvasLabel')}
