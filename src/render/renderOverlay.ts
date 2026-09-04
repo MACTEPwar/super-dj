@@ -30,11 +30,28 @@ export interface RenderOverlayParams {
 // own failure policy, is what makes that split possible without duplicating the render call.
 export async function renderTemplatePng(params: RenderOverlayParams): Promise<Buffer> {
   const imageAssetEntries = Object.entries(params.imageAssets ?? {});
-  const [coverDataUri, ...imageDataUriValues] = await Promise.all([
+  const [coverDataUri, imageResults] = await Promise.all([
     readImageAsDataUri(params.coverPath),
-    ...imageAssetEntries.map(([, filePath]) => readImageAsDataUri(filePath)),
+    // Each asset is resolved independently (not one all-or-nothing Promise.all) so a single
+    // missing/unreadable file — e.g. an assetId a draft template references that was never
+    // actually uploaded, or one orphaned by a since-deleted template — doesn't take the whole
+    // render down with it. A rejected entry is simply omitted from imageDataUris below, which
+    // makes sceneRenderer.ts's elementNode() render that one 'image' element as its existing
+    // black-rect placeholder (the same fallback it already uses for a missing cover image)
+    // instead of failing cover/title/playlist/everything else too.
+    Promise.allSettled(imageAssetEntries.map(([, filePath]) => readImageAsDataUri(filePath))),
   ]);
-  const imageDataUris = Object.fromEntries(imageAssetEntries.map(([assetId], i) => [assetId, imageDataUriValues[i]]));
+  const imageDataUris: Record<string, string> = {};
+  imageAssetEntries.forEach(([assetId, filePath], i) => {
+    const result = imageResults[i];
+    if (result.status === 'fulfilled') {
+      imageDataUris[assetId] = result.value;
+    } else {
+      // Matches StreamManager.buildOverlay's "falling back to a blank overlay" logging
+      // convention for this same class of non-fatal render degradation.
+      console.error(`image asset '${assetId}' (${filePath}) failed to read, rendering its element as a placeholder instead`, result.reason);
+    }
+  });
 
   return renderViaPool(
     params.elements,
