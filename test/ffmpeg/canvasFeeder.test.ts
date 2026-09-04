@@ -32,7 +32,7 @@ const overlay: NowPlayingOverlay = { durationSeconds: 65, overlayPng: Buffer.fro
 const overlayWithTimer: NowPlayingOverlay = {
   durationSeconds: 65,
   overlayPng: Buffer.from('fake-png-bytes'),
-  timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff' },
+  timer: { x: 10, y: 660, fontSize: 20, color: '#ffffff', style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } },
 };
 
 function buildFeeder(overrides: Partial<{ spawner: Spawner; writeFileSync: jest.Mock; heartbeatMs: number }> = {}) {
@@ -85,7 +85,7 @@ describe('CanvasFeeder', () => {
 
     const args = (spawner as jest.Mock).mock.calls[0][1] as string[];
     const filterComplex = args[args.indexOf('-filter_complex') + 1];
-    expect(filterComplex).toContain("text='0:37 / 1:05'");
+    expect(filterComplex).toContain("text='0\\:37 / 1\\:05'");
     expect(filterComplex).not.toContain('%{pts');
   });
 
