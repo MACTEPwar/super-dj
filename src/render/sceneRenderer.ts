@@ -1,24 +1,46 @@
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
-import { TemplateElement } from '../templates/templateTypes';
+import { resolveFontFile, FONT_FAMILIES } from './fontRegistry';
+import { loadFontData } from './fontCache';
+import { ColorValue, TextStyle, TemplateElement } from '../templates/templateTypes';
 
 export interface SceneData {
   title: string;
   playlistLines: string[];
   coverDataUri: string | null;
-}
-
-export interface SceneRendererOptions {
-  width: number;
-  height: number;
-  fontData: Buffer;
-  fontFamily: string;
+  imageDataUris?: Record<string, string>; // assetId -> data: URI, for 'image' elements
 }
 
 // Plain-object Satori node — deliberately not JSX/React (this is a backend service; pulling in
 // a whole React runtime just to build a handful of positioned boxes would be a strange
 // dependency to carry). Satori accepts this same shape either way.
 type SatoriNode = { type: string; props: { style: Record<string, unknown>; children?: SatoriNode | SatoriNode[] | string } };
+
+function colorValueToCss(color: ColorValue): Record<string, unknown> {
+  if (color.mode === 'solid') return { color: color.color };
+  return {
+    backgroundImage: `linear-gradient(${color.angleDeg}deg, ${color.stops.join(', ')})`,
+    backgroundClip: 'text',
+    color: 'transparent',
+  };
+}
+
+function textStyleToCss(style: TextStyle, color: ColorValue): Record<string, unknown> {
+  const css: Record<string, unknown> = {
+    ...colorValueToCss(color),
+    fontFamily: style.fontFamily,
+    fontWeight: style.bold ? 700 : 400,
+    fontStyle: style.italic ? 'italic' : 'normal',
+  };
+  if (style.stroke) {
+    css.WebkitTextStrokeWidth = style.stroke.width;
+    css.WebkitTextStrokeColor = style.stroke.color;
+  }
+  if (style.shadow) {
+    css.textShadow = `${style.shadow.offsetX}px ${style.shadow.offsetY}px ${style.shadow.blur}px ${style.shadow.color}`;
+  }
+  return css;
+}
 
 function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
   const position = { position: 'absolute' as const, left: el.x, top: el.y };
@@ -48,7 +70,7 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
       return {
         type: 'div',
         props: {
-          style: { ...position, width: el.width, fontSize: el.fontSize, color: el.color, display: 'flex' },
+          style: { ...position, width: el.width, fontSize: el.fontSize, display: 'flex', ...textStyleToCss(el.style, el.color) },
           children: scene.title,
         },
       };
@@ -56,13 +78,31 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
       return {
         type: 'div',
         props: {
-          style: { ...position, width: el.width, fontSize: el.fontSize, color: el.color, display: 'flex', flexDirection: 'column' },
+          style: { ...position, width: el.width, fontSize: el.fontSize, display: 'flex', flexDirection: 'column', ...textStyleToCss(el.style, el.color) },
           children: scene.playlistLines.map((line): SatoriNode => ({
             type: 'div',
             props: { style: { display: 'flex' }, children: line },
           })),
         },
       };
+    case 'text':
+      return {
+        type: 'div',
+        props: {
+          style: { ...position, width: el.width, fontSize: el.fontSize, display: 'flex', ...textStyleToCss(el.style, el.color) },
+          children: el.text,
+        },
+      };
+    case 'image': {
+      const src = scene.imageDataUris?.[el.assetId];
+      if (!src) {
+        return { type: 'div', props: { style: { ...position, width: el.width, height: el.height, backgroundColor: '#000000' } } };
+      }
+      return {
+        type: 'img',
+        props: { style: { ...position, width: el.width, height: el.height, objectFit: 'contain' }, ...({ src } as Record<string, unknown>) },
+      };
+    }
     case 'timer':
       // Native element (a ticking value ffmpeg draws per-frame, not a static picture) — the
       // caller (StreamManager.buildOverlay) filters these out before calling renderScene at
@@ -70,6 +110,37 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
       // and src/ffmpeg/canvasFeeder.ts for how the timer's text is actually produced/drawn.
       return null;
   }
+}
+
+// Collects every distinct (family, weight, style) combination actually used across a scene's
+// elements, so satori() registers exactly the font files it needs — not a fixed single entry.
+function collectFontVariants(elements: TemplateElement[]): { family: string; bold: boolean; italic: boolean }[] {
+  const seen = new Map<string, { family: string; bold: boolean; italic: boolean }>();
+  for (const el of elements) {
+    if (el.type !== 'title' && el.type !== 'playlist' && el.type !== 'text') continue;
+    const key = `${el.style.fontFamily}|${el.style.bold}|${el.style.italic}`;
+    if (!seen.has(key)) seen.set(key, { family: el.style.fontFamily, bold: el.style.bold, italic: el.style.italic });
+  }
+  if (seen.size === 0) seen.set('default', { family: FONT_FAMILIES[0], bold: false, italic: false });
+  return [...seen.values()];
+}
+
+// Default font loader: real registry path + real fs read, exactly what production uses.
+// The optional 4th parameter below exists ONLY so this file's own tests can substitute a
+// cross-platform-safe loader (e.g. a real local Windows/macOS .ttf for dev-machine test runs)
+// without mocking satori/resvg themselves or the production code path — production never
+// passes this argument, so it always gets the real registry.
+async function defaultLoadFont(family: string, bold: boolean, italic: boolean): Promise<Buffer> {
+  return loadFontData(resolveFontFile(family, bold, italic));
+}
+
+// A named, exported interface (not an inline `{width,height}` type) deliberately — a later
+// task adds a `background` field to THIS interface, and renderWorker.ts/renderWorkerPool.ts
+// import and reuse it by reference rather than duplicating the shape, so that later addition
+// doesn't require touching those two files by hand.
+export interface SceneRendererOptions {
+  width: number;
+  height: number;
 }
 
 // Renders a template's elements + the current scene data (title, playlist window, cover) into
@@ -81,7 +152,16 @@ export async function renderScene(
   elements: TemplateElement[],
   scene: SceneData,
   options: SceneRendererOptions,
+  loadFont: (family: string, bold: boolean, italic: boolean) => Promise<Buffer> = defaultLoadFont,
 ): Promise<Buffer> {
+  const variants = collectFontVariants(elements);
+  const fonts = await Promise.all(variants.map(async (v) => ({
+    name: v.family,
+    data: await loadFont(v.family, v.bold, v.italic),
+    weight: (v.bold ? 700 : 400) as 400 | 700,
+    style: (v.italic ? 'italic' : 'normal') as 'italic' | 'normal',
+  })));
+
   const root: SatoriNode = {
     type: 'div',
     props: {
@@ -91,9 +171,7 @@ export async function renderScene(
   };
 
   const svg = await satori(root as unknown as Parameters<typeof satori>[0], {
-    width: options.width,
-    height: options.height,
-    fonts: [{ name: options.fontFamily, data: options.fontData, weight: 400, style: 'normal' }],
+    width: options.width, height: options.height, fonts,
   });
 
   return new Resvg(svg).render().asPng();

@@ -16,7 +16,7 @@ describe('renderViaPool', () => {
     const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     runMock.mockResolvedValue(pngBytes);
 
-    const result = await renderViaPool([], { title: 't', playlistLines: [], coverDataUri: null }, { width: 10, height: 10, fontData: Buffer.alloc(0), fontFamily: 'X' });
+    const result = await renderViaPool([], { title: 't', playlistLines: [], coverDataUri: null }, { width: 10, height: 10 });
 
     expect(Buffer.isBuffer(result)).toBe(true);
     expect(result.toString('hex')).toBe('89504e470d0a1a0a');
@@ -25,7 +25,7 @@ describe('renderViaPool', () => {
   it('passes an AbortSignal to the pool so a hung render eventually rejects instead of hanging forever', async () => {
     runMock.mockResolvedValue(new Uint8Array([1]));
 
-    await renderViaPool([], { title: 't', playlistLines: [], coverDataUri: null }, { width: 10, height: 10, fontData: Buffer.alloc(0), fontFamily: 'X' });
+    await renderViaPool([], { title: 't', playlistLines: [], coverDataUri: null }, { width: 10, height: 10 });
 
     expect(runMock).toHaveBeenCalledWith(expect.anything(), { signal: expect.any(AbortSignal) });
   });

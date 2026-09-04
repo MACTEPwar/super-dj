@@ -1,6 +1,5 @@
 import { renderViaPool } from './renderWorkerPool';
 import { readImageAsDataUri } from './imageDataUri';
-import { loadFontData } from './fontCache';
 import { TemplateElement } from '../templates/templateTypes';
 
 export interface RenderOverlayParams {
@@ -22,13 +21,10 @@ export interface RenderOverlayParams {
 // one segment's picture). Keeping this function happy-path-only, with each caller owning its
 // own failure policy, is what makes that split possible without duplicating the render call.
 export async function renderTemplatePng(params: RenderOverlayParams): Promise<Buffer> {
-  const [coverDataUri, fontData] = await Promise.all([
-    readImageAsDataUri(params.coverPath),
-    loadFontData(params.fontPath),
-  ]);
+  const coverDataUri = await readImageAsDataUri(params.coverPath);
   return renderViaPool(
     params.elements,
     { title: params.title, playlistLines: params.playlistLines, coverDataUri },
-    { width: params.width, height: params.height, fontData, fontFamily: params.fontFamily },
+    { width: params.width, height: params.height },
   );
 }
