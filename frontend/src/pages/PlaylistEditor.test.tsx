@@ -23,8 +23,8 @@ describe('PlaylistEditor', () => {
       id: 'p1', name: 'Mix', tracks: [{ id: 't1', name: 'Track A', audioPath: '', coverPath: null }],
     });
     vi.mocked(tracksApi.list).mockResolvedValue([
-      { id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false },
-      { id: 't2', name: 'Track B', durationSeconds: 20, hasCover: false },
+      { id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false, overlayOverride: null },
+      { id: 't2', name: 'Track B', durationSeconds: 20, hasCover: false, overlayOverride: null },
     ]);
     renderEditor();
 
@@ -55,7 +55,7 @@ describe('PlaylistEditor', () => {
 
   it('"Add" appends an available track to the local ordering', async () => {
     vi.mocked(playlistsApi.get).mockResolvedValue({ id: 'p1', name: 'Mix', tracks: [] });
-    vi.mocked(tracksApi.list).mockResolvedValue([{ id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false }]);
+    vi.mocked(tracksApi.list).mockResolvedValue([{ id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false, overlayOverride: null }]);
     vi.mocked(playlistsApi.replaceTracks).mockResolvedValue({});
     renderEditor();
     await screen.findByText('Track A');

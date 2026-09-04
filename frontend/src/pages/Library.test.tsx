@@ -10,8 +10,8 @@ vi.mock('../api/tracks');
 describe('Library', () => {
   it('lists the user\'s tracks, showing duration and a cover thumbnail when present', async () => {
     vi.mocked(tracksApi.list).mockResolvedValue([
-      { id: 't1', name: 'Track A', durationSeconds: 125, hasCover: true },
-      { id: 't2', name: 'Track B', durationSeconds: null, hasCover: false },
+      { id: 't1', name: 'Track A', durationSeconds: 125, hasCover: true, overlayOverride: null },
+      { id: 't2', name: 'Track B', durationSeconds: null, hasCover: false, overlayOverride: null },
     ]);
     vi.mocked(tracksApi.coverUrl).mockReturnValue('http://api/tracks/t1/cover');
     renderWithProviders(<Library />);
@@ -35,7 +35,7 @@ describe('Library', () => {
 
   it('deletes a track and refetches the list', async () => {
     vi.mocked(tracksApi.list)
-      .mockResolvedValueOnce([{ id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false }])
+      .mockResolvedValueOnce([{ id: 't1', name: 'Track A', durationSeconds: 10, hasCover: false, overlayOverride: null }])
       .mockResolvedValueOnce([]);
     vi.mocked(tracksApi.remove).mockResolvedValue({});
     renderWithProviders(<Library />);

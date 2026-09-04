@@ -24,7 +24,7 @@ describe('AddTrackDrawer', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('uploads the chosen audio file and closes the drawer on success', async () => {
-    vi.mocked(tracksApi.upload).mockResolvedValue({ id: 't1', name: 'song', durationSeconds: 5, hasCover: false });
+    vi.mocked(tracksApi.upload).mockResolvedValue({ id: 't1', name: 'song', durationSeconds: 5, hasCover: false, overlayOverride: null });
     renderWithProviders(<AddTrackDrawer open onOpenChange={onOpenChange} onUploaded={onUploaded} />);
 
     const file = new File(['fake-mp3-bytes'], 'song.mp3', { type: 'audio/mpeg' });
