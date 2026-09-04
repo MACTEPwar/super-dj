@@ -1,10 +1,26 @@
 import { api, API_BASE_URL, ApiError } from './client';
 
+// Mirrors src/templates/templateTypes.ts on the backend — kept in sync by hand.
+// ColorValue represents both solid colors and gradients.
+export type ColorValue =
+  | { mode: 'solid'; color: string }
+  | { mode: 'gradient'; stops: [string, string] | [string, string, string]; angleDeg: number };
+
+export interface TextStyle {
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  stroke?: { color: string; width: number };
+  shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+}
+
 export type TemplateElement =
   | { type: 'cover'; x: number; y: number; width: number; height: number }
-  | { type: 'title'; x: number; y: number; width: number; fontSize: number; color: string }
-  | { type: 'playlist'; x: number; y: number; width: number; fontSize: number; color: string }
-  | { type: 'timer'; x: number; y: number; fontSize: number; color: string };
+  | { type: 'title'; x: number; y: number; width: number; fontSize: number; color: ColorValue; style: TextStyle }
+  | { type: 'playlist'; x: number; y: number; width: number; fontSize: number; color: ColorValue; style: TextStyle }
+  | { type: 'timer'; x: number; y: number; fontSize: number; color: string; style: TextStyle }
+  | { type: 'text'; x: number; y: number; width: number; fontSize: number; text: string; color: ColorValue; style: TextStyle }
+  | { type: 'image'; x: number; y: number; width: number; height: number; assetId: string };
 
 export interface TemplateSummary {
   id: string;
@@ -43,3 +59,18 @@ export const templatesApi = {
     return URL.createObjectURL(blob);
   },
 };
+
+export async function uploadTemplateImage(templateId: string, file: File): Promise<{ assetId: string }> {
+  const form = new FormData();
+  form.append('image', file);
+  return api.postForm<{ assetId: string }>(`/templates/${templateId}/images`, form);
+}
+
+export function templateImageUrl(templateId: string, assetId: string): string {
+  return `${API_BASE_URL}/templates/${templateId}/images/${assetId}`;
+}
+
+export async function getFontFamilies(): Promise<string[]> {
+  const response = await api.get<{ families: string[] }>('/templates/fonts');
+  return response.families;
+}
