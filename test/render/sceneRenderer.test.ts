@@ -170,6 +170,16 @@ describe('renderScene', () => {
     expect(png.length).toBeGreaterThan(0);
   });
 
+  it('renders a template containing an equalizer element without throwing, and produces no visible output for it', async () => {
+    const png = await renderScene(
+      [{ type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#ffffff' }],
+      { title: 'x', playlistLines: [], coverDataUri: null },
+      testOptions,
+      testLoadFont,
+    );
+    expect(png.length).toBeGreaterThan(0);
+  });
+
   it('production default (no loadFont override) still resolves through the real fontRegistry — CI/Docker-only assertion', async () => {
     // This one deliberately does NOT pass testLoadFont, to prove the production default path
     // still works end to end. It only makes sense where /usr/share/fonts/... actually exists
