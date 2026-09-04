@@ -65,6 +65,8 @@ function defaultElement(type: AddableType, t: (key: string) => string): Template
         color: { mode: 'solid', color: '#ffffff' },
         style: { fontFamily: DEFAULT_FONT_FAMILY, bold: false, italic: false },
       };
+    case 'equalizer':
+      return { type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' };
   }
 }
 
@@ -72,7 +74,7 @@ function defaultElement(type: AddableType, t: (key: string) => string): Template
 // purely the editor's own interactive box height, derived from fontSize so bigger text gets a
 // bigger (rough) selection target.
 function displayHeight(el: TemplateElement): number {
-  return el.type === 'cover' || el.type === 'image' ? el.height : Math.round(el.fontSize * 1.6);
+  return el.type === 'cover' || el.type === 'image' || el.type === 'equalizer' ? el.height : Math.round(el.fontSize * 1.6);
 }
 
 function displayWidth(el: TemplateElement): number {
@@ -256,7 +258,7 @@ export default function TemplateEditor() {
       startClientX: e.clientX,
       startClientY: e.clientY,
       originWidth: displayWidth(el),
-      originHeight: el.type === 'cover' || el.type === 'image' ? el.height : null,
+      originHeight: el.type === 'cover' || el.type === 'image' || el.type === 'equalizer' ? el.height : null,
     };
   }
 
@@ -281,7 +283,7 @@ export default function TemplateEditor() {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {(['cover', 'title', 'playlist', 'timer', 'text'] as const).map((type) => (
+        {(['cover', 'title', 'playlist', 'timer', 'text', 'equalizer'] as const).map((type) => (
           <button key={type} onClick={() => addElement(type)} className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50">
             {t('templateEditor.addElement', { type: t(`templateEditor.elementType.${type}`) })}
           </button>
@@ -326,11 +328,17 @@ export default function TemplateEditor() {
                 top: el.y * SCALE,
                 width: displayWidth(el) * SCALE,
                 height: displayHeight(el) * SCALE,
+                ...(el.type === 'equalizer' ? { backgroundColor: el.color, opacity: 0.25 } : {}),
               }}
             >
               <span className="pointer-events-none absolute -top-5 left-0 whitespace-nowrap rounded bg-black/70 px-1 text-xs text-white">
                 {t(`templateEditor.elementType.${el.type}`)}
               </span>
+              {el.type === 'equalizer' && (
+                <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-center text-xs text-white/90">
+                  {t('templateEditor.equalizerPlaceholder')}
+                </span>
+              )}
               {el.type !== 'timer' && (
                 <div
                   onPointerDown={(e) => startResize(e, i)}
@@ -352,10 +360,10 @@ export default function TemplateEditor() {
               {selected.type !== 'timer' && (
                 <NumberField label={t('templateEditor.fieldWidth')} value={selected.width} min={10} max={CANVAS_WIDTH} onChange={(v) => updateElement(selectedIndex!, { width: v })} />
               )}
-              {(selected.type === 'cover' || selected.type === 'image') && (
+              {(selected.type === 'cover' || selected.type === 'image' || selected.type === 'equalizer') && (
                 <NumberField label={t('templateEditor.fieldHeight')} value={selected.height} min={10} max={CANVAS_HEIGHT} onChange={(v) => updateElement(selectedIndex!, { height: v })} />
               )}
-              {selected.type !== 'cover' && selected.type !== 'image' && (
+              {selected.type !== 'cover' && selected.type !== 'image' && selected.type !== 'equalizer' && (
                 <NumberField label={t('templateEditor.fieldFontSize')} value={selected.fontSize} min={8} max={MAX_FONT_SIZE} onChange={(v) => updateElement(selectedIndex!, { fontSize: v })} />
               )}
 
@@ -471,7 +479,7 @@ export default function TemplateEditor() {
               {(selected.type === 'title' || selected.type === 'playlist' || selected.type === 'text') && (
                 <ColorValueField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
               )}
-              {selected.type === 'timer' && (
+              {(selected.type === 'timer' || selected.type === 'equalizer') && (
                 <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
               )}
 

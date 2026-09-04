@@ -20,7 +20,10 @@ export type TemplateElement =
   | { type: 'playlist'; x: number; y: number; width: number; fontSize: number; color: ColorValue; style: TextStyle }
   | { type: 'timer'; x: number; y: number; fontSize: number; color: string; style: TextStyle }
   | { type: 'text'; x: number; y: number; width: number; fontSize: number; text: string; color: ColorValue; style: TextStyle }
-  | { type: 'image'; x: number; y: number; width: number; height: number; assetId: string };
+  | { type: 'image'; x: number; y: number; width: number; height: number; assetId: string }
+  // solid hex only — ffmpeg's showfreqs (the rendering mechanism) can't do gradients, same
+  // constraint as 'timer' above.
+  | { type: 'equalizer'; x: number; y: number; width: number; height: number; color: string };
 
 export interface TemplateSummary {
   id: string;

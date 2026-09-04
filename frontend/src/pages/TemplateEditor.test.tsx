@@ -208,4 +208,48 @@ describe('TemplateEditor', () => {
     expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
     expect(screen.queryByText('Solid')).not.toBeInTheDocument();
   });
+
+  it('adding an equalizer element inserts it with sane defaults', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await screen.findByText('Add an element above to get started.');
+
+    await userEvent.click(screen.getByText('+ Add Equalizer'));
+
+    expect(await screen.findByLabelText('Width')).toBeInTheDocument();
+    expect(screen.getByLabelText('Height')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Font size')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'Empty',
+      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+    }));
+  });
+
+  it('selecting an equalizer element shows only a plain color field, no gradient toggle', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+    });
+    renderEditor();
+
+    await userEvent.click(await screen.findByText('Equalizer'));
+
+    expect(await screen.findByLabelText('Color')).toBeInTheDocument();
+    expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
+    expect(screen.queryByText('Solid')).not.toBeInTheDocument();
+  });
+
+  it('the equalizer canvas box renders the "not shown here" placeholder label', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+    });
+    renderEditor();
+
+    expect(await screen.findByText('Equalizer — reacts to sound during live playback, not shown here')).toBeInTheDocument();
+  });
 });
