@@ -37,11 +37,20 @@ export function buildPersistentEncoderArgs(params: {
   // is solid color / continuous-spectrum only for this MVP, and why it always renders above
   // every other element (it's composited after the canvas is already flattened, not part of
   // Satori's own element stacking).
+  // showfreqs' colors= is a pipe-separated list, one entry per input audio channel — pipe:4
+  // above is always declared stereo (-ac 2), so a single color must be repeated once per channel.
+  // Verified against a real ffmpeg binary: colors=<one color> against 2-channel input renders
+  // achromatic (SATAVG=0, every bar comes out white/gray, not the configured color) — showfreqs
+  // falls back to its own per-channel defaults for any channel past the first when the list is
+  // shorter than the channel count, and cmode's default "combined" overlay then desaturates the
+  // visible result. Repeating the same color for both channels restores the configured color.
+  const equalizerColors = equalizer ? `${equalizer.color}|${equalizer.color}` : '';
+
   const mapping = equalizer
     ? [
         '-filter_complex',
         `[1:a]asplit=2[a_out][a_viz];` +
-        `[a_viz]showfreqs=s=${equalizer.width}x${equalizer.height}:mode=bar:colors=${equalizer.color},format=yuva420p,colorkey=black:0.1:0.1[eq];` +
+        `[a_viz]showfreqs=s=${equalizer.width}x${equalizer.height}:mode=bar:colors=${equalizerColors},format=yuva420p,colorkey=black:0.1:0.1[eq];` +
         `[0:v][eq]overlay=${equalizer.x}:${equalizer.y}[vout]`,
         '-map', '[vout]', '-map', '[a_out]',
       ]

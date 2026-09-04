@@ -48,7 +48,13 @@ describe('buildPersistentEncoderArgs', () => {
     expect(filterIndex).toBeGreaterThan(-1);
     const filterArg = args[filterIndex + 1];
     expect(filterArg).toContain('[1:a]asplit=2[a_out][a_viz]');
-    expect(filterArg).toContain('showfreqs=s=400x150:mode=bar:colors=#ff6600');
+    // colors= is a pipe-separated list, one entry per input audio channel — pipe:4 is always
+    // declared stereo (-ac 2), so a single color must be repeated once per channel or showfreqs
+    // renders the un-colored channel(s) in its own built-in defaults, desaturating the combined
+    // (overlaid) output. Verified against a real ffmpeg binary: a single `colors=#ff6600` against
+    // 2-channel input produced SATAVG=0 (fully achromatic); `colors=#ff6600|#ff6600` restored
+    // SATAVG≈44 (matching the mono/1-channel baseline).
+    expect(filterArg).toContain('showfreqs=s=400x150:mode=bar:colors=#ff6600|#ff6600');
     expect(filterArg).toContain('overlay=40:500');
     expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '[a_out]']));
     expect(args).not.toEqual(expect.arrayContaining(['-map', '0:v']));
