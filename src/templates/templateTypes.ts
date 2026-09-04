@@ -70,6 +70,26 @@ const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a
 
 const MAX_FONT_SIZE = 300;
 
+// Upper bounds for the text-decoration numerics. These are NOT cosmetic limits: an unbounded
+// shadow blur reaches resvg/tiny-skia's native rasterizer, where an extreme value panics in Rust
+// — a panic JS can't catch, which aborts the whole render worker process and with it every other
+// tenant's live stream; merely-large values (a few thousand) instead take seconds to rasterize,
+// starving the shared render pool (RENDER_TIMEOUT_MS can't abort synchronous native work once
+// started). The visual editor clamps these to blur 0..50, offsets -50..50, stroke width 1..20,
+// so these bounds sit comfortably above the whole UI range with headroom for a future wider UI.
+const MAX_SHADOW_BLUR = 100;
+const MAX_SHADOW_OFFSET = 100;
+const MAX_STROKE_WIDTH = 50;
+
+// assetId is only ever minted by TemplateImageService.generateId() (randomUUID by default), and
+// TemplateImageService.resolvePath() throws InvalidAssetIdError on anything that isn't a plain
+// filename. Constraining the shape HERE — at save time — makes that throw structurally
+// unreachable for any id that got through validation, instead of surfacing later as a blanked
+// live overlay or a 500 from the preview endpoint. Deliberately a little looser than a strict
+// UUID regex so a future id scheme doesn't need a migration, but still filename-safe:
+// no separators, no dots, no traversal.
+const ASSET_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -108,14 +128,15 @@ function isValidTextStyle(value: unknown): value is TextStyle {
   if (v.stroke !== undefined) {
     if (typeof v.stroke !== 'object' || v.stroke === null) return false;
     const s = v.stroke as Record<string, unknown>;
-    if (!isValidColor(s.color) || !isFiniteNumber(s.width) || s.width <= 0) return false;
+    if (!isValidColor(s.color) || !isFiniteNumber(s.width) || s.width <= 0 || s.width > MAX_STROKE_WIDTH) return false;
   }
   if (v.shadow !== undefined) {
     if (typeof v.shadow !== 'object' || v.shadow === null) return false;
     const s = v.shadow as Record<string, unknown>;
     if (!isValidColor(s.color)) return false;
-    if (!isFiniteNumber(s.blur) || s.blur < 0) return false;
-    if (!isFiniteNumber(s.offsetX) || !isFiniteNumber(s.offsetY)) return false;
+    if (!isFiniteNumber(s.blur) || s.blur < 0 || s.blur > MAX_SHADOW_BLUR) return false;
+    if (!isFiniteNumber(s.offsetX) || Math.abs(s.offsetX) > MAX_SHADOW_OFFSET) return false;
+    if (!isFiniteNumber(s.offsetY) || Math.abs(s.offsetY) > MAX_SHADOW_OFFSET) return false;
   }
   return true;
 }
@@ -132,7 +153,7 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
   if (el.type === 'image') {
     return isValidPosition(el.x, el.y)
       && isValidSize(el.width, CANVAS_WIDTH) && isValidSize(el.height, CANVAS_HEIGHT)
-      && typeof el.assetId === 'string' && el.assetId.length > 0;
+      && typeof el.assetId === 'string' && ASSET_ID_PATTERN.test(el.assetId);
   }
 
   if (!isValidPosition(el.x, el.y)) return false;

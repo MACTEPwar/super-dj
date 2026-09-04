@@ -132,6 +132,36 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
     })).toBe(false);
   });
 
+  // An unbounded shadow blur reaches resvg/tiny-skia's rasterizer, where an extreme value
+  // panics in Rust — uncatchable from JS, aborting the whole worker process (and with it every
+  // other tenant's stream). Bound it at validation time so it can never get that far.
+  it('rejects a shadow blur above the allowed maximum', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { ...baseStyle, shadow: { color: '#000000', blur: 1_000_000, offsetX: 1, offsetY: 1 } },
+    })).toBe(false);
+  });
+
+  it('rejects a shadow offset beyond the allowed magnitude, in either direction', () => {
+    const withOffset = (offsetX: number, offsetY: number) => isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { ...baseStyle, shadow: { color: '#000000', blur: 4, offsetX, offsetY } },
+    });
+    expect(withOffset(100_000, 1)).toBe(false);
+    expect(withOffset(1, -100_000)).toBe(false);
+    expect(withOffset(-50, 50)).toBe(true);
+  });
+
+  it('rejects a stroke width above the allowed maximum', () => {
+    expect(isValidTemplateElement({
+      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
+      color: { mode: 'solid', color: '#ffffff' },
+      style: { ...baseStyle, stroke: { color: '#000000', width: 10_000 } },
+    })).toBe(false);
+  });
+
   it('rejects a timer with a gradient color (timer color must be a plain string)', () => {
     expect(isValidTemplateElement({
       type: 'timer', x: 10, y: 10, fontSize: 20,
@@ -176,6 +206,25 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
   it('rejects an image element with a non-string assetId', () => {
     expect(isValidTemplateElement({
       type: 'image', x: 10, y: 10, width: 200, height: 200, assetId: 123,
+    })).toBe(false);
+  });
+
+  // TemplateImageService.resolvePath() throws InvalidAssetIdError on an id shaped like this,
+  // and that throw escapes the per-element image fallback (it happens while BUILDING the
+  // element list, before renderTemplatePng's allSettled protection) — blanking the entire live
+  // overlay and 500ing the preview endpoint. Reject the id at save time instead, so the id
+  // stored in a template is structurally incapable of reaching that throw.
+  it.each([
+    '../../etc/passwd',
+    'foo/bar',
+    'foo\\bar',
+    '..',
+    'has spaces',
+    'a'.repeat(65),
+    '',
+  ])('rejects an image element with a malformed assetId (%p)', (assetId) => {
+    expect(isValidTemplateElement({
+      type: 'image', x: 10, y: 10, width: 200, height: 200, assetId,
     })).toBe(false);
   });
 });

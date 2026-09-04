@@ -16,7 +16,7 @@ import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
-import { TemplateImageService } from '../templates/templateImageService';
+import { TemplateImageService, InvalidAssetIdError } from '../templates/templateImageService';
 import { TemplateElement, TimerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
@@ -83,7 +83,19 @@ function resolveImageAssets(
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const el of elements) {
-    if (el.type === 'image') result[el.assetId] = templateImageService.resolvePath(userId, templateId, el.assetId);
+    if (el.type !== 'image') continue;
+    // Defense in depth: isValidTemplateElement now constrains assetId's shape at save time, so
+    // InvalidAssetIdError should be unreachable here — but a template saved BEFORE that
+    // validation landed could still carry a malformed id. Skipping just that element keeps
+    // renderTemplatePng's per-element black-rect fallback reachable; letting the throw escape
+    // would instead blank the ENTIRE overlay (via buildOverlay's blank-overlay catch) for the
+    // whole session.
+    try {
+      result[el.assetId] = templateImageService.resolvePath(userId, templateId, el.assetId);
+    } catch (err) {
+      if (!(err instanceof InvalidAssetIdError)) throw err;
+      console.warn(`[stream] skipping template image element with invalid assetId: ${el.assetId}`);
+    }
   }
   return result;
 }

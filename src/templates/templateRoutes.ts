@@ -118,7 +118,16 @@ export function createTemplateRouter(
     // (StreamManager.buildOverlay) resolves it correctly.
     const imageAssets: Record<string, string> = {};
     for (const el of previewElements) {
-      if (el.type === 'image') imageAssets[el.assetId] = templateImageService.resolvePath(owner, template.id, el.assetId);
+      if (el.type !== 'image') continue;
+      // Same defense in depth as StreamManager.resolveImageAssets: a malformed assetId is
+      // rejected at save time now, but one saved before that validation landed must degrade to
+      // this element's black-rect placeholder rather than 500ing the whole preview.
+      try {
+        imageAssets[el.assetId] = templateImageService.resolvePath(owner, template.id, el.assetId);
+      } catch (err) {
+        if (!(err instanceof InvalidAssetIdError)) throw err;
+        console.warn(`[templates] preview skipping image element with invalid assetId: ${el.assetId}`);
+      }
     }
 
     const png = await renderTemplatePng({
