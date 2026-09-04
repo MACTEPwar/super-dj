@@ -116,6 +116,14 @@ export default function TemplateEditor() {
   const dragRef = useRef<DragState | null>(null);
   const resizeRef = useRef<ResizeState | null>(null);
   const loadedRef = useRef(false);
+  const [past, setPast] = useState<TemplateElement[][]>([]);
+  const [future, setFuture] = useState<TemplateElement[][]>([]);
+  // Captures the "before" snapshot exactly once per gesture/edit-session, guarded so a gesture
+  // spanning many pointermove/updateElement calls only ever records its START state — by the
+  // time a drag gesture's pointer-up fires, `elements` has already been mutated continuously
+  // throughout the drag, so the "before the drag" state must be captured at gesture start, not
+  // gesture end.
+  const gestureSnapshotRef = useRef<TemplateElement[] | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   // null means "append a new image element"; a real index means "replace this element's assetId"
   // (set by onReplaceImageClick, consumed by uploadImageMutation.onSuccess below).
@@ -198,12 +206,72 @@ export default function TemplateEditor() {
     setElements((els) => els.map((el, i) => (i === index ? ({ ...el, ...patch } as TemplateElement) : el)));
   }
 
+  function beginHistoryGesture() {
+    if (gestureSnapshotRef.current === null) gestureSnapshotRef.current = elements;
+  }
+
+  function commitHistoryGesture() {
+    const before = gestureSnapshotRef.current;
+    gestureSnapshotRef.current = null;
+    if (before === null) return;
+    setPast((p) => [...p, before]);
+    setFuture([]);
+  }
+
+  // For one-shot actions with no separate "gesture" phase (add/remove/duplicate) — captures the
+  // CURRENT elements as the undo target, then the caller applies its change immediately after.
+  function commitHistoryNow() {
+    setPast((p) => [...p, elements]);
+    setFuture([]);
+  }
+
+  // Deliberately NOT using the functional setState-updater form here (setPast(p => {... calls
+  // setFuture/setElements inside ...})) — React may invoke an updater function more than once
+  // (StrictMode's dev-mode double-invoke check being the concrete case that would bite here),
+  // which would double-fire the nested setFuture/setElements calls too. Reading `past`/`future`/
+  // `elements` directly from the surrounding closure is correct because undo/redo are plain
+  // event-handler functions re-created fresh every render (not stored across renders), so they
+  // always see the current values.
+  function undo() {
+    if (past.length === 0) return;
+    const previous = past[past.length - 1];
+    setFuture((f) => [elements, ...f]);
+    setPast((p) => p.slice(0, -1));
+    setElements(previous);
+  }
+
+  function redo() {
+    if (future.length === 0) return;
+    const next = future[0];
+    setPast((p) => [...p, elements]);
+    setFuture((f) => f.slice(1));
+    setElements(next);
+  }
+
+  const canUndo = past.length > 0;
+  const canRedo = future.length > 0;
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const tag = (document.activeElement as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return; // Ctrl+Z inside a text field should be that field's own native undo
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]); // undo/redo close over past/future/elements — must be in the dependency array,
+    // or wrap them in useCallback with correct deps; do not silence the exhaustive-deps lint rule
+    // here instead of fixing it.
+
   function addElement(type: AddableType) {
+    commitHistoryNow();
     setElements((els) => [...els, defaultElement(type, t)]);
     setSelectedIndex(elements.length);
   }
 
   function removeElement(index: number) {
+    commitHistoryNow();
     setElements((els) => els.filter((_, i) => i !== index));
     setSelectedIndex(null);
   }
@@ -219,6 +287,7 @@ export default function TemplateEditor() {
 
   function startDrag(e: ReactPointerEvent<HTMLDivElement>, index: number) {
     e.stopPropagation();
+    beginHistoryGesture();
     setSelectedIndex(index);
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported in every test/browser environment; drag still works within the element's own bounds */ }
     const el = elements[index];
@@ -246,10 +315,12 @@ export default function TemplateEditor() {
   function endInteraction(e: ReactPointerEvent<HTMLDivElement>) {
     if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null;
     if (resizeRef.current?.pointerId === e.pointerId) resizeRef.current = null;
+    commitHistoryGesture();
   }
 
   function startResize(e: ReactPointerEvent<HTMLDivElement>, index: number) {
     e.stopPropagation();
+    beginHistoryGesture();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* see startDrag */ }
     const el = elements[index];
     resizeRef.current = {
@@ -277,9 +348,17 @@ export default function TemplateEditor() {
             className="rounded border px-3 py-2 text-lg font-semibold"
           />
         </div>
-        <button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} className="rounded bg-black px-4 py-2 text-white disabled:opacity-50">
-          {saveMutation.isPending ? t('templateEditor.saving') : t('templateEditor.save')}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={undo} disabled={!canUndo} className="rounded border px-3 py-2 text-sm disabled:opacity-50">
+            {t('templateEditor.undo')}
+          </button>
+          <button onClick={redo} disabled={!canRedo} className="rounded border px-3 py-2 text-sm disabled:opacity-50">
+            {t('templateEditor.redo')}
+          </button>
+          <button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} className="rounded bg-black px-4 py-2 text-white disabled:opacity-50">
+            {saveMutation.isPending ? t('templateEditor.saving') : t('templateEditor.save')}
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -361,16 +440,16 @@ export default function TemplateEditor() {
           ) : (
             <>
               <div className="text-sm font-medium">{t(`templateEditor.elementType.${selected.type}`)}</div>
-              <NumberField label={t('templateEditor.fieldX')} value={selected.x} max={CANVAS_WIDTH} onChange={(v) => updateElement(selectedIndex!, { x: v })} />
-              <NumberField label={t('templateEditor.fieldY')} value={selected.y} max={CANVAS_HEIGHT} onChange={(v) => updateElement(selectedIndex!, { y: v })} />
+              <NumberField label={t('templateEditor.fieldX')} value={selected.x} max={CANVAS_WIDTH} onChange={(v) => updateElement(selectedIndex!, { x: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+              <NumberField label={t('templateEditor.fieldY')} value={selected.y} max={CANVAS_HEIGHT} onChange={(v) => updateElement(selectedIndex!, { y: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               {selected.type !== 'timer' && (
-                <NumberField label={t('templateEditor.fieldWidth')} value={selected.width} min={10} max={CANVAS_WIDTH} onChange={(v) => updateElement(selectedIndex!, { width: v })} />
+                <NumberField label={t('templateEditor.fieldWidth')} value={selected.width} min={10} max={CANVAS_WIDTH} onChange={(v) => updateElement(selectedIndex!, { width: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
               {(selected.type === 'cover' || selected.type === 'image' || selected.type === 'equalizer') && (
-                <NumberField label={t('templateEditor.fieldHeight')} value={selected.height} min={10} max={CANVAS_HEIGHT} onChange={(v) => updateElement(selectedIndex!, { height: v })} />
+                <NumberField label={t('templateEditor.fieldHeight')} value={selected.height} min={10} max={CANVAS_HEIGHT} onChange={(v) => updateElement(selectedIndex!, { height: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
               {selected.type !== 'cover' && selected.type !== 'image' && selected.type !== 'equalizer' && (
-                <NumberField label={t('templateEditor.fieldFontSize')} value={selected.fontSize} min={8} max={MAX_FONT_SIZE} onChange={(v) => updateElement(selectedIndex!, { fontSize: v })} />
+                <NumberField label={t('templateEditor.fieldFontSize')} value={selected.fontSize} min={8} max={MAX_FONT_SIZE} onChange={(v) => updateElement(selectedIndex!, { fontSize: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
 
               {selected.type === 'text' && (
@@ -429,6 +508,8 @@ export default function TemplateEditor() {
                         label={t('templateEditor.fieldColor')}
                         value={selected.style.stroke.color}
                         onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, stroke: { ...selected.style.stroke!, color: v } } })}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
                       />
                       <NumberField
                         label={t('templateEditor.fieldStrokeWidth')}
@@ -436,6 +517,8 @@ export default function TemplateEditor() {
                         min={1}
                         max={20}
                         onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, stroke: { ...selected.style.stroke!, width: v } } })}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
                       />
                     </>
                   )}
@@ -455,6 +538,8 @@ export default function TemplateEditor() {
                         label={t('templateEditor.fieldColor')}
                         value={selected.style.shadow.color}
                         onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, color: v } } })}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
                       />
                       <NumberField
                         label={t('templateEditor.fieldShadowBlur')}
@@ -462,6 +547,8 @@ export default function TemplateEditor() {
                         min={0}
                         max={50}
                         onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, blur: v } } })}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
                       />
                       <NumberField
                         label={t('templateEditor.fieldShadowOffsetX')}
@@ -469,6 +556,8 @@ export default function TemplateEditor() {
                         min={-50}
                         max={50}
                         onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, offsetX: v } } })}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
                       />
                       <NumberField
                         label={t('templateEditor.fieldShadowOffsetY')}
@@ -476,6 +565,8 @@ export default function TemplateEditor() {
                         min={-50}
                         max={50}
                         onChange={(v) => updateElement(selectedIndex!, { style: { ...selected.style, shadow: { ...selected.style.shadow!, offsetY: v } } })}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
                       />
                     </>
                   )}
@@ -486,7 +577,7 @@ export default function TemplateEditor() {
                 <ColorValueField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
               )}
               {(selected.type === 'timer' || selected.type === 'equalizer') && (
-                <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} />
+                <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
 
               <button onClick={() => removeElement(selectedIndex!)} className="text-sm text-red-600">{t('templateEditor.removeElement')}</button>

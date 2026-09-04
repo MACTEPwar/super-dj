@@ -44,6 +44,29 @@ describe('NumberField', () => {
 
     expect(onChange).toHaveBeenCalledWith(100);
   });
+
+  it('calls onFocus/onBlur when provided', () => {
+    const onFocus = vi.fn();
+    const onBlur = vi.fn();
+    render(<NumberField label="Width" value={50} min={10} max={100} onChange={vi.fn()} onFocus={onFocus} onBlur={onBlur} />);
+
+    const field = screen.getByLabelText('Width');
+    fireEvent.focus(field);
+    fireEvent.blur(field);
+
+    expect(onFocus).toHaveBeenCalledTimes(1);
+    expect(onBlur).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw when onFocus/onBlur are omitted', () => {
+    render(<NumberField label="Width" value={50} min={10} max={100} onChange={vi.fn()} />);
+
+    const field = screen.getByLabelText('Width');
+    expect(() => {
+      fireEvent.focus(field);
+      fireEvent.blur(field);
+    }).not.toThrow();
+  });
 });
 
 describe('ColorField', () => {
@@ -60,6 +83,29 @@ describe('ColorField', () => {
     fireEvent.change(textInput, { target: { value: '#00ff00' } });
 
     expect(onChange).toHaveBeenCalledWith('#00ff00');
+  });
+
+  it('calls onFocus/onBlur on both the swatch and text inputs when provided', () => {
+    const onFocus = vi.fn();
+    const onBlur = vi.fn();
+    render(<ColorField label="Color" value="#ff0000" onChange={vi.fn()} onFocus={onFocus} onBlur={onBlur} />);
+
+    const textInput = screen.getAllByDisplayValue('#ff0000').find((el) => el.getAttribute('type') === 'text')!;
+    fireEvent.focus(textInput);
+    fireEvent.blur(textInput);
+
+    expect(onFocus).toHaveBeenCalledTimes(1);
+    expect(onBlur).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw when onFocus/onBlur are omitted', () => {
+    render(<ColorField label="Color" value="#ff0000" onChange={vi.fn()} />);
+
+    const textInput = screen.getAllByDisplayValue('#ff0000').find((el) => el.getAttribute('type') === 'text')!;
+    expect(() => {
+      fireEvent.focus(textInput);
+      fireEvent.blur(textInput);
+    }).not.toThrow();
   });
 });
 

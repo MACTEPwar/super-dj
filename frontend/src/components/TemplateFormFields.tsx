@@ -9,7 +9,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-export function NumberField({ label, value, onChange, min = 0, max }: { label: string; value: number; onChange: (v: number) => void; min?: number; max: number }) {
+export function NumberField({ label, value, onChange, min = 0, max, onFocus, onBlur }: { label: string; value: number; onChange: (v: number) => void; min?: number; max: number; onFocus?: () => void; onBlur?: () => void }) {
   return (
     <label className="block text-xs text-gray-600">
       {label}
@@ -18,6 +18,8 @@ export function NumberField({ label, value, onChange, min = 0, max }: { label: s
         value={Math.round(value)}
         min={min}
         max={max}
+        onFocus={onFocus}
+        onBlur={onBlur}
         onChange={(e) => {
           const n = Number(e.target.value);
           // Rounded before clamping/storing, not just before display (the input's `value` above
@@ -34,7 +36,7 @@ export function NumberField({ label, value, onChange, min = 0, max }: { label: s
   );
 }
 
-export function ColorField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+export function ColorField({ label, value, onChange, onFocus, onBlur }: { label: string; value: string; onChange: (v: string) => void; onFocus?: () => void; onBlur?: () => void }) {
   const isSimpleHex = /^#[0-9a-fA-F]{6}$/.test(value);
   return (
     <label className="block text-xs text-gray-600">
@@ -44,12 +46,16 @@ export function ColorField({ label, value, onChange }: { label: string; value: s
           type="color"
           value={isSimpleHex ? value : '#ffffff'}
           onChange={(e) => onChange(e.target.value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
           className="h-8 w-8 shrink-0 cursor-pointer rounded border p-0"
         />
         <input
           type="text"
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
           className="w-full rounded border px-2 py-1 text-sm"
         />
       </div>

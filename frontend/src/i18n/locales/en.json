@@ -200,7 +200,9 @@
     "defaultText": "New text",
     "replaceImage": "Replace image",
     "imageUploadFailed": "Failed to upload image",
-    "removeElement": "Remove element"
+    "removeElement": "Remove element",
+    "undo": "Undo",
+    "redo": "Redo"
   },
   "streams": {
     "title": "Streams",

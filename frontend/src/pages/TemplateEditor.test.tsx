@@ -8,6 +8,24 @@ import { renderWithProviders } from '../test/renderWithProviders';
 
 vi.mock('../api/templates');
 
+// jsdom in this project doesn't implement a real PointerEvent constructor (confirmed: `window.PointerEvent`
+// is undefined), so @testing-library's fireEvent.pointer* falls back to a plain `Event`, which silently
+// drops clientX/clientY/pointerId from the init dict — a drag-simulating test would see NaN deltas instead
+// of a real intermediate position. MouseEvent, which PointerEvent is spec'd to extend, DOES carry
+// clientX/clientY correctly in this jsdom version, so this minimal polyfill (pointerId only, the one
+// Pointer-specific field TemplateEditor reads) is enough to make a real drag gesture reproducible in tests.
+if (typeof window.PointerEvent === 'undefined') {
+  class PointerEventPolyfill extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, params: MouseEventInit & { pointerId?: number } = {}) {
+      super(type, params);
+      this.pointerId = params.pointerId ?? 0;
+    }
+  }
+  // @ts-expect-error test-only jsdom polyfill, not a spec-complete PointerEvent
+  window.PointerEvent = PointerEventPolyfill;
+}
+
 const DEFAULT_STYLE = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
 
 function renderEditor() {
@@ -251,6 +269,95 @@ describe('TemplateEditor', () => {
     renderEditor();
 
     expect(await screen.findByText('Equalizer — reacts to sound during live playback, not shown here')).toBeInTheDocument();
+  });
+
+  it('undo restores the element position from before a drag gesture, not mid-drag', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
+    });
+    renderEditor();
+    const box = await screen.findByText('Cover');
+    const handle = box.closest('div')!;
+    const canvas = screen.getByRole('group', { name: 'Overlay canvas — drag elements to reposition them' });
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100, clientY: 100 });
+    // dx/dy are divided by SCALE (0.625) inside the component, so a 50px/30px screen delta here
+    // becomes an 80/48 canvas-coordinate delta — origin (40,40) + that delta = (120, 88).
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 150, clientY: 130 });
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+
+    const xFieldMoved = await screen.findByLabelText('X') as HTMLInputElement;
+    expect(xFieldMoved.value).toBe('120');
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('88');
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+
+    await waitFor(() => expect((screen.getByLabelText('X') as HTMLInputElement).value).toBe('40'));
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('40');
+  });
+
+  it('undo/redo round-trips a single field edit in the properties panel', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'timer', x: 10, y: 10, fontSize: 30, color: '#ffffff', style: DEFAULT_STYLE }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Timer'));
+
+    const colorField = await screen.findByLabelText('Color');
+    fireEvent.focus(colorField);
+    fireEvent.change(colorField, { target: { value: '#123456' } });
+    fireEvent.blur(colorField);
+
+    expect(screen.getAllByDisplayValue('#123456').length).toBeGreaterThan(0);
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => expect(screen.getAllByDisplayValue('#ffffff').length).toBeGreaterThan(0));
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(screen.getAllByDisplayValue('#123456').length).toBeGreaterThan(0));
+  });
+
+  it('a new action after an undo clears the redo stack', async () => {
+    // Uses the Undo/Redo buttons rather than the keyboard shortcut here: the keyboard handler
+    // deliberately ignores Ctrl+Z while focus is inside an INPUT/TEXTAREA (so a text field's own
+    // native undo isn't hijacked), and userEvent's real focus management would otherwise leave
+    // focus sitting inside a field after each edit.
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Cover'));
+    const xField = await screen.findByLabelText('X');
+    await userEvent.clear(xField);
+    await userEvent.type(xField, '99');
+    fireEvent.blur(xField);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Redo' })).not.toBeDisabled());
+
+    const yField = screen.getByLabelText('Y');
+    await userEvent.clear(yField);
+    await userEvent.type(yField, '55');
+    fireEvent.blur(yField);
+
+    expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
+  });
+
+  it('undo/redo buttons are disabled when their respective stack is empty', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({ id: 't1', name: 'Empty', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await screen.findByText('Add an element above to get started.');
+
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
+
+    await userEvent.click(screen.getByText('+ Add Cover'));
+
+    expect(await screen.findByRole('button', { name: 'Undo' })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
   });
 
   it('applies the equalizer color as its own fill layer instead of opacity on the whole box, so the label/resize handle stay at full opacity', async () => {
