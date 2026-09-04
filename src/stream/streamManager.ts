@@ -16,6 +16,7 @@ import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
+import { TemplateImageService } from '../templates/templateImageService';
 import { TemplateElement, TimerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
@@ -60,7 +61,31 @@ export interface StreamManagerDeps {
   destinationRepository: Pick<DestinationRepository, 'findById'>;
   trackRepository: Pick<TrackRepository, 'listByUser'>;
   templateRepository: Pick<TemplateRepository, 'findById'>;
+  templateImageService: Pick<TemplateImageService, 'resolvePath'>;
   providers: Record<string, StreamDestinationProvider>;
+}
+
+// Applies a track's overlayOverride.color to every title/text element's own color — playlist/
+// timer/cover/image elements are left untouched. A missing/null override (or an override with
+// no `color` set) is a no-op, leaving the template's own elements exactly as authored.
+function applyOverlayOverride(elements: TemplateElement[], override: TrackOverlayOverride | null | undefined): TemplateElement[] {
+  if (!override?.color) return elements;
+  return elements.map((el) => ((el.type === 'title' || el.type === 'text') ? { ...el, color: override.color! } : el));
+}
+
+// Resolves every 'image' element's assetId to the on-disk PNG path renderTemplatePng needs to
+// read (see TemplateImageService.resolvePath) — one entry per image element actually present.
+function resolveImageAssets(
+  elements: TemplateElement[],
+  templateImageService: Pick<TemplateImageService, 'resolvePath'>,
+  userId: string,
+  templateId: string,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const el of elements) {
+    if (el.type === 'image') result[el.assetId] = templateImageService.resolvePath(userId, templateId, el.assetId);
+  }
+  return result;
 }
 
 export class StreamManager extends EventEmitter {
@@ -174,7 +199,7 @@ export class StreamManager extends EventEmitter {
         const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
         const render = () => renderTemplatePng({
-          elements: bakedElements,
+          elements: applyOverlayOverride(bakedElements, track.overlayOverride),
           title: track.name,
           playlistLines,
           coverPath: track.coverPath ?? this.deps.defaultCoverPath,
@@ -182,6 +207,8 @@ export class StreamManager extends EventEmitter {
           height: VIDEO_HEIGHT,
           fontPath: this.deps.fontFile,
           fontFamily: this.deps.fontFamily,
+          imageAssets: resolveImageAssets(bakedElements, this.deps.templateImageService, destination.userId, options?.templateId ?? ''),
+          background: track.overlayOverride?.backgroundColor,
         });
 
         let overlayPng: Buffer;

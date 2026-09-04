@@ -148,6 +148,28 @@ describe('renderScene', () => {
     expect(png.length).toBeGreaterThan(0);
   });
 
+  it('renders a gradient root background without throwing', async () => {
+    const png = await renderScene(
+      [{ type: 'title', x: 0, y: 0, width: 400, fontSize: 60,
+         color: { mode: 'solid', color: '#ffffff' },
+         style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } }],
+      { title: 'BACKGROUND', playlistLines: [], coverDataUri: null },
+      { ...testOptions, background: { mode: 'gradient', stops: ['#ff0000', '#0000ff'], angleDeg: 45 } },
+      testLoadFont,
+    );
+    expect(png.length).toBeGreaterThan(0);
+  });
+
+  it('renders a solid root background without throwing', async () => {
+    const png = await renderScene(
+      [],
+      { title: '', playlistLines: [], coverDataUri: null },
+      { ...testOptions, background: { mode: 'solid', color: '#123456' } },
+      testLoadFont,
+    );
+    expect(png.length).toBeGreaterThan(0);
+  });
+
   it('production default (no loadFont override) still resolves through the real fontRegistry — CI/Docker-only assertion', async () => {
     // This one deliberately does NOT pass testLoadFont, to prove the production default path
     // still works end to end. It only makes sense where /usr/share/fonts/... actually exists

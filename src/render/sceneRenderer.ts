@@ -134,13 +134,22 @@ async function defaultLoadFont(family: string, bold: boolean, italic: boolean): 
   return loadFontData(resolveFontFile(family, bold, italic));
 }
 
-// A named, exported interface (not an inline `{width,height}` type) deliberately — a later
-// task adds a `background` field to THIS interface, and renderWorker.ts/renderWorkerPool.ts
-// import and reuse it by reference rather than duplicating the shape, so that later addition
-// doesn't require touching those two files by hand.
+// A named, exported interface (not an inline `{width,height}` type) deliberately — Task 9 adds
+// the `background` field below, and renderWorker.ts/renderWorkerPool.ts import and reuse this
+// interface by reference rather than duplicating the shape, so that addition doesn't require
+// touching those two files by hand.
 export interface SceneRendererOptions {
   width: number;
   height: number;
+  // The per-track overlayOverride's backgroundColor (see StreamManager.buildOverlay), applied
+  // behind every element. Absent means "use the template's own background" — today's existing
+  // behavior, unchanged.
+  background?: ColorValue;
+}
+
+function backgroundToCss(background: ColorValue): Record<string, unknown> {
+  if (background.mode === 'solid') return { backgroundColor: background.color };
+  return { backgroundImage: `linear-gradient(${background.angleDeg}deg, ${background.stops.join(', ')})` };
 }
 
 // Renders a template's elements + the current scene data (title, playlist window, cover) into
@@ -165,7 +174,10 @@ export async function renderScene(
   const root: SatoriNode = {
     type: 'div',
     props: {
-      style: { width: options.width, height: options.height, display: 'flex', position: 'relative' },
+      style: {
+        width: options.width, height: options.height, display: 'flex', position: 'relative',
+        ...(options.background ? backgroundToCss(options.background) : {}),
+      },
       children: elements.map((el) => elementNode(el, scene)).filter((node): node is SatoriNode => node !== null),
     },
   };

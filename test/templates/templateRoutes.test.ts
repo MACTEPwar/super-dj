@@ -120,7 +120,26 @@ describe('template routes', () => {
         height: 720,
         fontPath: '/fonts/test.ttf',
         fontFamily: 'Test',
+        imageAssets: {},
       });
+    });
+
+    it('resolves image elements to on-disk paths via templateImageService.resolvePath', async () => {
+      const templateRepository: any = ownedTemplateRepo();
+      const imageEl = { type: 'image', x: 0, y: 0, width: 100, height: 100, assetId: 'asset-1' };
+      const templateImageService: any = {
+        upload: jest.fn(),
+        resolvePath: jest.fn().mockReturnValue('/uploads/user-1/templates/t1/images/asset-1.png'),
+      };
+      const res = await request(buildApp(templateRepository, undefined, 'user-1', templateImageService))
+        .post('/templates/t1/preview')
+        .send({ elements: [imageEl] });
+
+      expect(res.status).toBe(200);
+      expect(templateImageService.resolvePath).toHaveBeenCalledWith('user-1', 't1', 'asset-1');
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
+        imageAssets: { 'asset-1': '/uploads/user-1/templates/t1/images/asset-1.png' },
+      }));
     });
 
     it('uses a draft elements array from the body instead of the saved one, without persisting it', async () => {

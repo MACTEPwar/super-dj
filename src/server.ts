@@ -113,6 +113,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     destinationRepository,
     trackRepository,
     templateRepository,
+    templateImageService,
     providers: streamDestinationProviders,
   });
 

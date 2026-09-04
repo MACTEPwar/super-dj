@@ -81,13 +81,14 @@ function buildDeps() {
     audioPipe: new PassThrough(),
   });
   const templateRepository = { findById: jest.fn() };
+  const templateImageService = { resolvePath: jest.fn().mockReturnValue('/uploads/user-1/templates/tpl-1/images/asset-1.png') };
   return {
     deps: {
       spawner, pipeSpawner, fifoDir: '/tmp', defaultCoverPath: '/assets/default.png', backgroundImagePath: '/assets/bg.png',
       fontFile: '/fonts/x.ttf', fontFamily: 'DejaVu Sans', playlistRepository, destinationRepository, trackRepository,
-      templateRepository, providers: { custom: customProvider, youtube: youtubeProvider },
+      templateRepository, templateImageService, providers: { custom: customProvider, youtube: youtubeProvider },
     },
-    destinationRepository, playlistRepository, trackRepository, templateRepository, customProvider, youtubeProvider, youtubeLifecycle, spawner, pipeSpawner,
+    destinationRepository, playlistRepository, trackRepository, templateRepository, templateImageService, customProvider, youtubeProvider, youtubeLifecycle, spawner, pipeSpawner,
   };
 }
 
@@ -328,6 +329,77 @@ describe('StreamManager', () => {
 
       await expect(manager.start('dest-1', 'playlist-1')).resolves.toBeUndefined();
       expect(manager.status('dest-1').state).toBe('streaming');
+    });
+
+    it('buildOverlay applies the track overlayOverride color to title/text elements and backgroundColor to the canvas', async () => {
+      const { deps, playlistRepository } = buildDeps();
+      const titleEl = { type: 'title', x: 0, y: 0, width: 100, fontSize: 20,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
+      const textEl = { type: 'text', x: 0, y: 50, width: 100, fontSize: 20, text: 'hi',
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
+      const playlistEl = { type: 'playlist', x: 0, y: 100, width: 100, fontSize: 20,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
+      const override = {
+        color: { mode: 'solid', color: '#ff0000' },
+        backgroundColor: { mode: 'solid', color: '#000000' },
+      };
+      playlistRepository.listTracks.mockResolvedValue([
+        { name: 'a', audioPath: '/music/a.mp3', coverPath: null, overlayOverride: override },
+        { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
+      ]);
+      deps.templateRepository.findById.mockResolvedValue({
+        id: 'tpl-1', userId: 'user-1', elements: [titleEl, textEl, playlistEl],
+      });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
+        elements: [
+          { ...titleEl, color: override.color },
+          { ...textEl, color: override.color },
+          playlistEl,
+        ],
+        background: override.backgroundColor,
+      }));
+    });
+
+    it('buildOverlay passes no background and unmodified elements when overlayOverride is null', async () => {
+      const { deps, playlistRepository } = buildDeps();
+      const titleEl = { type: 'title', x: 0, y: 0, width: 100, fontSize: 20,
+        color: { mode: 'solid', color: '#ffffff' },
+        style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
+      playlistRepository.listTracks.mockResolvedValue([
+        { name: 'a', audioPath: '/music/a.mp3', coverPath: null, overlayOverride: null },
+        { name: 'b', audioPath: '/music/b.mp3', coverPath: null },
+      ]);
+      deps.templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [titleEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
+        elements: [titleEl],
+        background: undefined,
+      }));
+    });
+
+    it('buildOverlay resolves image elements to on-disk paths via templateImageService.resolvePath', async () => {
+      const { deps, templateImageService } = buildDeps();
+      const imageEl = { type: 'image', x: 0, y: 0, width: 100, height: 100, assetId: 'asset-1' };
+      deps.templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [imageEl] });
+      templateImageService.resolvePath.mockReturnValue('/uploads/user-1/templates/tpl-1/images/asset-1.png');
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(templateImageService.resolvePath).toHaveBeenCalledWith('user-1', 'tpl-1', 'asset-1');
+      expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
+        imageAssets: { 'asset-1': '/uploads/user-1/templates/tpl-1/images/asset-1.png' },
+      }));
     });
   });
 

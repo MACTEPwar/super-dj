@@ -112,6 +112,15 @@ export function createTemplateRouter(
       coverPath = track.coverPath ?? rendererDeps.defaultCoverPath;
     }
 
+    // The preview endpoint's only feedback mechanism for a template's 'image' elements
+    // (TemplateEditor.tsx's live preview) — without resolving these, an image element would
+    // always render its black-rect fallback in the editor even though the live stream pipeline
+    // (StreamManager.buildOverlay) resolves it correctly.
+    const imageAssets: Record<string, string> = {};
+    for (const el of previewElements) {
+      if (el.type === 'image') imageAssets[el.assetId] = templateImageService.resolvePath(owner, template.id, el.assetId);
+    }
+
     const png = await renderTemplatePng({
       elements: previewElements,
       title: title ?? 'Sample Track',
@@ -121,6 +130,10 @@ export function createTemplateRouter(
       height: CANVAS_HEIGHT,
       fontPath: rendererDeps.fontPath,
       fontFamily: rendererDeps.fontFamily,
+      imageAssets,
+      // no `background` here — the preview endpoint has no concept of a per-track override
+      // (there's no specific track being "played"), so it always shows the template's own look,
+      // matching the existing preview behavior for everything else.
     });
 
     res.status(200).contentType('image/png').send(png);
