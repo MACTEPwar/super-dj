@@ -614,4 +614,47 @@ describe('TemplateEditor', () => {
 
     expect(screen.queryByTestId('snap-guide-x')).not.toBeInTheDocument();
   });
+
+  it('duplicating an element inserts a copy offset by +20/+20, selected, immediately after the original', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    });
+    renderEditor();
+    // Select the title element (index 1)
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+    expect(await screen.findByLabelText('Font size')).toBeInTheDocument();
+
+    // Click the Duplicate button
+    await userEvent.click(screen.getByText('Duplicate'));
+
+    // Verify the new element was inserted at index 2 (after the original)
+    // by checking that we now have 3 elements
+    const coverLabel = screen.getAllByText('Cover', { selector: 'span' });
+    expect(coverLabel.length).toBe(1); // Still just one cover
+
+    // The new title copy should be selected now, showing its properties
+    expect(screen.getByLabelText('Font size')).toBeInTheDocument();
+    const xField = screen.getByLabelText('X') as HTMLInputElement;
+    const yField = screen.getByLabelText('Y') as HTMLInputElement;
+    // Original was at (10, 10), copy should be at (30, 30)
+    expect(xField.value).toBe('30');
+    expect(yField.value).toBe('30');
+
+    // Save to verify the full element list
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [
+        { type: 'cover', x: 40, y: 40, width: 100, height: 100 },
+        { type: 'title', x: 10, y: 10, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+        { type: 'title', x: 30, y: 30, width: 400, fontSize: 30, color: { mode: 'solid', color: '#ffffff' }, style: DEFAULT_STYLE },
+      ],
+    }));
+  });
 });

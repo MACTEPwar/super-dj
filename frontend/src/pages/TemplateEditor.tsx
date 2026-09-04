@@ -296,6 +296,17 @@ export default function TemplateEditor() {
     setSelectedIndex(null);
   }
 
+  function duplicateElement(index: number): void {
+    commitHistoryNow();
+    setElements((els) => {
+      const copy = { ...els[index], x: els[index].x + 20, y: els[index].y + 20 };
+      const next = [...els];
+      next.splice(index + 1, 0, copy);
+      return next;
+    });
+    setSelectedIndex(index + 1);
+  }
+
   // One-shot z-order swap for the layers panel — commits history before applying, same as
   // addElement/removeElement above, since there's no separate gesture phase to group. `direction`
   // is +1 to swap toward the next-higher index (the layers panel's "move up"/toward-the-front
@@ -658,7 +669,10 @@ export default function TemplateEditor() {
                 <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
 
-              <button onClick={() => removeElement(selectedIndex!)} className="text-sm text-red-600">{t('templateEditor.removeElement')}</button>
+              <div className="flex gap-2">
+                <button onClick={() => duplicateElement(selectedIndex!)} className="text-sm text-blue-600">{t('templateEditor.duplicateElement')}</button>
+                <button onClick={() => removeElement(selectedIndex!)} className="text-sm text-red-600">{t('templateEditor.removeElement')}</button>
+              </div>
             </>
           )}
         </div>

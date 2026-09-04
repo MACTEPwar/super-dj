@@ -202,6 +202,7 @@
     "defaultText": "New text",
     "replaceImage": "Replace image",
     "imageUploadFailed": "Failed to upload image",
+    "duplicateElement": "Duplicate",
     "removeElement": "Remove element",
     "undo": "Undo",
     "redo": "Redo"
