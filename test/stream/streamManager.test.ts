@@ -338,7 +338,7 @@ describe('StreamManager', () => {
       const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
       expect(producerCall).toBeDefined();
       const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
-      expect(filterComplex).toContain('showfreqs=s=200x100:mode=bar:colors=#00ff00');
+      expect(filterComplex).toContain('showfreqs=s=200x100:mode=bar:rate=30:colors=#00ff00');
       expect(filterComplex).toContain('overlay=20:30');
     });
 
@@ -359,7 +359,7 @@ describe('StreamManager', () => {
       const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
       expect(producerCall).toBeDefined();
       const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
-      expect(filterComplex).toContain('showfreqs=s=401x151:mode=bar:colors=#00ff00');
+      expect(filterComplex).toContain('showfreqs=s=401x151:mode=bar:rate=30:colors=#00ff00');
       expect(filterComplex).toContain('overlay=20:31');
     });
 

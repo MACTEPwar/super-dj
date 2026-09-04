@@ -194,6 +194,14 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
     })).toBe(true);
   });
 
+  // Same ffmpeg-parses-this-directly reasoning as the equalizer shorthand-hex tests below:
+  // TimerElement.color reaches a drawtext fontcolor argument, not Satori/CSS.
+  it('rejects a timer with a shorthand 3-digit hex color', () => {
+    expect(isValidTemplateElement({
+      type: 'timer', x: 10, y: 10, fontSize: 20, color: '#f00', style: baseStyle,
+    })).toBe(false);
+  });
+
   it('accepts a text element', () => {
     expect(isValidTemplateElement({
       type: 'text', x: 10, y: 10, width: 300, fontSize: 24,
@@ -255,6 +263,24 @@ describe('isValidTemplateElement — equalizer', () => {
   it('rejects an equalizer with a non-hex color', () => {
     expect(isValidTemplateElement({
       type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: 'not-a-color',
+    })).toBe(false);
+  });
+
+  // #RGB/#RGBA shorthand passes the generic HEX_COLOR_PATTERN (and is valid CSS, fine for
+  // title/playlist/text which render through Satori) but ffmpeg's showfreqs `colors=` option
+  // reaches this value directly (see buildPersistentEncoderArgs) and only parses 6/8-digit hex —
+  // verified against a real ffmpeg binary: `colors=#f00` logs "Invalid 0xRRGGBB[AA] color
+  // string" and the filter falls back to black, which colorkey then removes entirely, so the
+  // configured color never appears on stream at all instead of erroring loudly at save time.
+  it('rejects an equalizer with a shorthand 3-digit hex color', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#f00',
+    })).toBe(false);
+  });
+
+  it('rejects an equalizer with a shorthand 4-digit hex color', () => {
+    expect(isValidTemplateElement({
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#f00f',
     })).toBe(false);
   });
 

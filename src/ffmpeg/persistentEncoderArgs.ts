@@ -49,9 +49,20 @@ export function buildPersistentEncoderArgs(params: {
   const mapping = equalizer
     ? [
         '-filter_complex',
+        // overlay's output cadence follows its MAIN input's frame arrivals, and [0:v] only
+        // arrives at heartbeatFps (CanvasFeeder resends/rerenders that often — plenty for
+        // mostly-static cover/title/playlist content, but far too slow for a reactive spectrum).
+        // Without this `fps=` stage, showfreqs' own ~25-30fps output never actually reaches the
+        // encoder: overlay just recomputes once per incoming main frame, so libx264 ends up
+        // emitting mostly duplicate frames — a visibly stepped/laggy equalizer. Verified against
+        // a real ffmpeg binary: dup=78 of 98 encoded frames over a 3s clip without this stage,
+        // dup=0 with it. Cheap fix — `fps` duplicates already-decoded frames inside the filter
+        // graph, no extra CanvasFeeder writes/renders — and `rate=` on showfreqs matches its own
+        // output cadence to the same target so overlay always has a fresh pair on every frame.
+        `[0:v]fps=${fps}[vfast];` +
         `[1:a]asplit=2[a_out][a_viz];` +
-        `[a_viz]showfreqs=s=${equalizer.width}x${equalizer.height}:mode=bar:colors=${equalizerColors},format=yuva420p,colorkey=black:0.1:0.1[eq];` +
-        `[0:v][eq]overlay=${equalizer.x}:${equalizer.y}[vout]`,
+        `[a_viz]showfreqs=s=${equalizer.width}x${equalizer.height}:mode=bar:rate=${fps}:colors=${equalizerColors},format=yuva420p,colorkey=black:0.1:0.1[eq];` +
+        `[vfast][eq]overlay=${equalizer.x}:${equalizer.y}[vout]`,
         '-map', '[vout]', '-map', '[a_out]',
       ]
     : ['-map', '0:v', '-map', '1:a'];

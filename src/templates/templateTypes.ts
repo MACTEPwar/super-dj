@@ -84,6 +84,15 @@ const MAX_TEXT_LENGTH = 500;
 // accepted as any non-empty string, closing off filter-string injection via stray `:`/`'`/`\`.
 const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
+// 6/8-digit only — for color values that reach an ffmpeg filter/option directly (EqualizerElement's
+// showfreqs `colors=`, TimerElement's drawtext `fontcolor=`) rather than Satori/CSS. ffmpeg's own
+// color parser (av_parse_color) has no notion of CSS's #RGB/#RGBA shorthand: verified against a
+// real ffmpeg binary, `colors=#f00` logs "Invalid 0xRRGGBB[AA] color string" and silently falls
+// back to black, which the equalizer's own colorkey=black filter then removes entirely — the bar
+// never appears on stream, with nothing in the API response to say why. Rejecting the shorthand
+// at save time turns that into a 400 instead of a silently wrong live render.
+const STRICT_HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
 const MAX_FONT_SIZE = 300;
 
 // Upper bounds for the text-decoration numerics. These are NOT cosmetic limits: an unbounded
@@ -120,6 +129,10 @@ function isValidSize(value: unknown, max: number): boolean {
 
 function isValidColor(value: unknown): value is string {
   return typeof value === 'string' && HEX_COLOR_PATTERN.test(value);
+}
+
+function isValidFfmpegColor(value: unknown): value is string {
+  return typeof value === 'string' && STRICT_HEX_COLOR_PATTERN.test(value);
 }
 
 // Exported (not module-private) — Task 8's Track.overlayOverride validation reuses this
@@ -179,7 +192,7 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
     return isValidSize(el.width, CANVAS_WIDTH) && isValidSize(el.height, CANVAS_HEIGHT);
   }
   if (el.type === 'timer') {
-    return isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidColor(el.color) && isValidTextStyle(el.style);
+    return isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidFfmpegColor(el.color) && isValidTextStyle(el.style);
   }
   if (el.type === 'equalizer') {
     // Equalizer-specific, not folded into the shared isValidPosition/isValidSize used by every
@@ -190,7 +203,7 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
     return Number.isInteger(el.x) && Number.isInteger(el.y)
       && isValidSize(el.width, CANVAS_WIDTH) && Number.isInteger(el.width)
       && isValidSize(el.height, CANVAS_HEIGHT) && Number.isInteger(el.height)
-      && isValidColor(el.color);
+      && isValidFfmpegColor(el.color);
   }
   if (el.type === 'text') {
     if (typeof el.text !== 'string' || el.text.length === 0 || el.text.length > MAX_TEXT_LENGTH) return false;
