@@ -211,9 +211,10 @@ describe('StreamController', () => {
       // 5s (the paused position) + 1s (live since resume) = 6s — NOT 1s, which is what a ticker
       // that only measured time since the resume's own feedCurrentTrack() call would show
       // instead, visibly resetting the on-stream timer every time someone resumes.
-      // formatDurationForDrawtext escapes every ':' as '\:' for ffmpeg's drawtext filter syntax
-      // (see overlayText.ts) — the expected string carries that escaping too, not plain "0:06".
-      expect(canvasFeeder.render).toHaveBeenCalledWith(overlayWithTimer, '0\\:06 / 1\\:40');
+      // Plain, UNescaped text: colon escaping for ffmpeg drawtext happens once, at the filter
+      // boundary in segmentArgs.ts's overlayFilterComplex() — escaping here too double-escaped
+      // it into something real ffmpeg rejects outright.
+      expect(canvasFeeder.render).toHaveBeenCalledWith(overlayWithTimer, '0:06 / 1:40');
     } finally {
       jest.useRealTimers();
     }

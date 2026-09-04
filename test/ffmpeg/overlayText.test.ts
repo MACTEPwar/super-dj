@@ -1,4 +1,4 @@
-import { formatDuration, formatDurationForDrawtext, buildPlaylistWindowLines } from '../../src/ffmpeg/overlayText';
+import { formatDuration, buildPlaylistWindowLines } from '../../src/ffmpeg/overlayText';
 import { Track } from '../../src/playlist/types';
 
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
@@ -16,12 +16,12 @@ describe('formatDuration', () => {
   it('clamps negative input to zero', () => {
     expect(formatDuration(-10)).toBe('0:00');
   });
-});
 
-describe('formatDurationForDrawtext', () => {
-  it('escapes the colon(s) formatDuration produces, for ffmpeg drawtext filter syntax', () => {
-    expect(formatDurationForDrawtext(65)).toBe('1\\:05');
-    expect(formatDurationForDrawtext(3725)).toBe('1\\:02\\:05');
+  // Colons stay UNescaped here: segmentArgs.ts's overlayFilterComplex() is the single layer
+  // that escapes them for ffmpeg drawtext. Escaping in both places produced '1\\:05', which
+  // real ffmpeg rejects, dropping every frame of a timer-bearing stream.
+  it('leaves colons unescaped — filter-string escaping happens at the filter boundary only', () => {
+    expect(formatDuration(65)).not.toContain('\\');
   });
 });
 

@@ -4,7 +4,7 @@ import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
 import { AudioRelay } from '../ffmpeg/audioRelay';
 import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
-import { formatDurationForDrawtext } from '../ffmpeg/overlayText';
+import { formatDuration } from '../ffmpeg/overlayText';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 
@@ -181,9 +181,11 @@ export class StreamController {
     return this.trackStartOffsetSeconds + liveDelta;
   }
 
+  // Plain, unescaped text — segmentArgs.ts's overlayFilterComplex() is the single layer that
+  // escapes colons for ffmpeg drawtext syntax. Escaping here too would double-escape.
   private timerText(elapsedSeconds: number): string | null {
     if (!this.currentOverlay?.timer) return null;
-    return `${formatDurationForDrawtext(elapsedSeconds)} / ${formatDurationForDrawtext(this.currentOverlay.durationSeconds)}`;
+    return `${formatDuration(elapsedSeconds)} / ${formatDuration(this.currentOverlay.durationSeconds)}`;
   }
 
   private advanceToNextTrack(): void {

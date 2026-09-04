@@ -13,14 +13,12 @@ export function formatDuration(totalSeconds: number): string {
   return `${minutes}:${paddedSeconds}`;
 }
 
-// formatDuration()'s output is digits and colons only (never arbitrary text), but ffmpeg's
-// drawtext filter treats ':' as a parameter separator inside its own filter string — this is
-// the one place that still needs escaping now that title/playlist no longer flow through
-// drawtext at all (see the timer element built by StreamController.timerText() and rendered via
-// CanvasFeeder/segmentArgs.ts's TimerOverlay).
-export function formatDurationForDrawtext(totalSeconds: number): string {
-  return formatDuration(totalSeconds).replace(/:/g, '\\:');
-}
+// NOTE: ffmpeg's drawtext filter treats ':' as a parameter separator, so the timer text does
+// need its colons escaped — but that escaping belongs at exactly ONE layer, the point where the
+// string actually becomes ffmpeg filter syntax (overlayFilterComplex() in segmentArgs.ts). A
+// second escape here produced '0\\:37', which real ffmpeg rejects outright ("No option name
+// near ...", exit -22), silently killing every frame of a timer-bearing stream. Keep this
+// module's output plain text.
 
 export function buildPlaylistWindowLines(
   tracks: Track[],
