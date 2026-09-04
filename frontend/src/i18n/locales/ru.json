@@ -202,7 +202,9 @@
     "defaultText": "Новый текст",
     "replaceImage": "Заменить изображение",
     "imageUploadFailed": "Не удалось загрузить изображение",
-    "removeElement": "Удалить элемент"
+    "removeElement": "Удалить элемент",
+    "undo": "Отменить",
+    "redo": "Повторить"
   },
   "streams": {
     "title": "Трансляции",
