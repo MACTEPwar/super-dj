@@ -46,6 +46,14 @@ function snapValue(value: number, targets: number[]): { value: number; snapped: 
   return { value, snapped: false };
 }
 
+// Arrow-key nudge of the selected element: plain 1px steps, or 10px with Shift held. Each press
+// commits its own history entry — a deliberate simplification (see the spec's scope notes);
+// holding an arrow key down producing several single-pixel undo steps is an accepted minor cost,
+// not a bug to engineer away with debouncing in this round.
+const ARROW_KEYS: Record<string, [number, number]> = {
+  ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+};
+
 // Not every test/browser environment implements URL.revokeObjectURL (jsdom doesn't) — guarding
 // it means a missing implementation just leaks the blob URL for that environment's lifetime
 // instead of crashing the component.
@@ -277,12 +285,24 @@ export default function TemplateEditor() {
       if (tag === 'INPUT' || tag === 'TEXTAREA') return; // Ctrl+Z inside a text field should be that field's own native undo
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+      if (selectedIndex !== null && e.key in ARROW_KEYS) {
+        e.preventDefault();
+        const [dx, dy] = ARROW_KEYS[e.key];
+        const step = e.shiftKey ? 10 : 1;
+        commitHistoryNow();
+        const el = elements[selectedIndex];
+        updateElement(selectedIndex, {
+          x: clamp(el.x + dx * step, 0, CANVAS_WIDTH),
+          y: clamp(el.y + dy * step, 0, CANVAS_HEIGHT),
+        });
+      }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [undo, redo]); // undo/redo close over past/future/elements — must be in the dependency array,
-    // or wrap them in useCallback with correct deps; do not silence the exhaustive-deps lint rule
-    // here instead of fixing it.
+  }, [undo, redo, selectedIndex, elements]); // undo/redo close over past/future/elements — must be
+    // in the dependency array, or wrap them in useCallback with correct deps; do not silence the
+    // exhaustive-deps lint rule here instead of fixing it. selectedIndex/elements are read
+    // directly by the arrow-key nudge branch above for the same reason.
 
   function addElement(type: AddableType) {
     commitHistoryNow();

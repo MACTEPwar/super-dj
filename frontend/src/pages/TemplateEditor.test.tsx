@@ -657,4 +657,57 @@ describe('TemplateEditor', () => {
       ],
     }));
   });
+
+  it('arrow keys nudge the selected element by 1px, Shift+arrow by 10px', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Cover', { selector: 'span' }));
+    await screen.findByLabelText('X');
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    await waitFor(() => expect((screen.getByLabelText('X') as HTMLInputElement).value).toBe('41'));
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('40');
+
+    fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true });
+    await waitFor(() => expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('50'));
+    expect((screen.getByLabelText('X') as HTMLInputElement).value).toBe('41');
+  });
+
+  it('arrow keys do nothing when no element is selected', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
+    });
+    renderEditor();
+    await screen.findByText('Cover', { selector: 'span' });
+    expect(screen.queryByLabelText('X')).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+
+    // Selecting the element afterward proves its position was never touched while unselected.
+    await userEvent.click(screen.getByText('Cover', { selector: 'span' }));
+    expect(await screen.findByLabelText('X')).toHaveValue(40);
+    expect(screen.getByLabelText('Y')).toHaveValue(40);
+  });
+
+  it('arrow keys do not nudge while focus is inside a text/number input', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{ type: 'cover', x: 40, y: 40, width: 100, height: 100 }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Cover', { selector: 'span' }));
+    const xField = await screen.findByLabelText('X') as HTMLInputElement;
+    xField.focus();
+
+    // The browser's own native number-input increment behavior on ArrowUp, if any, is not this
+    // task's concern — this only asserts the editor's own nudge logic didn't also fire.
+    fireEvent.keyDown(xField, { key: 'ArrowUp' });
+
+    expect(xField.value).toBe('40');
+    expect((screen.getByLabelText('Y') as HTMLInputElement).value).toBe('40');
+  });
 });
