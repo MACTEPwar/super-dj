@@ -40,6 +40,31 @@ export const openApiSpec = {
       },
     },
     '/tracks/{id}': {
+      patch: {
+        summary: 'Set (or clear) this track\'s per-track overlay override — colors applied on top of the selected template while this track is playing',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['overlayOverride'],
+                properties: {
+                  overlayOverride: { allOf: [{ $ref: '#/components/schemas/TrackOverlayOverride' }], nullable: true, description: 'null clears the override' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Override saved' },
+          '400': { description: 'body.overlayOverride is missing or invalid' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your track' },
+          '404': { description: 'Track not found' },
+        },
+      },
       delete: {
         summary: 'Delete a track owned by the authenticated user',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
@@ -191,7 +216,7 @@ export const openApiSpec = {
                 required: ['playlistId'],
                 properties: {
                   playlistId: { type: 'string' },
-                  templateId: { type: 'string', description: 'Optional overlay template id (see /templates). When omitted, a built-in default layout is used instead of erroring — no visual editor exists yet, so most streams will start without one.' },
+                  templateId: { type: 'string', description: 'Optional overlay template id (see /templates). When omitted, a built-in default layout is used instead of erroring, so a stream can go out with no template configured at all.' },
                   title: { type: 'string', description: 'Optional broadcast title override (providers that create a live broadcast, e.g. YouTube); defaults to the playlist name' },
                   description: { type: 'string', description: 'Optional broadcast description (providers that create a live broadcast, e.g. YouTube)' },
                   privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Optional broadcast privacy (providers that create a live broadcast, e.g. YouTube); defaults to private' },
@@ -455,7 +480,7 @@ export const openApiSpec = {
     },
     '/templates': {
       post: {
-        summary: 'Create a named, reusable overlay template ("theme") — a positioned list of elements (cover art, title text, playlist window) rendered onto the stream video',
+        summary: 'Create a named, reusable overlay template ("theme") — a positioned list of elements (cover art, title text, playlist window, elapsed timer, literal text, uploaded images) rendered onto the stream video',
         requestBody: {
           required: true,
           content: {
@@ -481,6 +506,15 @@ export const openApiSpec = {
         summary: 'List the authenticated user\'s templates',
         responses: {
           '200': { description: 'Template list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Template' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/templates/fonts': {
+      get: {
+        summary: 'List the font families a template element\'s style.fontFamily may name (the server-installed set — the same list the visual editor offers)',
+        responses: {
+          '200': { description: 'Font family list', content: { 'application/json': { schema: { type: 'object', properties: { families: { type: 'array', items: { type: 'string' } } } } } } },
           '401': { description: 'Not authenticated' },
         },
       },
@@ -559,6 +593,46 @@ export const openApiSpec = {
         },
       },
     },
+    '/templates/{id}/images': {
+      post: {
+        summary: 'Upload an image for this template (multipart/form-data: image). Converted to PNG server-side; the returned assetId is what an `image` element references.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                required: ['image'],
+                properties: { image: { type: 'string', format: 'binary', description: 'image/png, image/jpeg or image/gif; max 10 MiB' } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Image stored', content: { 'application/json': { schema: { type: 'object', properties: { assetId: { type: 'string' } } } } } },
+          '400': { description: 'Missing image file, unsupported image type, or file too large' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your template' },
+          '404': { description: 'Template not found' },
+        },
+      },
+    },
+    '/templates/{id}/images/{assetId}': {
+      get: {
+        summary: 'Fetch a previously uploaded template image as PNG',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'assetId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'image/png' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your template' },
+          '404': { description: 'Template not found, or no such image (a malformed assetId is reported as 404, not 400)' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
@@ -621,6 +695,7 @@ export const openApiSpec = {
           name: { type: 'string' },
           durationSeconds: { type: 'number', nullable: true },
           hasCover: { type: 'boolean' },
+          overlayOverride: { allOf: [{ $ref: '#/components/schemas/TrackOverlayOverride' }], nullable: true, description: 'null when this track has no per-track overlay override (see PATCH /tracks/{id})' },
         },
       },
       Playlist: {
@@ -683,18 +758,95 @@ export const openApiSpec = {
           },
         },
       },
+      ColorValue: {
+        type: 'object',
+        description: 'A solid color or a linear gradient. Every color component is a hex string (#RGB / #RGBA / #RRGGBB / #RRGGBBAA) — other CSS color syntaxes are rejected.',
+        oneOf: [
+          {
+            type: 'object',
+            required: ['mode', 'color'],
+            properties: {
+              mode: { type: 'string', enum: ['solid'] },
+              color: { type: 'string', example: '#ffffff' },
+            },
+          },
+          {
+            type: 'object',
+            required: ['mode', 'stops', 'angleDeg'],
+            properties: {
+              mode: { type: 'string', enum: ['gradient'] },
+              stops: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 3 },
+              angleDeg: { type: 'number', minimum: 0, maximum: 360 },
+            },
+          },
+        ],
+      },
+      TextStyle: {
+        type: 'object',
+        description: 'Typography and text decoration shared by the `title`/`playlist`/`timer`/`text` element types.',
+        required: ['fontFamily', 'bold', 'italic'],
+        properties: {
+          fontFamily: { type: 'string', description: 'One of the families listed by GET /templates/fonts' },
+          bold: { type: 'boolean' },
+          italic: { type: 'boolean' },
+          stroke: {
+            type: 'object',
+            description: 'Optional text outline',
+            required: ['color', 'width'],
+            properties: {
+              color: { type: 'string', description: 'Hex color' },
+              width: { type: 'number', minimum: 0, exclusiveMinimum: true, maximum: 50 },
+            },
+          },
+          shadow: {
+            type: 'object',
+            description: 'Optional drop shadow. The numeric bounds are enforced (not advisory) — extreme values crash the native rasterizer.',
+            required: ['color', 'blur', 'offsetX', 'offsetY'],
+            properties: {
+              color: { type: 'string', description: 'Hex color' },
+              blur: { type: 'number', minimum: 0, maximum: 100 },
+              offsetX: { type: 'number', minimum: -100, maximum: 100 },
+              offsetY: { type: 'number', minimum: -100, maximum: 100 },
+            },
+          },
+        },
+      },
       TemplateElement: {
         type: 'object',
-        description: 'A positioned overlay element. `type` determines which other fields apply: `cover` needs width+height; `title`/`playlist` need width+fontSize+color.',
+        description: [
+          'A positioned overlay element in a 1280x720 canvas coordinate space. `type` determines which other fields apply:',
+          '`cover` needs width+height;',
+          '`title`/`playlist` need width+fontSize+color(ColorValue)+style;',
+          '`text` needs the same as `title` plus a literal `text` string (1-500 chars);',
+          '`timer` needs fontSize+style plus a PLAIN hex-string `color` (not a ColorValue — it is drawn via ffmpeg drawtext, which cannot render gradient text) and takes no width;',
+          '`image` needs width+height+assetId (an id issued by POST /templates/{id}/images).',
+        ].join(' '),
         required: ['type', 'x', 'y'],
         properties: {
-          type: { type: 'string', enum: ['cover', 'title', 'playlist'] },
-          x: { type: 'number' },
-          y: { type: 'number' },
-          width: { type: 'number' },
-          height: { type: 'number', description: '`cover` only' },
-          fontSize: { type: 'number', description: '`title`/`playlist` only' },
-          color: { type: 'string', description: '`title`/`playlist` only — CSS color string' },
+          type: { type: 'string', enum: ['cover', 'title', 'playlist', 'timer', 'text', 'image'] },
+          x: { type: 'number', minimum: 0, maximum: 1280 },
+          y: { type: 'number', minimum: 0, maximum: 720 },
+          width: { type: 'number', description: 'all types except `timer`' },
+          height: { type: 'number', description: '`cover`/`image` only' },
+          fontSize: { type: 'number', maximum: 300, description: '`title`/`playlist`/`timer`/`text` only' },
+          text: { type: 'string', maxLength: 500, description: '`text` only — the literal string to draw' },
+          assetId: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: '`image` only — an asset id returned by POST /templates/{id}/images' },
+          color: {
+            oneOf: [
+              { $ref: '#/components/schemas/ColorValue' },
+              { type: 'string', description: '`timer` only — a plain hex color string' },
+            ],
+            description: '`title`/`playlist`/`text` use the ColorValue union; `timer` uses a plain hex string',
+          },
+          style: { $ref: '#/components/schemas/TextStyle', description: '`title`/`playlist`/`timer`/`text` only' },
+        },
+      },
+      TrackOverlayOverride: {
+        type: 'object',
+        description: 'Per-track overrides applied on top of the selected template when this track is playing. Both fields are optional; an absent field leaves the template\'s own value in place.',
+        properties: {
+          color: { $ref: '#/components/schemas/ColorValue' },
+          backgroundColor: { $ref: '#/components/schemas/ColorValue' },
         },
       },
       Template: {
