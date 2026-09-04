@@ -3,11 +3,12 @@ import multer from 'multer';
 import * as os from 'os';
 import { posix as path } from 'path';
 import { TrackUploadService } from './trackUploadService';
-import { TrackRepository } from './trackRepository';
+import { TrackRepository, TrackOverlayOverride } from './trackRepository';
 import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
+import { isValidColorValue } from '../templates/templateTypes';
 
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.flac', '.m4a'];
 const COVER_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
@@ -24,8 +25,20 @@ function fixMulterFilenameEncoding(originalname: string): string {
   return Buffer.from(originalname, 'latin1').toString('utf8');
 }
 
-function toSummary(track: { id: string; name: string; durationSeconds: number | null; coverPath: string | null }) {
-  return { id: track.id, name: track.name, durationSeconds: track.durationSeconds, hasCover: track.coverPath !== null };
+function toSummary(track: { id: string; name: string; durationSeconds: number | null; coverPath: string | null; overlayOverride: TrackOverlayOverride | null }) {
+  return {
+    id: track.id, name: track.name, durationSeconds: track.durationSeconds,
+    hasCover: track.coverPath !== null, overlayOverride: track.overlayOverride,
+  };
+}
+
+function isValidOverlayOverride(value: unknown): value is TrackOverlayOverride | null {
+  if (value === null) return true;
+  if (typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (v.color !== undefined && !isValidColorValue(v.color)) return false;
+  if (v.backgroundColor !== undefined && !isValidColorValue(v.backgroundColor)) return false;
+  return true;
 }
 
 export function createTrackRouter(
@@ -62,7 +75,7 @@ export function createTrackRouter(
 
   router.get('/', auth, wrapAsync(async (req, res) => {
     const tracks = await trackRepository.listByUser((req as AuthenticatedRequest).user!.id);
-    res.status(200).json(tracks.map(toSummary));
+    res.status(200).json(tracks.map((t) => toSummary({ ...t, overlayOverride: t.overlayOverride as TrackOverlayOverride | null })));
   }));
 
   router.get('/:id/cover', auth, wrapAsync(async (req, res) => {
@@ -71,6 +84,17 @@ export function createTrackRouter(
     if (track.userId !== (req as AuthenticatedRequest).user!.id) throw new ApiError(403, 'not your track');
     if (!track.coverPath) throw new ApiError(404, 'track has no cover');
     res.sendFile(track.coverPath);
+  }));
+
+  router.patch('/:id', auth, wrapAsync(async (req, res) => {
+    const track = await trackRepository.findById(req.params.id);
+    if (!track) throw new ApiError(404, 'track not found');
+    if (track.userId !== (req as AuthenticatedRequest).user!.id) throw new ApiError(403, 'not your track');
+    if (!('overlayOverride' in (req.body ?? {})) || !isValidOverlayOverride(req.body.overlayOverride)) {
+      throw new ApiError(400, 'invalid overlayOverride');
+    }
+    await trackRepository.updateOverlayOverride(track.id, req.body.overlayOverride);
+    res.status(200).json({});
   }));
 
   router.delete('/:id', auth, wrapAsync(async (req, res) => {

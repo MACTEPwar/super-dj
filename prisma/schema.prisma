@@ -37,6 +37,7 @@ model Track {
   audioPath       String
   coverPath       String?
   durationSeconds Float?
+  overlayOverride Json?
   createdAt       DateTime        @default(now())
   playlistTracks  PlaylistTrack[]
 }

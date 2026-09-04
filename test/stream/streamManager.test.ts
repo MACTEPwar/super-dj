@@ -10,6 +10,7 @@ import { StreamManager } from '../../src/stream/streamManager';
 import { ApiError } from '../../src/errors';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
 import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
+import { PlaylistQueue } from '../../src/playlist/queue';
 
 // Captures whatever listener a real ffmpeg-wrapping class (CanvasFeeder/AudioRelay/
 // PersistentEncoder — StreamManager wires the real ones, not fakes, in this integration-level
@@ -336,6 +337,26 @@ describe('StreamManager', () => {
     await manager.start('dest-1', 'playlist-1');
 
     expect(() => manager.playByName('dest-1', 'c')).not.toThrow();
+  });
+
+  it('playByName() carries a track\'s overlayOverride through to LibraryLike.findByName\'s result (allUserTracks must not strip it)', async () => {
+    const { deps, trackRepository } = buildDeps();
+    trackRepository.listByUser.mockResolvedValue([
+      { name: 'a', audioPath: '/music/a.mp3', coverPath: null, overlayOverride: null },
+      { name: 'b', audioPath: '/music/b.mp3', coverPath: null, overlayOverride: null },
+      { name: 'c', audioPath: '/music/c.mp3', coverPath: null, overlayOverride: { color: { mode: 'solid', color: '#ff0000' } } },
+    ]);
+    const manager = new StreamManager(deps as any);
+    await manager.start('dest-1', 'playlist-1');
+
+    const insertNextSpy = jest.spyOn(PlaylistQueue.prototype, 'insertNext');
+    manager.playByName('dest-1', 'c');
+
+    expect(insertNextSpy).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'c',
+      overlayOverride: { color: { mode: 'solid', color: '#ff0000' } },
+    }));
+    insertNextSpy.mockRestore();
   });
 
   describe('YouTube-backed destinations (a provider that returns a lifecycle)', () => {

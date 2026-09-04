@@ -14,7 +14,7 @@ import { Spawner, PipeSpawner } from '../ffmpeg/types';
 import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { DestinationRepository } from '../destinations/destinationRepository';
-import { TrackRepository } from '../tracks/trackRepository';
+import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
 import { TemplateElement, TimerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
@@ -144,7 +144,10 @@ export class StreamManager extends EventEmitter {
       if (tracks.length === 0) throw new ApiError(409, 'playlist is empty');
 
       const allUserTracksRaw = await this.deps.trackRepository.listByUser(destination.userId);
-      const allUserTracks: Track[] = allUserTracksRaw.map((t) => ({ name: t.name, audioPath: t.audioPath, coverPath: t.coverPath }));
+      const allUserTracks: Track[] = allUserTracksRaw.map((t) => ({
+        name: t.name, audioPath: t.audioPath, coverPath: t.coverPath,
+        overlayOverride: t.overlayOverride as TrackOverlayOverride | null,
+      }));
 
       const provider = this.deps.providers[destination.provider];
       if (!provider) throw new ApiError(400, `unsupported destination provider: ${destination.provider}`);

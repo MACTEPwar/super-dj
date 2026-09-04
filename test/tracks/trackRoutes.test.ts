@@ -29,16 +29,16 @@ describe('track routes', () => {
   it('GET /tracks lists the current user\'s tracks', async () => {
     const trackRepository: any = {
       listByUser: jest.fn().mockResolvedValue([
-        { id: 't1', name: 'a', durationSeconds: 10, coverPath: null },
-        { id: 't2', name: 'b', durationSeconds: 20, coverPath: '/x/cover.png' },
+        { id: 't1', name: 'a', durationSeconds: 10, coverPath: null, overlayOverride: null },
+        { id: 't2', name: 'b', durationSeconds: 20, coverPath: '/x/cover.png', overlayOverride: { color: { mode: 'solid', color: '#ff0000' } } },
       ]),
     };
     const { app } = buildApp({ trackRepository });
     const res = await request(app).get('/tracks');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([
-      { id: 't1', name: 'a', durationSeconds: 10, hasCover: false },
-      { id: 't2', name: 'b', durationSeconds: 20, hasCover: true },
+      { id: 't1', name: 'a', durationSeconds: 10, hasCover: false, overlayOverride: null },
+      { id: 't2', name: 'b', durationSeconds: 20, hasCover: true, overlayOverride: { color: { mode: 'solid', color: '#ff0000' } } },
     ]);
     expect(trackRepository.listByUser).toHaveBeenCalledWith('user-1');
   });
@@ -126,5 +126,70 @@ describe('track routes', () => {
     const { app } = buildApp({ trackRepository });
     const res = await request(app).get('/tracks/t1/cover');
     expect(res.status).toBe(403);
+  });
+
+  it('PATCH /tracks/:id sets overlayOverride for the owner', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1' }),
+      updateOverlayOverride: jest.fn().mockResolvedValue(undefined),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).patch('/tracks/t1').send({ overlayOverride: { color: { mode: 'solid', color: '#ff0000' } } });
+    expect(res.status).toBe(200);
+    expect(trackRepository.updateOverlayOverride).toHaveBeenCalledWith('t1', { color: { mode: 'solid', color: '#ff0000' } });
+  });
+
+  it('PATCH /tracks/:id 400s on an invalid overlayOverride shape', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1' }),
+      updateOverlayOverride: jest.fn().mockResolvedValue(undefined),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).patch('/tracks/t1').send({ overlayOverride: { color: { mode: 'solid', color: 'not-a-hex-color' } } });
+    expect(res.status).toBe(400);
+    expect(trackRepository.updateOverlayOverride).not.toHaveBeenCalled();
+  });
+
+  it('PATCH /tracks/:id 403s for a track owned by someone else', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'someone-else' }),
+      updateOverlayOverride: jest.fn().mockResolvedValue(undefined),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).patch('/tracks/t1').send({ overlayOverride: null });
+    expect(res.status).toBe(403);
+    expect(trackRepository.updateOverlayOverride).not.toHaveBeenCalled();
+  });
+
+  it('PATCH /tracks/:id 404s for a track that does not exist', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue(null),
+      updateOverlayOverride: jest.fn().mockResolvedValue(undefined),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).patch('/tracks/missing').send({ overlayOverride: null });
+    expect(res.status).toBe(404);
+  });
+
+  it('PATCH /tracks/:id with overlayOverride: null clears it', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1' }),
+      updateOverlayOverride: jest.fn().mockResolvedValue(undefined),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).patch('/tracks/t1').send({ overlayOverride: null });
+    expect(res.status).toBe(200);
+    expect(trackRepository.updateOverlayOverride).toHaveBeenCalledWith('t1', null);
+  });
+
+  it('PATCH /tracks/:id 400s when overlayOverride is missing from the body', async () => {
+    const trackRepository: any = {
+      findById: jest.fn().mockResolvedValue({ id: 't1', userId: 'user-1' }),
+      updateOverlayOverride: jest.fn().mockResolvedValue(undefined),
+    };
+    const { app } = buildApp({ trackRepository });
+    const res = await request(app).patch('/tracks/t1').send({});
+    expect(res.status).toBe(400);
+    expect(trackRepository.updateOverlayOverride).not.toHaveBeenCalled();
   });
 });

@@ -1,10 +1,12 @@
 import { PrismaClient, Playlist } from '@prisma/client';
+import { TrackOverlayOverride } from '../tracks/trackRepository';
 
 export interface PlaylistTrackView {
   id: string;
   name: string;
   audioPath: string;
   coverPath: string | null;
+  overlayOverride: TrackOverlayOverride | null;
 }
 
 export class PlaylistRepository {
@@ -33,6 +35,7 @@ export class PlaylistRepository {
       name: row.track.name,
       audioPath: row.track.audioPath,
       coverPath: row.track.coverPath,
+      overlayOverride: row.track.overlayOverride as TrackOverlayOverride | null,
     }));
   }
 
