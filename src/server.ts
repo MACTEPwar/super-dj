@@ -48,25 +48,31 @@ export function createSpawner(): Spawner {
 export function createPipeSpawner(): PipeSpawner {
   return (command: string, args: string[]): ChildProcessWithPipes => {
     // fd0 (stdin) unused, fd1 (stdout) unused — this process's real output is the RTMP push, not
-    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4 are the
-    // video/audio pipes ffmpeg's own args reference as pipe:3/pipe:4.
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4/fd5 are
+    // the video/audio/pulse pipes ffmpeg's own args reference as pipe:3/pipe:4/pipe:5.
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe'] });
     child.on('error', (err) => {
       console.error('persistent encoder process failed to spawn', err);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       process.stderr.write(chunk);
     });
-    const videoPipe = child.stdio[3] as unknown as NodeJS.WritableStream;
-    const audioPipe = child.stdio[4] as unknown as NodeJS.WritableStream;
+    // @types/node's ChildProcess.stdio is a fixed 5-element tuple type — it has no index 5 to
+    // type-check against, even though Node itself creates as many stdio streams as the `stdio`
+    // option array requested. Cast the whole array once rather than each individual index.
+    const stdio = child.stdio as unknown as NodeJS.WritableStream[];
+    const videoPipe = stdio[3];
+    const audioPipe = stdio[4];
+    const pulsePipe = stdio[5];
     // An 'error' event with no listener is an uncaught exception in Node, which would crash the
     // whole process (every tenant's active stream, not just this one) — the same hazard the
     // earlier per-segment pipeline's FIFO write-stream guard existed for. Writes fail with EPIPE
     // once the encoder process has died or exited, which can race a still-writing
-    // CanvasFeeder/AudioRelay.
+    // CanvasFeeder/AudioRelay/PulseVisualizer.
     videoPipe.on('error', (err) => { console.error('video pipe write error', err); });
     audioPipe.on('error', (err) => { console.error('audio pipe write error', err); });
-    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe }) as ChildProcessWithPipes;
+    pulsePipe.on('error', (err) => { console.error('pulse pipe write error', err); });
+    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe, pulsePipe }) as ChildProcessWithPipes;
   };
 }
 

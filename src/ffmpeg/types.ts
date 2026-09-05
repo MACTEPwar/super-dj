@@ -16,6 +16,11 @@ export type Spawner = (command: string, args: string[]) => ChildProcessLike;
 export interface ChildProcessWithPipes extends ChildProcessLike {
   readonly videoPipe: NodeJS.WritableStream;
   readonly audioPipe: NodeJS.WritableStream;
+  // Fed only when the resolved template has an 'equalizer' element — see PulseVisualizer and
+  // buildPersistentEncoderArgs's pipe:5 input. Always present on the type/child (the stdio slot
+  // always exists once spawned — see createPipeSpawner), simply never written to when there's no
+  // equalizer element for a given session.
+  readonly pulsePipe: NodeJS.WritableStream;
 }
 
 export type PipeSpawner = (command: string, args: string[]) => ChildProcessWithPipes;
