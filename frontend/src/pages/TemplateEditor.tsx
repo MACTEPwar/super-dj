@@ -21,6 +21,10 @@ const DISPLAY_HEIGHT = (DISPLAY_WIDTH * CANVAS_HEIGHT) / CANVAS_WIDTH;
 const SCALE = DISPLAY_WIDTH / CANVAS_WIDTH;
 const PREVIEW_DEBOUNCE_MS = 400;
 const DEFAULT_FONT_FAMILY = 'DejaVu Sans';
+const DEFAULT_EQUALIZER_STYLE = {
+  colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
+  glowLayers: 9, glowRadius: 42, coreWidth: 1,
+} as const;
 
 // 'image' is deliberately excluded here — it needs an uploaded assetId before an element can
 // exist at all, so it's added through its own dedicated upload button/mutation (see
@@ -93,10 +97,22 @@ function defaultElement(type: AddableType, t: (key: string) => string): Template
     case 'equalizer':
       return {
         type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
-        colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
-        glowLayers: 9, glowRadius: 42, coreWidth: 1,
+        ...DEFAULT_EQUALIZER_STYLE,
       };
   }
+}
+
+// A template saved before the equalizer's colors[]/glowLayers/glowRadius/coreWidth schema landed
+// still has its old shape (`{type: 'equalizer', color: string}`) sitting in the database — nothing
+// re-validates a template's stored elements on read, only on write (see CLAUDE.md's Overlay
+// templates notes). Loading such a template into the editor without this normalization crashes
+// selecting the element (`selected.colors.map(...)` on `undefined`) with a blank white page.
+function normalizeElements(elements: TemplateElement[]): TemplateElement[] {
+  return elements.map((el) =>
+    el.type === 'equalizer' && !Array.isArray((el as { colors?: unknown }).colors)
+      ? { type: 'equalizer', x: el.x, y: el.y, width: el.width, height: el.height, ...DEFAULT_EQUALIZER_STYLE }
+      : el,
+  );
 }
 
 // Non-cover/image elements have no stored height (drawtext/flex text sizes itself) — this is
@@ -175,7 +191,7 @@ export default function TemplateEditor() {
   useEffect(() => {
     if (templateQuery.data && !loadedRef.current) {
       setName(templateQuery.data.name);
-      setElements(templateQuery.data.elements);
+      setElements(normalizeElements(templateQuery.data.elements));
       loadedRef.current = true;
     }
   }, [templateQuery.data]);
