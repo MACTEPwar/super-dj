@@ -7,6 +7,7 @@ import { getFontFamilies, TemplateElement, templateImageUrl, templatesApi, uploa
 import { ApiError } from '../api/client';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { ColorField, ColorValueField, NumberField } from '../components/TemplateFormFields';
+import { PulseEqualizerPreview } from '../components/PulseEqualizerPreview';
 
 // Mirrors src/templates/templateTypes.ts on the backend — kept in sync by hand rather than
 // shared code (no shared package between frontend/backend in this project). Clamping to these
@@ -90,7 +91,11 @@ function defaultElement(type: AddableType, t: (key: string) => string): Template
         style: { fontFamily: DEFAULT_FONT_FAMILY, bold: false, italic: false },
       };
     case 'equalizer':
-      return { type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' };
+      return {
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
+        glowLayers: 9, glowRadius: 42, coreWidth: 1,
+      };
   }
 }
 
@@ -540,20 +545,18 @@ export default function TemplateEditor() {
               }}
             >
               {el.type === 'equalizer' && (
-                // A separate fill layer for the translucent color swatch, rather than `opacity`
-                // on the outer box itself — CSS opacity composites the whole subtree, which
-                // would dim the label span and resize handle below (both siblings of this layer)
-                // right along with the color fill.
-                <div className="pointer-events-none absolute inset-0" style={{ backgroundColor: el.color, opacity: 0.25 }} />
+                <PulseEqualizerPreview
+                  colors={el.colors}
+                  glowLayers={el.glowLayers}
+                  glowRadius={el.glowRadius}
+                  coreWidth={el.coreWidth}
+                  boxWidth={el.width}
+                  boxHeight={el.height}
+                />
               )}
               <span className="pointer-events-none absolute -top-5 left-0 whitespace-nowrap rounded bg-black/70 px-1 text-xs text-white">
                 {t(`templateEditor.elementType.${el.type}`)}
               </span>
-              {el.type === 'equalizer' && (
-                <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-center text-xs text-white/90">
-                  {t('templateEditor.equalizerPlaceholder')}
-                </span>
-              )}
               {el.type !== 'timer' && (
                 <div
                   onPointerDown={(e) => startResize(e, i)}
@@ -719,8 +722,53 @@ export default function TemplateEditor() {
               {(selected.type === 'title' || selected.type === 'playlist' || selected.type === 'text') && (
                 <ColorValueField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
               )}
-              {(selected.type === 'timer' || selected.type === 'equalizer') && (
+              {selected.type === 'timer' && (
                 <ColorField label={t('templateEditor.fieldColor')} value={selected.color} onChange={(v) => updateElement(selectedIndex!, { color: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+              )}
+              {selected.type === 'equalizer' && (
+                <>
+                  <div className="text-xs text-gray-600">{t('templateEditor.fieldEqualizerColors')}</div>
+                  {selected.colors.map((color, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <ColorField
+                        label={`#${i + 1}`}
+                        value={color}
+                        onChange={(v) => {
+                          const colors = [...selected.colors];
+                          colors[i] = v;
+                          updateElement(selectedIndex!, { colors });
+                        }}
+                        onFocus={beginHistoryGesture}
+                        onBlur={commitHistoryGesture}
+                      />
+                      {selected.colors.length > 2 && (
+                        <button
+                          onClick={() => {
+                            commitHistoryNow();
+                            updateElement(selectedIndex!, { colors: selected.colors.filter((_, j) => j !== i) });
+                          }}
+                          className="text-xs text-red-600"
+                        >
+                          {t('templateEditor.removeColorStop')}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {selected.colors.length < 6 && (
+                    <button
+                      onClick={() => {
+                        commitHistoryNow();
+                        updateElement(selectedIndex!, { colors: [...selected.colors, '#ffffff'] });
+                      }}
+                      className="text-xs text-blue-600"
+                    >
+                      {t('templateEditor.addColorStop')}
+                    </button>
+                  )}
+                  <NumberField label={t('templateEditor.fieldGlowLayers')} value={selected.glowLayers} min={3} max={9} onChange={(v) => updateElement(selectedIndex!, { glowLayers: Math.round(v) })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldGlowRadius')} value={selected.glowRadius} min={10} max={70} onChange={(v) => updateElement(selectedIndex!, { glowRadius: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldCoreWidth')} value={selected.coreWidth} min={1} max={6} onChange={(v) => updateElement(selectedIndex!, { coreWidth: Math.round(v) })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                </>
               )}
 
               <div className="flex gap-2">

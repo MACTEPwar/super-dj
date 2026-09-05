@@ -24,9 +24,10 @@ export type TemplateElement =
   | { type: 'timer'; x: number; y: number; fontSize: number; color: string; style: TextStyle }
   | { type: 'text'; x: number; y: number; width: number; fontSize: number; text: string; color: ColorValue; style: TextStyle }
   | { type: 'image'; x: number; y: number; width: number; height: number; assetId: string }
-  // solid hex only — ffmpeg's showfreqs (the rendering mechanism) can't do gradients, same
-  // constraint as 'timer' above.
-  | { type: 'equalizer'; x: number; y: number; width: number; height: number; color: string };
+  // Mirrors src/templates/templateTypes.ts's EqualizerElement — colors[] feeds resvg's SVG
+  // gradient (a real CSS-color renderer), not an ffmpeg filter directly, so ordinary CSS hex
+  // (including 3/4-digit shorthand) is fine here, unlike 'timer' above.
+  | { type: 'equalizer'; x: number; y: number; width: number; height: number; colors: string[]; glowLayers: number; glowRadius: number; coreWidth: number };
 
 export interface TemplateSummary {
   id: string;

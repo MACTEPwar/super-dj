@@ -342,32 +342,48 @@ describe('TemplateEditor', () => {
 
     await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
       name: 'Empty',
-      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
+        glowLayers: 9, glowRadius: 42, coreWidth: 1,
+      }],
     }));
   });
 
-  it('selecting an equalizer element shows only a plain color field, no gradient toggle', async () => {
+  it('selecting an equalizer element shows a color-stop editor and glow controls, no gradient toggle', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
-      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+      }],
     });
     renderEditor();
 
     await userEvent.click(await screen.findByText('Equalizer', { selector: 'span' }));
 
-    expect(await screen.findByLabelText('Color')).toBeInTheDocument();
+    expect(await screen.findByLabelText('#1')).toBeInTheDocument();
+    expect(screen.getByLabelText('#2')).toBeInTheDocument();
+    expect(screen.getByLabelText('Glow layers')).toBeInTheDocument();
+    expect(screen.getByLabelText('Glow radius')).toBeInTheDocument();
+    expect(screen.getByLabelText('Core width')).toBeInTheDocument();
     expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
     expect(screen.queryByText('Solid')).not.toBeInTheDocument();
   });
 
-  it('the equalizer canvas box renders the "not shown here" placeholder label', async () => {
+  it('the equalizer canvas box renders an animated preview canvas, not a static placeholder', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
-      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+      }],
     });
     renderEditor();
 
-    expect(await screen.findByText('Equalizer — reacts to sound during live playback, not shown here')).toBeInTheDocument();
+    const label = await screen.findByText('Equalizer', { selector: 'span' });
+    const box = label.parentElement as HTMLElement;
+    expect(box.querySelector('canvas')).toBeInTheDocument();
   });
 
   it('undo restores the element position from before a drag gesture, not mid-drag', async () => {
@@ -532,29 +548,6 @@ describe('TemplateEditor', () => {
     // further left to undo.
     await waitFor(() => expect(screen.queryByText('Stop 1')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
-  });
-
-  it('applies the equalizer color as its own fill layer instead of opacity on the whole box, so the label/resize handle stay at full opacity', async () => {
-    vi.mocked(templatesApi.get).mockResolvedValue({
-      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
-      elements: [{ type: 'equalizer', x: 100, y: 500, width: 400, height: 150, color: '#ffffff' }],
-    });
-    renderEditor();
-
-    const label = await screen.findByText('Equalizer', { selector: 'span' });
-    const box = label.parentElement as HTMLElement;
-
-    // CSS opacity composites the whole subtree — the outer interactive box (which also holds
-    // the label and resize handle as children) must not carry it, or those would be dimmed too.
-    expect(box.style.opacity).toBe('');
-
-    // The translucent color swatch lives in its own child layer instead.
-    const fillLayer = Array.from(box.children).find(
-      (child) => (child as HTMLElement).style.opacity === '0.25',
-    ) as HTMLElement | undefined;
-    expect(fillLayer).toBeDefined();
-    expect(fillLayer!.style.backgroundColor).not.toBe('');
-    expect(fillLayer!.textContent).toBe('');
   });
 
   it('the layers panel lists elements frontmost-first', async () => {
