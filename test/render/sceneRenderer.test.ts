@@ -185,7 +185,7 @@ describe('renderScene', () => {
 
   it('renders a template containing an equalizer element without throwing, and produces no visible output for it', async () => {
     const png = await renderScene(
-      [{ type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#ffffff' }],
+      [{ type: 'equalizer', x: 10, y: 10, width: 400, height: 150, colors: ['#ffffff', '#000000'], glowLayers: 5, glowRadius: 20, coreWidth: 2 }],
       { title: 'x', playlistLines: [], coverDataUri: null },
       testOptions,
       testLoadFont,

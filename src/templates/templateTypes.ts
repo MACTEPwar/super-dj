@@ -70,8 +70,21 @@ export interface EqualizerElement {
   y: number;
   width: number;
   height: number;
-  color: string; // solid hex only — the rendering mechanism (ffmpeg showfreqs) can't do gradients
+  colors: string[]; // gradient stops across the line's width, left to right, 2-6 stops
+  glowLayers: number; // 3-9
+  glowRadius: number; // 10-70, px — outer glow layer's half-width
+  coreWidth: number; // 1-6, px — the bright core stroke
 }
+
+// The approved "neon pulse" look from this feature's design — used by the frontend's
+// create-element factory and as the reference values in tests. Not consumed by backend
+// validation itself (a saved element must always specify every field).
+export const DEFAULT_EQUALIZER_STYLE = {
+  colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
+  glowLayers: 9,
+  glowRadius: 42,
+  coreWidth: 1,
+} as const;
 
 export type TemplateElement =
   | CoverElement | TitleElement | PlaylistElement | TimerElement | TextElement | ImageElement | EqualizerElement;
@@ -94,6 +107,15 @@ const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a
 const STRICT_HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
 const MAX_FONT_SIZE = 300;
+
+const MIN_GLOW_LAYERS = 3;
+const MAX_GLOW_LAYERS = 9;
+const MIN_GLOW_RADIUS = 10;
+const MAX_GLOW_RADIUS = 70;
+const MIN_CORE_WIDTH = 1;
+const MAX_CORE_WIDTH = 6;
+const MIN_EQUALIZER_COLOR_STOPS = 2;
+const MAX_EQUALIZER_COLOR_STOPS = 6;
 
 // Upper bounds for the text-decoration numerics. These are NOT cosmetic limits: an unbounded
 // shadow blur reaches resvg/tiny-skia's native rasterizer, where an extreme value panics in Rust
@@ -133,6 +155,16 @@ function isValidColor(value: unknown): value is string {
 
 function isValidFfmpegColor(value: unknown): value is string {
   return typeof value === 'string' && STRICT_HEX_COLOR_PATTERN.test(value);
+}
+
+// Equalizer colors reach resvg's SVG gradient stops (a real CSS-color-parsing renderer), not an
+// ffmpeg filter option directly — so the loose isValidColor (CSS-valid 3/4/6/8-digit hex) is the
+// right check here, same reasoning as title/playlist's ColorValue, unlike the old MVP's
+// STRICT_HEX_COLOR_PATTERN-gated `color` field this replaces.
+function isValidEqualizerColors(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length >= MIN_EQUALIZER_COLOR_STOPS && value.length <= MAX_EQUALIZER_COLOR_STOPS
+    && value.every((c) => isValidColor(c));
 }
 
 // Exported (not module-private) — Task 8's Track.overlayOverride validation reuses this
@@ -195,15 +227,18 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
     return isValidSize(el.fontSize, MAX_FONT_SIZE) && isValidFfmpegColor(el.color) && isValidTextStyle(el.style);
   }
   if (el.type === 'equalizer') {
-    // Equalizer-specific, not folded into the shared isValidPosition/isValidSize used by every
-    // other element type: ffmpeg's showfreqs `s=` (size) option requires integer width/height,
-    // and this element's position/size should just always be whole pixels — but other element
-    // types (e.g. a future fractional angle/offset) have no such requirement, so this stays a
-    // narrow check in this branch rather than a change to the shared functions.
+    // Position/size stay integer-constrained, not folded into the shared isValidPosition/
+    // isValidSize used by every other element type: PulseVisualizer's raw video pipe declares
+    // `-s <width>x<height>` to ffmpeg, which (like the old showfreqs `s=` option before it)
+    // requires whole pixels — see persistentEncoderArgs.ts.
     return Number.isInteger(el.x) && Number.isInteger(el.y)
       && isValidSize(el.width, CANVAS_WIDTH) && Number.isInteger(el.width)
       && isValidSize(el.height, CANVAS_HEIGHT) && Number.isInteger(el.height)
-      && isValidFfmpegColor(el.color);
+      && isValidEqualizerColors(el.colors)
+      && isFiniteNumber(el.glowLayers) && Number.isInteger(el.glowLayers)
+      && el.glowLayers >= MIN_GLOW_LAYERS && el.glowLayers <= MAX_GLOW_LAYERS
+      && isFiniteNumber(el.glowRadius) && el.glowRadius >= MIN_GLOW_RADIUS && el.glowRadius <= MAX_GLOW_RADIUS
+      && isFiniteNumber(el.coreWidth) && el.coreWidth >= MIN_CORE_WIDTH && el.coreWidth <= MAX_CORE_WIDTH;
   }
   if (el.type === 'text') {
     if (typeof el.text !== 'string' || el.text.length === 0 || el.text.length > MAX_TEXT_LENGTH) return false;

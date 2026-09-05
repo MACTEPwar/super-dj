@@ -254,72 +254,82 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
 });
 
 describe('isValidTemplateElement — equalizer', () => {
+  const validEqualizer = {
+    type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
+    colors: ['#3b6fff', '#ff2f6e', '#3bdcff'],
+    glowLayers: 9, glowRadius: 42, coreWidth: 1,
+  };
+
   it('accepts a valid equalizer element', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#ffffff',
-    })).toBe(true);
+    expect(isValidTemplateElement(validEqualizer)).toBe(true);
   });
 
-  it('rejects an equalizer with a non-hex color', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: 'not-a-color',
-    })).toBe(false);
+  it('rejects an equalizer with fewer than 2 color stops', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, colors: ['#3b6fff'] })).toBe(false);
   });
 
-  // #RGB/#RGBA shorthand passes the generic HEX_COLOR_PATTERN (and is valid CSS, fine for
-  // title/playlist/text which render through Satori) but ffmpeg's showfreqs `colors=` option
-  // reaches this value directly (see buildPersistentEncoderArgs) and only parses 6/8-digit hex —
-  // verified against a real ffmpeg binary: `colors=#f00` logs "Invalid 0xRRGGBB[AA] color
-  // string" and the filter falls back to black, which colorkey then removes entirely, so the
-  // configured color never appears on stream at all instead of erroring loudly at save time.
-  it('rejects an equalizer with a shorthand 3-digit hex color', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#f00',
-    })).toBe(false);
+  it('rejects an equalizer with more than 6 color stops', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, colors: new Array(7).fill('#3b6fff') })).toBe(false);
   });
 
-  it('rejects an equalizer with a shorthand 4-digit hex color', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, width: 400, height: 150, color: '#f00f',
-    })).toBe(false);
+  it('rejects an equalizer with a non-hex color stop', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, colors: ['#3b6fff', 'not-a-color'] })).toBe(false);
+  });
+
+  // Unlike the MVP's ffmpeg-facing `color` (which needed STRICT_HEX_COLOR_PATTERN because
+  // ffmpeg's av_parse_color can't do CSS shorthand), these colors reach resvg's SVG gradient
+  // stops — a real CSS-color-parsing renderer, same as title/playlist's ColorValue — so 3/4-digit
+  // shorthand is fine here.
+  it('accepts a shorthand 3-digit hex color stop', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, colors: ['#f00', '#00f'] })).toBe(true);
+  });
+
+  it('rejects glowLayers below 3', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, glowLayers: 2 })).toBe(false);
+  });
+
+  it('rejects glowLayers above 9', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, glowLayers: 10 })).toBe(false);
+  });
+
+  it('rejects a non-integer glowLayers', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, glowLayers: 5.5 })).toBe(false);
+  });
+
+  it('rejects glowRadius outside 10-70', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, glowRadius: 9 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, glowRadius: 71 })).toBe(false);
+  });
+
+  it('rejects coreWidth outside 1-6', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, coreWidth: 0.5 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, coreWidth: 7 })).toBe(false);
   });
 
   it('rejects an equalizer with an out-of-canvas position', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: -1, y: 10, width: 400, height: 150, color: '#ffffff',
-    })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, x: -1 })).toBe(false);
   });
 
   it('rejects an equalizer missing width/height', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, color: '#ffffff',
-    })).toBe(false);
+    const { width, height, ...rest } = validEqualizer;
+    expect(isValidTemplateElement(rest)).toBe(false);
   });
 
-  // ffmpeg's showfreqs `s=` (size) option requires integer dimensions — a fractional width/
-  // height used to pass this validation and only fail later, at stream-start, deep inside
-  // ffmpeg's filtergraph build. Reject it here instead, so a malformed template can't be saved.
+  // pipe:5's `-s <width>x<height>` (like the old showfreqs `s=` option before it) requires
+  // integer dimensions — see persistentEncoderArgs.ts.
   it('rejects an equalizer with a non-integer width', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, width: 400.5, height: 150, color: '#ffffff',
-    })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, width: 400.5 })).toBe(false);
   });
 
   it('rejects an equalizer with a non-integer height', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10, width: 400, height: 150.5, color: '#ffffff',
-    })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, height: 150.5 })).toBe(false);
   });
 
   it('rejects an equalizer with a non-integer x', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10.5, y: 10, width: 400, height: 150, color: '#ffffff',
-    })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, x: 10.5 })).toBe(false);
   });
 
   it('rejects an equalizer with a non-integer y', () => {
-    expect(isValidTemplateElement({
-      type: 'equalizer', x: 10, y: 10.5, width: 400, height: 150, color: '#ffffff',
-    })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, y: 10.5 })).toBe(false);
   });
 });
