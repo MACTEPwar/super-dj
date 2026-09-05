@@ -98,4 +98,39 @@ describe('AudioRelay', () => {
 
     expect(returned).toBe(child);
   });
+
+  it('attachTap mirrors the same decoded PCM bytes to a second destination', () => {
+    const child = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValue(child);
+    const relay = new AudioRelay({ spawner });
+    relay.attach(new PassThrough());
+    const tapChunks: Buffer[] = [];
+    const tap = new Writable({ write(chunk, _enc, cb) { tapChunks.push(chunk); cb(); } });
+    relay.attachTap(tap);
+
+    relay.switchTrack('/music/a.mp3');
+    child.stdout.write('pcm-bytes');
+    child.stdout.end();
+
+    expect(Buffer.concat(tapChunks).toString()).toBe('pcm-bytes');
+  });
+
+  it('unpipes the tap (as well as the audio pipe) before spawning the next track', () => {
+    const child1 = fakeChild();
+    const child2 = fakeChild();
+    const spawner: Spawner = jest.fn().mockReturnValueOnce(child1).mockReturnValueOnce(child2);
+    const relay = new AudioRelay({ spawner });
+    relay.attach(new PassThrough());
+    const tapChunks: Buffer[] = [];
+    const tap = new Writable({ write(chunk, _enc, cb) { tapChunks.push(chunk); cb(); } });
+    relay.attachTap(tap);
+
+    relay.switchTrack('/music/a.mp3');
+    relay.switchTrack('/music/b.mp3');
+    child1.stdout.write('stale');
+    child2.stdout.write('fresh');
+    child2.stdout.end();
+
+    expect(Buffer.concat(tapChunks).toString()).toBe('fresh');
+  });
 });

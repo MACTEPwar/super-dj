@@ -8,12 +8,19 @@ export interface AudioRelayOptions {
 export class AudioRelay {
   private activeProcess: ChildProcessLike | null = null;
   private audioPipe: NodeJS.WritableStream | null = null;
+  private tap: NodeJS.WritableStream | null = null;
 
   constructor(private readonly options: AudioRelayOptions) {}
 
   /** Called once, right after the persistent encoder starts — see StreamController.start(). */
   attach(audioPipe: NodeJS.WritableStream): void {
     this.audioPipe = audioPipe;
+  }
+
+  /** Optional second destination for the exact same decoded PCM bytes — see PulseVisualizer's
+   * audioSink. Purely additive: never changes what reaches `audioPipe`. */
+  attachTap(tap: NodeJS.WritableStream): void {
+    this.tap = tap;
   }
 
   switchTrack(audioPath: string, startOffsetSeconds = 0): ChildProcessLike {
@@ -32,6 +39,9 @@ export class AudioRelay {
       if (this.activeProcess.stdout && this.audioPipe) {
         this.activeProcess.stdout.unpipe(this.audioPipe);
       }
+      if (this.activeProcess.stdout && this.tap) {
+        this.activeProcess.stdout.unpipe(this.tap);
+      }
       this.activeProcess.kill('SIGTERM');
       this.activeProcess = null;
     }
@@ -46,6 +56,9 @@ export class AudioRelay {
     const child = this.options.spawner('ffmpeg', args);
     if (child.stdout && this.audioPipe) {
       child.stdout.pipe(this.audioPipe, { end: false });
+    }
+    if (child.stdout && this.tap) {
+      child.stdout.pipe(this.tap, { end: false });
     }
     this.activeProcess = child;
     return child;
