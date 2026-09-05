@@ -7,6 +7,7 @@ import { DestinationStreamStatus, StreamStatus } from './types';
 import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
 import { AudioRelay } from '../ffmpeg/audioRelay';
 import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
+import { PulseVisualizer } from '../ffmpeg/pulseVisualizer';
 import { GifOverlayConfig } from '../ffmpeg/persistentEncoderArgs';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
@@ -315,7 +316,8 @@ export class StreamManager extends EventEmitter {
           rtmpUrl: session.rtmpUrl,
           streamKey: session.streamKey,
           backgroundPath: this.deps.backgroundImagePath,
-          // Rounded to integers: ffmpeg's showfreqs `s=` (size) option requires integer
+          // Rounded to integers: PulseVisualizer's raw video pipe declares `-s <width>x<height>`
+          // to ffmpeg, which (like the old showfreqs `s=` option before it) requires integer
           // dimensions and errors out (exit -22) on a fractional value — isValidSize doesn't
           // enforce that (see templateTypes.ts), so a saved template could still carry one.
           // x/y are rounded too for consistency, even though overlay's x/y accept fractional
@@ -325,11 +327,21 @@ export class StreamManager extends EventEmitter {
             ? {
                 x: Math.round(equalizerElement.x), y: Math.round(equalizerElement.y),
                 width: Math.round(equalizerElement.width), height: Math.round(equalizerElement.height),
-                color: equalizerElement.color,
               }
             : undefined,
           gifOverlays,
         }),
+        createPulseVisualizer: equalizerElement
+          ? () => new PulseVisualizer({
+              width: Math.round(equalizerElement.width),
+              height: Math.round(equalizerElement.height),
+              fps: VIDEO_FPS,
+              colors: equalizerElement.colors,
+              glowLayers: equalizerElement.glowLayers,
+              glowRadius: equalizerElement.glowRadius,
+              coreWidth: equalizerElement.coreWidth,
+            })
+          : undefined,
         onError: () => {
           const entry = this.lifecycles.get(destinationId);
           this.lifecycles.delete(destinationId);

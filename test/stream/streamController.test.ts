@@ -34,6 +34,7 @@ function buildDeps() {
   const children: FakeChild[] = [];
   const audioRelay = {
     attach: jest.fn(),
+    attachTap: jest.fn(),
     switchTrack: jest.fn(() => {
       const child = fakeChild();
       children.push(child);
@@ -44,7 +45,7 @@ function buildDeps() {
     close: jest.fn(),
   };
   const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
-  const encoderChild = { videoPipe: {}, audioPipe: {} };
+  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {} };
   const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const deps: any = {
     library, queue,
@@ -71,6 +72,36 @@ describe('StreamController', () => {
     // string — see the timer-specific tests further down for the non-null case.
     expect(canvasFeeder.render).toHaveBeenCalledWith(overlayFor(track('a')), null);
     expect(controller.status().state).toBe('streaming');
+  });
+
+  it('start() does nothing pulse-related when the deps have no createPulseVisualizer (no equalizer element)', async () => {
+    const { deps } = buildDeps();
+    const controller = new StreamController(deps);
+    await expect(controller.start()).resolves.toBeUndefined();
+  });
+
+  it('start() creates and attaches a PulseVisualizer, and taps its audioSink into the audio relay, when createPulseVisualizer is provided', async () => {
+    const { deps, encoderChild, audioRelay } = buildDeps();
+    const pulseVisualizer = { attach: jest.fn(), audioSink: {}, close: jest.fn() };
+    deps.createPulseVisualizer = jest.fn().mockReturnValue(pulseVisualizer);
+    const controller = new StreamController(deps);
+
+    await controller.start();
+
+    expect(pulseVisualizer.attach).toHaveBeenCalledWith(encoderChild.pulsePipe);
+    expect(audioRelay.attachTap).toHaveBeenCalledWith(pulseVisualizer.audioSink);
+  });
+
+  it('stop() closes the PulseVisualizer when one was created', async () => {
+    const { deps } = buildDeps();
+    const pulseVisualizer = { attach: jest.fn(), audioSink: {}, close: jest.fn() };
+    deps.createPulseVisualizer = jest.fn().mockReturnValue(pulseVisualizer);
+    const controller = new StreamController(deps);
+    await controller.start();
+
+    controller.stop();
+
+    expect(pulseVisualizer.close).toHaveBeenCalled();
   });
 
   it('start() throws 409 when already streaming', async () => {

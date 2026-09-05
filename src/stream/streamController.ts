@@ -3,6 +3,7 @@ import { Track } from '../playlist/types';
 import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
 import { AudioRelay } from '../ffmpeg/audioRelay';
 import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
+import { PulseVisualizer } from '../ffmpeg/pulseVisualizer';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { formatDuration } from '../ffmpeg/overlayText';
 import { ApiError } from '../errors';
@@ -19,6 +20,7 @@ export interface StreamControllerDeps {
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: () => PersistentEncoder;
+  createPulseVisualizer?: () => PulseVisualizer;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
   onError?: () => void;
   onStatusChanged?: () => void;
@@ -28,6 +30,7 @@ export class StreamController {
   private state: SessionState = 'idle';
   private canvasFeeder: CanvasFeeder | null = null;
   private audioRelay: AudioRelay | null = null;
+  private pulseVisualizer: PulseVisualizer | null = null;
   private encoder: PersistentEncoder | null = null;
   private trackStartedAt: number | null = null;
   // The elapsed-seconds baseline in effect for the CURRENT feedCurrentTrack() call — 0 for a
@@ -65,6 +68,11 @@ export class StreamController {
     this.canvasFeeder.attach(child.videoPipe);
     this.audioRelay = this.deps.createAudioRelay();
     this.audioRelay.attach(child.audioPipe);
+    if (this.deps.createPulseVisualizer) {
+      this.pulseVisualizer = this.deps.createPulseVisualizer();
+      this.pulseVisualizer.attach(child.pulsePipe);
+      this.audioRelay.attachTap(this.pulseVisualizer.audioSink);
+    }
     this.pausedElapsedSeconds = 0;
     this.trackStartedAt = null;
 
@@ -203,9 +211,11 @@ export class StreamController {
     this.stopTimerTicker();
     this.audioRelay?.close();
     this.canvasFeeder?.close();
+    this.pulseVisualizer?.close();
     this.encoder?.stop();
     this.audioRelay = null;
     this.canvasFeeder = null;
+    this.pulseVisualizer = null;
     this.encoder = null;
     this.trackStartedAt = null;
     this.trackStartOffsetSeconds = 0;
