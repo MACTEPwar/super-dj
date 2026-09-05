@@ -3,7 +3,6 @@ export interface EqualizerConfig {
   y: number;
   width: number;
   height: number;
-  color: string;
 }
 
 // A single animated (multi-frame) image asset used by an 'image' template element. Composited
@@ -36,6 +35,7 @@ export function buildPersistentEncoderArgs(params: {
   gifOverlays?: GifOverlayConfig[];
 }): string[] {
   const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [] } = params;
+  const pulseInputIndex = 3 + gifOverlays.length;
   const inputs = [
     // yuva420p, not yuv420p: this pipe used to carry an opaque frame (CanvasFeeder flattened the
     // background into it before every write), which meant nothing composited "under" [0:v] in
@@ -61,6 +61,12 @@ export function buildPersistentEncoderArgs(params: {
     // becomes input 3, 4, 5... in array order — the filter graph below references these indices
     // directly.
     ...gifOverlays.flatMap((g) => ['-i', g.filePath]),
+    // Present only when the template has an equalizer element — this is PulseVisualizer's own
+    // continuously-fed pipe (raw RGBA straight-alpha, unpremultiplied in Node — see
+    // PulseVisualizer/unpremultiply.ts and the design spec's alpha spike), not an ffmpeg-native
+    // filter like the earlier showfreqs MVP. Placed last, after every gif input, so adding it
+    // never renumbers the gif input indices above.
+    ...(equalizer ? ['-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${equalizer.width}x${equalizer.height}`, '-r', String(fps), '-i', 'pipe:5'] : []),
   ];
 
   const filterLines: string[] = [
@@ -106,34 +112,18 @@ export function buildPersistentEncoderArgs(params: {
   // and a real deployed template).
   filterLines.push(`[${videoPad}][vcanvas]overlay=0:0[vcanvas_top]`);
   videoPad = 'vcanvas_top';
-  let audioMapping = ['-map', '1:a'];
 
   if (equalizer) {
-    // Present only when the template actually has an equalizer element — every existing
-    // template's args are completely unaffected. Splits the audio so the visualization branch
-    // never touches what actually gets encoded as the stream's real audio; showfreqs draws a
-    // transparent reactive spectrum (colorkey removes its own black background) which is then
-    // overlaid on top of the already-composited canvas video. See the design spec for why this
-    // is solid color / continuous-spectrum only for this MVP, and why it always renders above
-    // every other element (it's composited after the canvas is already flattened, not part of
-    // Satori's own element stacking).
-    // showfreqs' colors= is a pipe-separated list, one entry per input audio channel — pipe:4
-    // above is always declared stereo (-ac 2), so a single color must be repeated once per
-    // channel. Verified against a real ffmpeg binary: colors=<one color> against 2-channel
-    // input renders achromatic (SATAVG=0, every bar comes out white/gray, not the configured
-    // color) — showfreqs falls back to its own per-channel defaults for any channel past the
-    // first when the list is shorter than the channel count, and cmode's default "combined"
-    // overlay then desaturates the visible result. Repeating the same color for both channels
-    // restores the configured color.
-    const equalizerColors = `${equalizer.color}|${equalizer.color}`;
-    filterLines.push(`[1:a]asplit=2[a_out][a_viz]`);
-    filterLines.push(`[a_viz]showfreqs=s=${equalizer.width}x${equalizer.height}:mode=bar:rate=${fps}:colors=${equalizerColors},format=yuva420p,colorkey=black:0.1:0.1[eq]`);
-    filterLines.push(`[${videoPad}][eq]overlay=${equalizer.x}:${equalizer.y}[vout]`);
+    // format=yuva420p is the actual straight-alpha compositing conversion — the input is declared
+    // 'rgba' (straight alpha, thanks to PulseVisualizer's unpremultiply step), and this is the
+    // same conversion stage every other alpha-carrying branch in this graph already goes through
+    // (compare [0:v]'s own format=yuva420p above).
+    filterLines.push(`[${pulseInputIndex}:v]format=yuva420p[pulse]`);
+    filterLines.push(`[${videoPad}][pulse]overlay=${equalizer.x}:${equalizer.y}[vout]`);
     videoPad = 'vout';
-    audioMapping = ['-map', '[a_out]'];
   }
 
-  const mapping = ['-filter_complex', filterLines.join(';'), '-map', `[${videoPad}]`, ...audioMapping];
+  const mapping = ['-filter_complex', filterLines.join(';'), '-map', `[${videoPad}]`, '-map', '1:a'];
 
   return [
     ...inputs,

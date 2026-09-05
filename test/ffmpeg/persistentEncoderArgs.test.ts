@@ -41,28 +41,26 @@ describe('buildPersistentEncoderArgs', () => {
     expect(reIndex).toBeLessThan(pipe4Index);
   });
 
-  it('adds a filter_complex with asplit/showfreqs/overlay and maps [vout]/[a_out] when equalizer is present', () => {
+  it('adds a straight-alpha rawvideo pipe:5 input and overlays it on top of the canvas when an equalizer element is present', () => {
     const args = buildPersistentEncoderArgs({
       ...base,
-      equalizer: { x: 40, y: 500, width: 400, height: 150, color: '#ff6600' },
+      equalizer: { x: 40, y: 500, width: 400, height: 150 },
     });
-    const filterIndex = args.indexOf('-filter_complex');
-    expect(filterIndex).toBeGreaterThan(-1);
-    const filterArg = args[filterIndex + 1];
-    expect(filterArg).toContain('[1:a]asplit=2[a_out][a_viz]');
-    // colors= is a pipe-separated list, one entry per input audio channel — pipe:4 is always
-    // declared stereo (-ac 2), so a single color must be repeated once per channel or showfreqs
-    // renders the un-colored channel(s) in its own built-in defaults, desaturating the combined
-    // (overlaid) output. Verified against a real ffmpeg binary: a single `colors=#ff6600` against
-    // 2-channel input produced SATAVG=0 (fully achromatic); `colors=#ff6600|#ff6600` restored
-    // SATAVG≈44 (matching the mono/1-channel baseline).
-    expect(filterArg).toContain('showfreqs=s=400x150:mode=bar:rate=30:colors=#ff6600|#ff6600');
-    // The equalizer is always the LAST (topmost) compositing stage — above the background, any
-    // gif overlays, AND the canvas itself (CLAUDE.md documents it as always rendering above
-    // every other element, composited after the canvas is already flattened).
-    expect(filterArg).toContain('[vcanvas_top][eq]overlay=40:500[vout]');
-    expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '[a_out]']));
-    expect(args).not.toEqual(expect.arrayContaining(['-map', '1:a']));
+
+    // PulseVisualizer (Node) renders and unpremultiplies this frame itself — there is no more
+    // ffmpeg-native showfreqs/asplit branch; ffmpeg's only job for this element is to composite
+    // an already-rendered straight-alpha RGBA frame, same as any other overlay.
+    expect(args).toEqual(expect.arrayContaining([
+      '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', '400x150', '-r', '30', '-i', 'pipe:5',
+    ]));
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('[3:v]format=yuva420p[pulse]');
+    expect(filterArg).toContain('[vcanvas_top][pulse]overlay=40:500[vout]');
+    expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '1:a']));
+    // No more audio split for visualization — ffmpeg never touches the audio for this element any
+    // more (PulseVisualizer taps AudioRelay's PCM directly in Node instead).
+    expect(filterArg).not.toContain('asplit');
+    expect(args).not.toEqual(expect.arrayContaining(['-map', '[a_out]']));
   });
 
   // Root cause (verified against a real ffmpeg binary, not just asserted from the string shape):
@@ -79,7 +77,7 @@ describe('buildPersistentEncoderArgs', () => {
   it('upsamples the canvas video to the target fps before compositing it, so the equalizer isn\'t bottlenecked by the canvas heartbeat rate', () => {
     const args = buildPersistentEncoderArgs({
       ...base,
-      equalizer: { x: 40, y: 500, width: 400, height: 150, color: '#ffffff' },
+      equalizer: { x: 40, y: 500, width: 400, height: 150 },
     });
     const filterArg = args[args.indexOf('-filter_complex') + 1];
     expect(filterArg).toContain('[0:v]fps=30,format=yuva420p[vcanvas]');
@@ -134,18 +132,22 @@ describe('buildPersistentEncoderArgs', () => {
   // element out into a native ffmpeg overlay branch must not change where non-gif elements land
   // in the stack — verified against a real ffmpeg binary: without this, a full-frame background
   // gif visually hid title/playlist text that should have stayed on top of it.
-  it('composites the canvas on top of the background and every gif overlay, and the equalizer on top of that', () => {
+  it('places the pulse input after every gif input, so adding an equalizer never renumbers the gif inputs', () => {
     const args = buildPersistentEncoderArgs({
       ...base,
-      equalizer: { x: 40, y: 500, width: 400, height: 150, color: '#ff6600' },
+      equalizer: { x: 40, y: 500, width: 400, height: 150 },
       gifOverlays: [{ x: 900, y: 40, width: 150, height: 150, filePath: '/cover.gif', frameCount: 10 }],
     });
 
     const filterArg = args[args.indexOf('-filter_complex') + 1];
+    // gif input is still index 3 (unchanged from the no-equalizer gif test above) — the pulse
+    // input is appended after it, at index 4, not inserted before it.
+    expect(filterArg).toContain('[3:v]loop=loop=-1:size=10,fps=30,scale=150:150[gif0]');
     expect(filterArg).toContain('[vbg][gif0]overlay=900:40[vgif0]');
     expect(filterArg).toContain('[vgif0][vcanvas]overlay=0:0[vcanvas_top]');
-    expect(filterArg).toContain('[vcanvas_top][eq]overlay=40:500[vout]');
-    expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '[a_out]']));
+    expect(filterArg).toContain('[4:v]format=yuva420p[pulse]');
+    expect(filterArg).toContain('[vcanvas_top][pulse]overlay=40:500[vout]');
+    expect(args).toEqual(expect.arrayContaining(['-i', '/cover.gif', '-i', 'pipe:5']));
   });
 
   it('is byte-for-byte identical to the no-equalizer output when equalizer is omitted vs. explicitly undefined', () => {
