@@ -86,4 +86,37 @@ describe('PulseVisualizer', () => {
     const sink = visualizer.audioSink;
     expect(() => sink.write(Buffer.alloc(2048 * 2 * 2))).not.toThrow();
   });
+
+  // Real templates saved before colors[]/glowLayers/glowRadius/coreWidth existed still carry the
+  // old {color: string} shape in the database — normalizeEqualizerElement (templateTypes.ts) is
+  // the actual fix, but this is defense in depth against ANY future way `tick()` could throw:
+  // a bare setInterval callback has nothing to catch a synchronous throw, which would otherwise
+  // kill the whole process (every tenant's active stream), not just log an error.
+  it('does not let a synchronous render-input error (e.g. missing colors) escape the tick and crash the process', async () => {
+    const { visualizer } = buildVisualizer({
+      fps: 10,
+      // Simulates exactly what an unnormalized legacy equalizer element produces at runtime,
+      // despite the type saying `colors: string[]`.
+      colors: undefined as unknown as string[],
+    });
+    const pipe = new PassThrough();
+    visualizer.attach(pipe);
+
+    expect(() => jest.advanceTimersByTime(100)).not.toThrow();
+    await expect(Promise.resolve()).resolves.toBeUndefined();
+  });
+
+  it('audioSink does not throw on a chunk whose accumulated length lands on an odd byte offset', () => {
+    const { visualizer } = buildVisualizer();
+    const sink = visualizer.audioSink;
+    // Fills the window, then feeds a single odd-length byte on top — the exact shape that used to
+    // throw a RangeError constructing an Int16Array at an odd byteOffset (Node requires an even
+    // one), crashing the whole process since a Writable's `_write` throw becomes an unlistened
+    // 'error' event.
+    expect(() => {
+      sink.write(Buffer.alloc(2048 * 2 * 2));
+      sink.write(Buffer.alloc(1));
+      sink.write(Buffer.alloc(2048 * 2 * 2));
+    }).not.toThrow();
+  });
 });

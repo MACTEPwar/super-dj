@@ -53,13 +53,33 @@ export class PulseVisualizer {
     let carry = Buffer.alloc(0);
     this.sink = new Writable({
       write: (chunk: Buffer, _enc, callback) => {
-        carry = Buffer.concat([carry, chunk]);
-        if (carry.length > PCM_WINDOW_BYTES) carry = carry.subarray(carry.length - PCM_WINDOW_BYTES);
-        if (carry.length === PCM_WINDOW_BYTES) {
-          this.pcmWindow = new Int16Array(carry.buffer, carry.byteOffset, PCM_WINDOW_SAMPLES * 2);
+        try {
+          carry = Buffer.concat([carry, chunk]);
+          if (carry.length > PCM_WINDOW_BYTES) {
+            // Trimmed to a 4-byte (stereo s16le frame) boundary — reads off the OS pipe arrive in
+            // arbitrary byte counts, not necessarily frame-aligned, so this keeps channel phase
+            // consistent rather than drifting by 1-3 bytes on an unlucky chunk size.
+            const overflow = carry.length - PCM_WINDOW_BYTES;
+            carry = carry.subarray(overflow - (overflow % 4));
+          }
+          if (carry.length >= PCM_WINDOW_BYTES) {
+            // Copied into an owned, zero-offset buffer rather than aliasing carry's own memory:
+            // carry.byteOffset (after subarray()) isn't guaranteed even, and Int16Array's
+            // constructor throws a RangeError on an odd byteOffset — reproduced crashing the
+            // whole process via exactly this path (an uncaught exception in a stream's `_write`
+            // has no listener to catch it, unlike a normal thrown/rejected error elsewhere).
+            const window = Buffer.allocUnsafe(PCM_WINDOW_BYTES);
+            carry.copy(window, 0, carry.length - PCM_WINDOW_BYTES);
+            this.pcmWindow = new Int16Array(window.buffer, window.byteOffset, PCM_WINDOW_SAMPLES * 2);
+          }
+        } catch (err) {
+          console.error('pulse audio tap failed to process a PCM chunk, spectrum stays stale', err);
         }
         callback();
       },
+    });
+    this.sink.on('error', (err) => {
+      console.error('pulse audio tap stream errored, spectrum stays stale', err);
     });
   }
 
@@ -94,6 +114,18 @@ export class PulseVisualizer {
   }
 
   private tick(): void {
+    try {
+      this.tickUnsafe();
+    } catch (err) {
+      // A bare setInterval callback: an uncaught synchronous throw here has nothing to catch it
+      // and kills the whole process — every tenant's active stream, not just this one. Defense in
+      // depth on top of normalizeEqualizerElement (templateTypes.ts), which is the actual fix for
+      // the one concrete way this used to throw (a legacy template element with no colors[]).
+      console.error('pulse visualizer tick failed, resending the last good frame', err);
+    }
+  }
+
+  private tickUnsafe(): void {
     // A render is already in flight — resend the last completed frame instead of overlapping a
     // second one, the same backpressure discipline CanvasFeeder's heartbeat uses.
     if (this.rendering) {

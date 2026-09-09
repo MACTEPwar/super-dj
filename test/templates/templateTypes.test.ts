@@ -1,4 +1,5 @@
-import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, isValidColorValue } from '../../src/templates/templateTypes';
+import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, isValidColorValue, normalizeEqualizerElement } from '../../src/templates/templateTypes';
+import type { EqualizerElement } from '../../src/templates/templateTypes';
 
 describe('isValidTemplateElement', () => {
   const baseStyle = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
@@ -331,5 +332,34 @@ describe('isValidTemplateElement — equalizer', () => {
 
   it('rejects an equalizer with a non-integer y', () => {
     expect(isValidTemplateElement({ ...validEqualizer, y: 10.5 })).toBe(false);
+  });
+});
+
+describe('normalizeEqualizerElement', () => {
+  it('returns an already-valid equalizer element unchanged', () => {
+    const el: EqualizerElement = {
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
+      colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 30, coreWidth: 2,
+    };
+    expect(normalizeEqualizerElement(el)).toEqual(el);
+  });
+
+  it('fills in the default neon-pulse style for a legacy MVP-shaped element (bare color string, no colors[])', () => {
+    // The real pre-neon-pulse showfreqs MVP shape — still sitting in real saved templates.
+    const legacy = { type: 'equalizer', x: 44, y: 435, width: 861, height: 163, color: '#ec875b' } as unknown as EqualizerElement;
+    const result = normalizeEqualizerElement(legacy);
+    expect(result).not.toBeNull();
+    expect(result!.x).toBe(44);
+    expect(result!.y).toBe(435);
+    expect(result!.width).toBe(861);
+    expect(result!.height).toBe(163);
+    expect(Array.isArray(result!.colors)).toBe(true);
+    expect(result!.colors.length).toBeGreaterThanOrEqual(2);
+    expect(isValidTemplateElement(result)).toBe(true);
+  });
+
+  it('drops the element when even the default style cannot make it valid (a corrupt position)', () => {
+    const corrupt = { type: 'equalizer', x: -1, y: 10, width: 400, height: 150 } as unknown as EqualizerElement;
+    expect(normalizeEqualizerElement(corrupt)).toBeNull();
   });
 });

@@ -9,6 +9,16 @@ jest.mock('../../src/ffmpeg/imageFrameCount', () => ({
 jest.mock('../../src/render/renderOverlay', () => ({
   renderTemplatePng: jest.fn().mockResolvedValue(Buffer.from('fake-png')),
 }));
+// Wraps (never replaces) the real PulseVisualizer so every existing behavior/test in this file is
+// unaffected, while letting a test assert on what StreamManager actually constructed it with —
+// the only way to observe whether an equalizer element's style was normalized before reaching it.
+jest.mock('../../src/ffmpeg/pulseVisualizer', () => {
+  const actual = jest.requireActual('../../src/ffmpeg/pulseVisualizer');
+  return {
+    ...actual,
+    PulseVisualizer: jest.fn().mockImplementation((opts) => new actual.PulseVisualizer(opts)),
+  };
+});
 
 import { PassThrough } from 'stream';
 import { StreamManager } from '../../src/stream/streamManager';
@@ -17,6 +27,7 @@ import { renderTemplatePng } from '../../src/render/renderOverlay';
 import { getImageFrameCount } from '../../src/ffmpeg/imageFrameCount';
 import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
 import { PlaylistQueue } from '../../src/playlist/queue';
+import { PulseVisualizer } from '../../src/ffmpeg/pulseVisualizer';
 
 // Captures whatever listener a real ffmpeg-wrapping class (CanvasFeeder/AudioRelay/
 // PersistentEncoder — StreamManager wires the real ones, not fakes, in this integration-level
@@ -374,6 +385,36 @@ describe('StreamManager', () => {
       expect(producerCall![1]).toEqual(expect.arrayContaining(['-s', '401x151']));
       const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
       expect(filterComplex).toContain('overlay=20:31');
+    });
+
+    it('starts successfully with a legacy MVP-shaped equalizer element (bare color string, no colors[]) instead of crashing', async () => {
+      // Real templates saved before the neon-pulse rework still carry this exact shape in the
+      // database — nothing re-validates stored elements on read, only on write (see
+      // normalizeEqualizerElement in templateTypes.ts, which this exercises end to end).
+      const { deps, templateRepository, pipeSpawner } = buildDeps();
+      const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+      const legacyEqualizerEl = { type: 'equalizer', x: 20, y: 30, width: 200, height: 100, color: '#ec875b' };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl, legacyEqualizerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await expect(manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' })).resolves.toBeUndefined();
+
+      const producerCall = (pipeSpawner as jest.Mock).mock.calls.find((call) => call[1].includes('-filter_complex'));
+      expect(producerCall).toBeDefined();
+      expect(producerCall![1]).toEqual(expect.arrayContaining(['-i', 'pipe:5']));
+
+      // The real regression: without normalization, PulseVisualizer is constructed with
+      // colors/glowLayers/glowRadius/coreWidth all undefined, which crashes the whole process on
+      // its first render tick (buildPulseSvg's colors.map on undefined) — not observable via the
+      // pipe args above, since that crash only happens later, asynchronously, on a timer this
+      // synchronous test never advances to. Assert directly on what StreamManager constructed it
+      // with instead.
+      expect(PulseVisualizer).toHaveBeenCalledWith(expect.objectContaining({
+        colors: expect.arrayContaining([expect.stringMatching(/^#/)]),
+        glowLayers: expect.any(Number),
+        glowRadius: expect.any(Number),
+        coreWidth: expect.any(Number),
+      }));
     });
 
     it('passes no equalizer field when the template has none, still composites background+canvas but with no pulse pipe', async () => {

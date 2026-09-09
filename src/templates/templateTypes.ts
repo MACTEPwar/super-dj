@@ -167,6 +167,19 @@ function isValidEqualizerColors(value: unknown): value is string[] {
     && value.every((c) => isValidColor(c));
 }
 
+// Just the style fields (colors/glowLayers/glowRadius/coreWidth) — split out from
+// isValidTemplateElement's equalizer branch so normalizeEqualizerElement (below) can check style
+// validity independently of position/size, which it deliberately does NOT re-validate the same
+// strict (integer) way: a fractional x/y/width/height is StreamManager's concern to round, not
+// this function's to reject.
+function isValidEqualizerStyle(el: Record<string, unknown>): boolean {
+  return isValidEqualizerColors(el.colors)
+    && isFiniteNumber(el.glowLayers) && Number.isInteger(el.glowLayers)
+    && el.glowLayers >= MIN_GLOW_LAYERS && el.glowLayers <= MAX_GLOW_LAYERS
+    && isFiniteNumber(el.glowRadius) && el.glowRadius >= MIN_GLOW_RADIUS && el.glowRadius <= MAX_GLOW_RADIUS
+    && isFiniteNumber(el.coreWidth) && el.coreWidth >= MIN_CORE_WIDTH && el.coreWidth <= MAX_CORE_WIDTH;
+}
+
 // Exported (not module-private) — Task 8's Track.overlayOverride validation reuses this
 // exact function rather than re-implementing gradient/solid validation a second time.
 export function isValidColorValue(value: unknown): value is ColorValue {
@@ -234,11 +247,7 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
     return Number.isInteger(el.x) && Number.isInteger(el.y)
       && isValidSize(el.width, CANVAS_WIDTH) && Number.isInteger(el.width)
       && isValidSize(el.height, CANVAS_HEIGHT) && Number.isInteger(el.height)
-      && isValidEqualizerColors(el.colors)
-      && isFiniteNumber(el.glowLayers) && Number.isInteger(el.glowLayers)
-      && el.glowLayers >= MIN_GLOW_LAYERS && el.glowLayers <= MAX_GLOW_LAYERS
-      && isFiniteNumber(el.glowRadius) && el.glowRadius >= MIN_GLOW_RADIUS && el.glowRadius <= MAX_GLOW_RADIUS
-      && isFiniteNumber(el.coreWidth) && el.coreWidth >= MIN_CORE_WIDTH && el.coreWidth <= MAX_CORE_WIDTH;
+      && isValidEqualizerStyle(el);
   }
   if (el.type === 'text') {
     if (typeof el.text !== 'string' || el.text.length === 0 || el.text.length > MAX_TEXT_LENGTH) return false;
@@ -252,6 +261,36 @@ export function isValidTemplateElement(value: unknown): value is TemplateElement
 
 export function isValidTemplateElements(value: unknown): value is TemplateElement[] {
   return Array.isArray(value) && value.every(isValidTemplateElement);
+}
+
+// A template's equalizer element saved before colors[]/glowLayers/glowRadius/coreWidth existed
+// (the old {color: string} showfreqs-MVP shape) can still sit in the database exactly as saved —
+// nothing re-validates a stored template's elements on read, only on write (see templateRoutes.ts).
+// Used as-is, this crashes StreamManager's whole process on the element's first render tick
+// (PulseVisualizer's buildPulseSvg does colors.map(...) on undefined, inside a bare setInterval
+// callback with nothing to catch it) — reproduced against a real deployed template. Patching in
+// the approved default style keeps the element's position/size exactly as saved (still
+// StreamManager's job to round to integers — see its own EqualizerConfig comment — not
+// re-validated the strict way here) while replacing only the missing/invalid style fields; falls
+// back to dropping the element entirely when even the position/size is unusable (e.g. negative or
+// out-of-canvas), the same "skip just the broken element" policy StreamManager's own
+// resolveImageAssets already uses for a malformed image element.
+export function normalizeEqualizerElement(element: EqualizerElement): EqualizerElement | null {
+  if (!isValidPosition(element.x, element.y)
+    || !isValidSize(element.width, CANVAS_WIDTH) || !isValidSize(element.height, CANVAS_HEIGHT)) {
+    console.warn('[templates] dropping a template equalizer element with an invalid position/size');
+    return null;
+  }
+  if (isValidEqualizerStyle(element as unknown as Record<string, unknown>)) return element;
+  return {
+    ...element,
+    // Spread a fresh mutable array rather than DEFAULT_EQUALIZER_STYLE.colors directly — it's a
+    // readonly tuple (`as const`), not assignable to EqualizerElement's `colors: string[]`.
+    colors: [...DEFAULT_EQUALIZER_STYLE.colors],
+    glowLayers: DEFAULT_EQUALIZER_STYLE.glowLayers,
+    glowRadius: DEFAULT_EQUALIZER_STYLE.glowRadius,
+    coreWidth: DEFAULT_EQUALIZER_STYLE.coreWidth,
+  };
 }
 
 // Used whenever a stream starts without an explicit templateId (it's optional — see

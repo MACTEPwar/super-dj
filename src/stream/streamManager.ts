@@ -20,7 +20,7 @@ import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
 import { TemplateImageService, InvalidAssetIdError } from '../templates/templateImageService';
-import { TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS } from '../templates/templateTypes';
+import { TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS, normalizeEqualizerElement } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 import { SessionOverlayCache } from './sessionOverlayCache';
@@ -203,7 +203,13 @@ export class StreamManager extends EventEmitter {
       const overlayImagePath = path.join(this.deps.fifoDir, `super-dj-overlay-${destinationId}.png`);
 
       const timerElement = templateElements.find((e): e is TimerElement => e.type === 'timer') ?? null;
-      const equalizerElement = templateElements.find((e): e is EqualizerElement => e.type === 'equalizer') ?? null;
+      const rawEqualizerElement = templateElements.find((e): e is EqualizerElement => e.type === 'equalizer') ?? null;
+      // A template saved before colors[]/glowLayers/glowRadius/coreWidth existed can still carry
+      // the old {color: string} shape in the database — nothing re-validates a stored template's
+      // elements on read, only on write. Used as-is this crashes the whole process on the
+      // element's first render tick; normalizeEqualizerElement patches in the default style (or
+      // drops the element) instead. See its own doc comment in templateTypes.ts.
+      const equalizerElement = rawEqualizerElement ? normalizeEqualizerElement(rawEqualizerElement) : null;
 
       // A multi-frame (animated) image can't be rendered by Satori/resvg — resvg decodes a GIF
       // to exactly one static frame, since SVG has no concept of an animated raster embed (see
