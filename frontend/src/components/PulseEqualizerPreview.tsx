@@ -10,6 +10,8 @@ interface PulseEqualizerPreviewProps {
 }
 
 const BAND_COUNT = 56;
+const BEAT_GAP_MIN_SECONDS = 0.35;
+const BEAT_GAP_RANGE_SECONDS = 0.3;
 
 interface Pulse {
   band: number;
@@ -54,16 +56,29 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
 
     let pulses: Pulse[] = [];
     let beatTimer = 0;
+    let previousBeatStrength = 0;
     let lastT = 0;
     let raf = 0;
     let running = true;
 
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
-    function spawnBeat(band: number, t: number) {
-      const sign = Math.random() < 0.5 ? 1 : -1;
-      pulses.push({ band, amplitude: sign, spread: 1.3, attack: 0.03, decay: 0.09, startedAt: t });
-      pulses.push({ band: band + (Math.random() - 0.5) * 1.3, amplitude: -sign * 0.4, spread: 1.17, attack: 0.02, decay: 0.1, startedAt: t + 0.1 });
+    // The same deterministic shape rules PulseEngine.spawnBeat uses server-side (see
+    // src/audio/pulseEngine.ts for the full reasoning): a beat that hits harder than the previous
+    // one spikes up and a softer one spikes down, while the beat's own strength sets the spike's
+    // height and pushes the trailing notch off-band. Nothing here is a coin flip any more — that
+    // is what made the live element read as moving in "random parts" rather than with the music.
+    // There is of course no real spectrum in the editor to measure a strength against (see this
+    // file's header comment), so the preview feeds those rules the closest synthetic analogue it
+    // has: how long the gap before this beat was, on the same 0..1 scale. The gap (and which band
+    // beats) stays randomly scheduled — that is this preview's long-documented stand-in for audio
+    // it has never had, not the bug that was fixed server-side — so no new randomness is added.
+    function spawnBeat(band: number, t: number, strength: number) {
+      const harderThanLastBeat = strength >= previousBeatStrength;
+      previousBeatStrength = strength;
+      const amplitude = (harderThanLastBeat ? 1 : -1) * (0.8 + 0.4 * strength);
+      pulses.push({ band, amplitude, spread: 1.3, attack: 0.03, decay: 0.09, startedAt: t });
+      pulses.push({ band: band + (strength - 0.5) * 1.3, amplitude: -amplitude * 0.4, spread: 1.17, attack: 0.02, decay: 0.1, startedAt: t + 0.1 });
     }
 
     function draw(tMs: number) {
@@ -73,8 +88,9 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
 
       beatTimer -= dt;
       if (beatTimer <= 0) {
-        beatTimer = 0.35 + Math.random() * 0.3;
-        spawnBeat(Math.floor(Math.random() * BAND_COUNT), t);
+        const gapSeconds = BEAT_GAP_MIN_SECONDS + Math.random() * BEAT_GAP_RANGE_SECONDS;
+        beatTimer = gapSeconds;
+        spawnBeat(Math.floor(Math.random() * BAND_COUNT), t, (gapSeconds - BEAT_GAP_MIN_SECONDS) / BEAT_GAP_RANGE_SECONDS);
       }
       pulses = pulses.filter((p) => t - p.startedAt < p.attack + p.decay * 6);
 
