@@ -251,7 +251,8 @@
     "startButton_many": "Начать трансляцию на {{count}} направлений",
     "startButton_other": "Начать трансляцию на {{count}} направления",
     "starting": "Запуск…",
-    "failed": "Не удалось начать трансляцию"
+    "failed": "Не удалось начать трансляцию",
+    "destinationFailed": "{{name}}: не удалось запустить — {{error}}"
   },
   "streamSessionPanel": {
     "titlePrefix": "Трансляция: {{name}}",

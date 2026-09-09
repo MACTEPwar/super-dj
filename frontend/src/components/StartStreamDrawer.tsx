@@ -2,10 +2,11 @@ import { FormEvent, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { playlistsApi } from '../api/playlists';
 import { destinationsApi } from '../api/destinations';
 import { templatesApi } from '../api/templates';
-import { streamSessionsApi } from '../api/streamSessions';
+import { streamSessionsApi, StreamSessionStatus } from '../api/streamSessions';
 import { ApiError } from '../api/client';
 import { Drawer } from './Drawer';
 
@@ -43,9 +44,21 @@ export function StartStreamDrawer({ open, onOpenChange }: StartStreamDrawerProps
       privacyStatus: hasYoutubeDestination ? privacyStatus : undefined,
       latencyPreference: hasYoutubeDestination ? latencyPreference : undefined,
     }),
-    onSuccess: (session) => {
+    // POST /stream-sessions always resolves 200 even when a destination fails to start (e.g. a
+    // revoked YouTube OAuth token) — the fan-out orchestrator (streamSessionManager.ts) puts each
+    // failure's message on that destination's own `error` field instead of rejecting the whole
+    // request, precisely so one bad destination doesn't block the others from going live. Without
+    // this check, that message never surfaces anywhere: the panel page this navigates to does its
+    // own fresh status fetch, which carries no `error` field at all (only the create/pause/resume/
+    // next/previous/stop responses do), and closing the drawer discards this one silently.
+    onSuccess: (session: StreamSessionStatus) => {
       onOpenChange(false);
       navigate(`/streams/${session.id}`);
+      for (const destination of session.destinations) {
+        if (!destination.error) continue;
+        const name = destinationsQuery.data?.find((d) => d.id === destination.destinationId)?.name ?? destination.destinationId;
+        toast.error(t('startStreamDrawer.destinationFailed', { name, error: destination.error }));
+      }
     },
     onError: (err) => setFormError(err instanceof ApiError ? err.message : t('startStreamDrawer.failed')),
   });

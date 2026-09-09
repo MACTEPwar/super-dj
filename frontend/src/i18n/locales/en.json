@@ -249,7 +249,8 @@
     "startButton_one": "Start stream on {{count}} destination",
     "startButton_other": "Start stream on {{count}} destinations",
     "starting": "Starting…",
-    "failed": "Failed to start stream"
+    "failed": "Failed to start stream",
+    "destinationFailed": "{{name}} failed to start: {{error}}"
   },
   "streamSessionPanel": {
     "titlePrefix": "Stream: {{name}}",
