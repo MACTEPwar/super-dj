@@ -31,13 +31,31 @@ export const EDGE_CLEARANCE_PX = 3;
 // The outermost layer widthsFor draws is `glowRadius + GLOW_LAYER_PAD` wide (its `+ 0.4` floor,
 // which also keeps the innermost, zero-radius layer from vanishing).
 const GLOW_LAYER_PAD = 0.4;
-// The most of its smaller side a box can give away to margin on each edge and still have an
-// amplitude worth drawing a line into.
-const MAX_MARGIN_SHARE = 4;
+
+/**
+ * The engine's value range is one-directional (`v` in `[0, MAX_VALUE]`, pushing the line UP from
+ * a resting baseline, never down — see `pulseEngine.ts`), and `globalPulse` routinely pins many
+ * bands to that same ceiling at once. A margin sized only to clear the stroke itself (the old
+ * `EDGE_CLEARANCE_PX`-flat rule) put the loudest value's flat plateau right at the thinnest
+ * possible inset from the top edge — reading as clipping even though nothing was technically
+ * drawn past the box. This is the extra share of the glow's own half-width kept as additional
+ * empty space between its hard outer edge and the top/bottom edges, so the margin scales with how
+ * wide the glow actually is rather than staying a flat few px regardless.
+ */
+const EDGE_CLEARANCE_SHARE = 0.75;
+
+/**
+ * The smallest share of the box height the drawable amplitude (the line's actual travel) may be
+ * shrunk to, no matter how aggressively the configured glow would otherwise demand the vertical
+ * margin grow. Without this a wide, tall glow on a short box could eat the entire box as margin
+ * before ever shrinking itself.
+ */
+const MIN_AMPLITUDE_SHARE = 0.45;
 
 /** The inset, and the stroke widths, one element's box actually gets — see pulseGeometry. */
 export interface PulseGeometry {
-  margin: number;
+  sideMargin: number;
+  verticalMargin: number;
   glowRadius: number;
   coreWidth: number;
 }
@@ -48,60 +66,103 @@ export interface PulseGeometry {
  * buildPulseSvg (for the stroke widths).
  *
  * That sharing is the point. They used to derive their geometry independently: the layout capped
- * its inset at a quarter of the box's smaller side when the configured glow was too wide to fit,
- * but the renderer went on drawing that glow at its full configured width — so a box that could
- * not hold its glow got the brightest layers painted straight onto its outermost rows and
- * columns. Verified on real resvg rasters before this fix: alpha 13-27 on row 0 and on both
- * outermost columns for a 1280x120 bar at glowRadius 70, and for a 600x60 bar at the default
- * glowRadius 42 — both entirely ordinary element sizes (the visual editor's own default new
- * element is 400x150, and the default style's 42px glow stops fitting below 92px of height).
+ * its inset when the configured glow was too wide to fit, but the renderer went on drawing that
+ * glow at its full configured width — so a box that could not hold its glow got the brightest
+ * layers painted straight onto its outermost rows and columns. Verified on real resvg rasters
+ * before that fix: alpha 13-27 on row 0 and on both outermost columns for a 1280x120 bar at
+ * glowRadius 70, and for a 600x60 bar at the default glowRadius 42 — both entirely ordinary
+ * element sizes (the visual editor's own default new element is 400x150, and the default style's
+ * 42px glow stops fitting below 92px of height).
  *
  * So when the configured glow doesn't fit, the STROKES shrink to what the box can hold rather
- * than being drawn at full width and chopped at the edge by the rasterizer. Every box at least
- * 4 * (EDGE_CLEARANCE_PX + 1) px on its smaller side keeps the full clearance; below that (a
- * degenerate element no editor produces) the line degrades to a hairline instead.
+ * than being drawn at full width and chopped at the edge by the rasterizer — solving for the
+ * largest half-stroke that satisfies both the vertical rule (keeps at least MIN_AMPLITUDE_SHARE
+ * of the height drawable) and the horizontal rule (unchanged: a quarter of the width, less the
+ * flat clearance). Below the degenerate sizes that pushes to zero (no editor produces these) the
+ * line degrades to a hairline instead.
  */
 export function pulseGeometry(style: PulseLayout): PulseGeometry {
-  const wanted = strokeMarginPx(style);
-  const maxMargin = Math.floor(Math.min(style.width, style.height) / MAX_MARGIN_SHARE);
-  if (wanted <= maxMargin) return { margin: wanted, glowRadius: style.glowRadius, coreWidth: style.coreWidth };
-  const margin = Math.max(0, maxMargin);
+  const halfStroke = halfStrokePx(style);
+  // The largest half-stroke the box can hold while still keeping MIN_AMPLITUDE_SHARE of its
+  // height as drawable amplitude, and while still fitting the (unchanged) horizontal rule.
+  const halfStrokeFitV = (style.height * (1 - MIN_AMPLITUDE_SHARE) / 2 - EDGE_CLEARANCE_PX) / (1 + EDGE_CLEARANCE_SHARE);
+  const halfStrokeFitH = style.width / 4 - EDGE_CLEARANCE_PX;
+  const halfStrokeMax = Math.max(0, Math.min(halfStrokeFitV, halfStrokeFitH));
+  if (halfStroke <= halfStrokeMax) {
+    return {
+      sideMargin: sideMarginFor(halfStroke),
+      verticalMargin: verticalMarginFor(halfStroke),
+      glowRadius: style.glowRadius,
+      coreWidth: style.coreWidth,
+    };
+  }
   // The widest stroke this box can hold with the clearance intact. Round caps and joins reach
   // exactly half a stroke's width in every direction, so half of this is the drawn reach.
-  const widest = Math.max(0, 2 * (margin - EDGE_CLEARANCE_PX));
+  const widest = Math.max(0, 2 * halfStrokeMax);
   return {
-    margin,
+    sideMargin: sideMarginFor(halfStrokeMax),
+    verticalMargin: verticalMarginFor(halfStrokeMax),
     glowRadius: Math.max(0, widest - GLOW_LAYER_PAD),
     coreWidth: Math.min(style.coreWidth, widest),
   };
 }
 
 /**
- * The inset a configured style asks for: half of the widest stroke (the outermost glow layer,
- * `glowRadius + GLOW_LAYER_PAD` wide — see widthsFor — or the core if that is wider), plus
- * EDGE_CLEARANCE_PX. Whether the box can actually afford it is pulseGeometry's decision.
+ * Half of the widest stroke drawn (the outermost glow layer, `glowRadius + GLOW_LAYER_PAD` wide —
+ * see widthsFor — or the core if that is wider): how far past the polyline itself the drawn paint
+ * reaches on every side.
+ */
+function halfStrokePx(style: Pick<PulseStyle, 'glowRadius' | 'coreWidth'>): number {
+  return Math.max(style.glowRadius + GLOW_LAYER_PAD, style.coreWidth) / 2;
+}
+
+/** The left/right inset: the stroke's reach plus a flat clearance — unchanged from before. */
+function sideMarginFor(halfStroke: number): number {
+  return Math.ceil(halfStroke) + EDGE_CLEARANCE_PX;
+}
+
+/**
+ * The top/bottom inset: the stroke's reach plus a clearance that is itself a share of that
+ * reach — proportional, not flat, so a wide glow's hard edge stays visibly clear of the top/
+ * bottom edges instead of sitting the bare minimum away from them. See EDGE_CLEARANCE_SHARE.
+ */
+function verticalMarginFor(halfStroke: number): number {
+  return Math.ceil(halfStroke * (1 + EDGE_CLEARANCE_SHARE)) + EDGE_CLEARANCE_PX;
+}
+
+/**
+ * The inset a configured style asks for on the left/right: half of the widest stroke (the
+ * outermost glow layer, `glowRadius + GLOW_LAYER_PAD` wide — see widthsFor — or the core if that
+ * is wider), plus EDGE_CLEARANCE_PX. Whether the box can actually afford it is pulseGeometry's
+ * decision.
  */
 export function strokeMarginPx(style: Pick<PulseStyle, 'glowRadius' | 'coreWidth'>): number {
-  return Math.ceil(Math.max(style.glowRadius + GLOW_LAYER_PAD, style.coreWidth) / 2) + EDGE_CLEARANCE_PX;
+  return sideMarginFor(halfStrokePx(style));
 }
 
 /**
  * Maps the engine's per-band values (0..MAX_VALUE) onto polyline points inside the element's box.
- * The polyline is inset from every edge by pulseGeometry's margin so that the WHOLE stroke — the
- * glow included — lands inside [0, width] x [0, height] with EDGE_CLEARANCE_PX to spare: the
- * baseline sits at the vertical centre and the loudest value reaches exactly the top margin. The
- * original layout ran the line from x=0 to x=width and up to y=0 and let the strokes paint past
- * the canvas on every side, where the rasterizer chopped them flat at the box edge (a real
- * deployed stream showed the glow cut off at / reaching past the element's rectangle).
+ * The polyline is inset from the left/right edges by pulseGeometry's sideMargin and from the
+ * top/bottom by its verticalMargin, so that the WHOLE stroke — the glow included — lands inside
+ * [0, width] x [0, height] with real room to spare rather than the bare minimum.
+ *
+ * The engine's value range is one-directional (v in [0, MAX_VALUE], only ever pushing the line UP
+ * from a resting position, never down), so the layout is bottom-anchored, not centered: the
+ * baseline sits at `height - verticalMargin` and the loudest value reaches exactly the top margin.
+ * Centering the baseline (the original design) put the resting/silent line in the middle of the
+ * box while permanently leaving 30-50%+ of the box below it empty (v never goes negative) — bottom-
+ * anchoring reclaims that dead space as usable amplitude instead. This was a deliberate choice
+ * (over keeping the baseline centered with a smaller amplitude), made explicitly by the user
+ * during this fix's design.
  */
 export function layoutPulsePoints(values: readonly number[], style: PulseLayout): PulsePoint[] {
-  const { margin } = pulseGeometry(style);
+  const { sideMargin, verticalMargin } = pulseGeometry(style);
   const n = values.length;
-  const usableWidth = style.width - 2 * margin;
-  const baseline = style.height / 2;
-  const amplitude = baseline - margin;
+  const usableWidth = style.width - 2 * sideMargin;
+  const baseline = style.height - verticalMargin;
+  const amplitude = style.height - 2 * verticalMargin;
   return values.map((v, i) => ({
-    x: margin + (n > 1 ? i / (n - 1) : 0.5) * usableWidth,
+    x: sideMargin + (n > 1 ? i / (n - 1) : 0.5) * usableWidth,
     y: baseline - (Math.min(MAX_VALUE, Math.max(0, v)) / MAX_VALUE) * amplitude,
   }));
 }

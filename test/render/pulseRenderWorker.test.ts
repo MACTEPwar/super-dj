@@ -95,6 +95,38 @@ describe('renderPulseFrame (real resvg, no piscina)', () => {
     expect(result.pixels.length).toBe(400 * 150 * 4);
   });
 
+  // Regression guard for the top-clearance fix: the neon line used to be centre-anchored with a
+  // flat (non-glow-proportional) top margin, so a loud frame — many bands pinned to MAX_VALUE at
+  // once, which globalPulse routinely causes — put a long, hard-edged glow plateau just 3-4px
+  // from the top edge. The fix reworks the margin to scale with the glow's own half-width
+  // (EDGE_CLEARANCE_SHARE) and bottom-anchors the baseline (the engine's value range is
+  // one-directional, so centering wasted 30-50%+ of the box as permanently-empty space below the
+  // line). Verified here against the real rasterizer, not just the layout math, for one realistic
+  // and one extreme configuration.
+  it.each([
+    ['realistic: stock defaults, wide box', 1200, 160, 42, 1],
+    ['extreme: max configured glow on a short/wide box', 1280, 120, 70, 6],
+  ])('keeps real top clearance in the expected 8-21px range at max drive: %s', (_label, width, height, glowRadius, coreWidth) => {
+    const style = { width, height, colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'], glowLayers: 9, glowRadius, coreWidth };
+    // Most bands pinned to MAX_VALUE simultaneously, a few slightly under — the realistic worst
+    // case a real globalPulse hit produces (measured in the original investigation: 46-56/56
+    // bands pinned at once). NOT every band identical: an SVG gradient-stroked shape whose
+    // geometry has literally zero bounding-box extent (every point on one exact horizontal line)
+    // is left unpainted per the SVG spec ("a bounding box of zero width or height disables the
+    // paint server") — a real, separate, pre-existing resvg/SVG-spec edge case independent of
+    // this fix, found while writing this test and reported rather than silently worked around.
+    const values = new Array(56).fill(MAX_VALUE).map((v, i) => (i % 11 === 0 ? v * 0.9 : v));
+    const { pixels } = renderPulseFrame({ svg: buildPulseSvg(layoutPulsePoints(values, style), style) });
+    let topRow = height;
+    for (let y = 0; y < height && topRow === height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (pixels[(y * width + x) * 4 + 3] >= 8) { topRow = y; break; }
+      }
+    }
+    expect(topRow).toBeGreaterThanOrEqual(8);
+    expect(topRow).toBeLessThanOrEqual(21);
+  });
+
   // Regression guard for the design spec's real spike: Resvg's constructor scans every system
   // font by default (~130ms measured on the spec-writing machine), even for an SVG with zero
   // <text>. Without `font: { loadSystemFonts: false }` in the implementation, this fails on any

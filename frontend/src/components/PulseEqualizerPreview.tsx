@@ -263,35 +263,64 @@ function widthsFor(glowRadius: number, glowLayers: number): number[] {
 }
 
 // Port of the backend's pulseGeometry + strokeMarginPx (src/render/pulseSvg.ts) — see that file
-// for the full reasoning. The short version: the polyline is inset from every edge by half the
-// widest stroke plus EDGE_CLEARANCE_PX, so the whole glow lands inside the box with visible room
-// to spare instead of being chopped flat at (or hugging) its edges; and when the configured glow
-// is too wide for the box, the STROKES shrink to what the box can hold rather than being drawn at
-// full width and clipped. Both the layout below and the draw loop read this one function, exactly
-// as layoutPulsePoints and buildPulseSvg both do on the backend — them deriving it separately is
-// what let the drawn glow outgrow the inset in the first place.
+// for the full reasoning. The short version: the engine's value range is one-directional (v in
+// [0, MAX_VALUE], only ever pushing the line UP from a resting position, never down), so the
+// layout is bottom-anchored, not centered, with an asymmetric margin — a flat clearance on the
+// left/right (sideMargin), but a clearance that scales with the glow's own half-width on the
+// top/bottom (verticalMargin), since that's where the hard-edged glow boundary forms a long flat
+// cut when many bands pin to the ceiling at once (globalPulse routinely does this). When the
+// configured glow is too wide for the box, the STROKES shrink to what the box can hold (solving
+// for the largest half-stroke that keeps at least MIN_AMPLITUDE_SHARE of the height drawable)
+// rather than being drawn at full width and clipped. Both the layout below and the draw loop read
+// this one function, exactly as layoutPulsePoints and buildPulseSvg both do on the backend — them
+// deriving it separately is what let the drawn glow outgrow the inset in the first place.
 const EDGE_CLEARANCE_PX = 3;
 const GLOW_LAYER_PAD = 0.4;
-const MAX_MARGIN_SHARE = 4;
+const EDGE_CLEARANCE_SHARE = 0.75;
+const MIN_AMPLITUDE_SHARE = 0.45;
 
-function pulseGeometry(boxWidth: number, boxHeight: number, glowRadius: number, coreWidth: number): { margin: number; glowRadius: number; coreWidth: number } {
-  const wanted = Math.ceil(Math.max(glowRadius + GLOW_LAYER_PAD, coreWidth) / 2) + EDGE_CLEARANCE_PX;
-  const maxMargin = Math.floor(Math.min(boxWidth, boxHeight) / MAX_MARGIN_SHARE);
-  if (wanted <= maxMargin) return { margin: wanted, glowRadius, coreWidth };
-  const margin = Math.max(0, maxMargin);
-  const widest = Math.max(0, 2 * (margin - EDGE_CLEARANCE_PX));
-  return { margin, glowRadius: Math.max(0, widest - GLOW_LAYER_PAD), coreWidth: Math.min(coreWidth, widest) };
+function pulseGeometry(
+  boxWidth: number,
+  boxHeight: number,
+  glowRadius: number,
+  coreWidth: number,
+): { sideMargin: number; verticalMargin: number; glowRadius: number; coreWidth: number } {
+  const halfStroke = Math.max(glowRadius + GLOW_LAYER_PAD, coreWidth) / 2;
+  const halfStrokeFitV = (boxHeight * (1 - MIN_AMPLITUDE_SHARE) / 2 - EDGE_CLEARANCE_PX) / (1 + EDGE_CLEARANCE_SHARE);
+  const halfStrokeFitH = boxWidth / 4 - EDGE_CLEARANCE_PX;
+  const halfStrokeMax = Math.max(0, Math.min(halfStrokeFitV, halfStrokeFitH));
+  if (halfStroke <= halfStrokeMax) {
+    return {
+      sideMargin: Math.ceil(halfStroke) + EDGE_CLEARANCE_PX,
+      verticalMargin: Math.ceil(halfStroke * (1 + EDGE_CLEARANCE_SHARE)) + EDGE_CLEARANCE_PX,
+      glowRadius,
+      coreWidth,
+    };
+  }
+  const widest = Math.max(0, 2 * halfStrokeMax);
+  return {
+    sideMargin: Math.ceil(halfStrokeMax) + EDGE_CLEARANCE_PX,
+    verticalMargin: Math.ceil(halfStrokeMax * (1 + EDGE_CLEARANCE_SHARE)) + EDGE_CLEARANCE_PX,
+    glowRadius: Math.max(0, widest - GLOW_LAYER_PAD),
+    coreWidth: Math.min(coreWidth, widest),
+  };
 }
 
-// Port of the backend's layoutPulsePoints: the baseline sits at the vertical centre and the
-// loudest value reaches exactly the top margin.
-function layoutPulsePoints(values: number[], boxWidth: number, boxHeight: number, margin: number): { x: number; y: number }[] {
+// Port of the backend's layoutPulsePoints: bottom-anchored, not centered — the baseline sits at
+// `height - verticalMargin` and the loudest value reaches exactly the top margin.
+function layoutPulsePoints(
+  values: number[],
+  boxWidth: number,
+  boxHeight: number,
+  sideMargin: number,
+  verticalMargin: number,
+): { x: number; y: number }[] {
   const n = values.length;
-  const usableWidth = boxWidth - 2 * margin;
-  const baseline = boxHeight / 2;
-  const amplitude = baseline - margin;
+  const usableWidth = boxWidth - 2 * sideMargin;
+  const baseline = boxHeight - verticalMargin;
+  const amplitude = boxHeight - 2 * verticalMargin;
   return values.map((v, i) => ({
-    x: margin + (n > 1 ? i / (n - 1) : 0.5) * usableWidth,
+    x: sideMargin + (n > 1 ? i / (n - 1) : 0.5) * usableWidth,
     y: baseline - (clamp(v, 0, MAX_VALUE) / MAX_VALUE) * amplitude,
   }));
 }
@@ -345,7 +374,7 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
       const grad = ctx.createLinearGradient(0, 0, boxWidth, 0);
       colors.forEach((c, i) => grad.addColorStop(i / (colors.length - 1 || 1), c));
 
-      const points = layoutPulsePoints(values, boxWidth, boxHeight, geometry.margin);
+      const points = layoutPulsePoints(values, boxWidth, boxHeight, geometry.sideMargin, geometry.verticalMargin);
 
       const widths = widthsFor(geometry.glowRadius, glowLayers);
       ctx.lineJoin = 'round';
