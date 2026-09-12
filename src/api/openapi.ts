@@ -760,7 +760,7 @@ export const openApiSpec = {
       },
       ColorValue: {
         type: 'object',
-        description: 'A solid color or a linear gradient. Every color component is a hex string (#RGB / #RGBA / #RRGGBB / #RRGGBBAA) — other CSS color syntaxes are rejected.',
+        description: 'A solid color, or a linear/radial gradient with 2-6 positioned stops. Every color component is a hex string (#RGB / #RGBA / #RRGGBB / #RRGGBBAA) — other CSS color syntaxes are rejected. `conic` is deliberately not offered: the renderer cannot draw it.',
         oneOf: [
           {
             type: 'object',
@@ -772,11 +772,24 @@ export const openApiSpec = {
           },
           {
             type: 'object',
-            required: ['mode', 'stops', 'angleDeg'],
+            required: ['mode', 'gradientType', 'stops', 'angleDeg'],
             properties: {
               mode: { type: 'string', enum: ['gradient'] },
-              stops: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 3 },
-              angleDeg: { type: 'number', minimum: 0, maximum: 360 },
+              gradientType: { type: 'string', enum: ['linear', 'radial'] },
+              stops: {
+                type: 'array',
+                minItems: 2,
+                maxItems: 6,
+                items: {
+                  type: 'object',
+                  required: ['color', 'offset'],
+                  properties: {
+                    color: { type: 'string', example: '#ffffff' },
+                    offset: { type: 'number', minimum: 0, maximum: 100, description: 'Position along the gradient axis, in percent' },
+                  },
+                },
+              },
+              angleDeg: { type: 'number', minimum: 0, maximum: 360, description: 'Applies to `linear` only; retained but ignored for `radial`' },
             },
           },
         ],

@@ -2,7 +2,7 @@ import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 import { resolveFontFile, FONT_FAMILIES } from './fontRegistry';
 import { loadFontData } from './fontCache';
-import { ColorValue, TextStyle, TemplateElement } from '../templates/templateTypes';
+import { ColorValue, TextStyle, TemplateElement, normalizeColorValue } from '../templates/templateTypes';
 
 export interface SceneData {
   title: string;
@@ -16,10 +16,36 @@ export interface SceneData {
 // dependency to carry). Satori accepts this same shape either way.
 type SatoriNode = { type: string; props: { style: Record<string, unknown>; children?: SatoriNode | SatoriNode[] | string } };
 
-function colorValueToCss(color: ColorValue): Record<string, unknown> {
+/**
+ * The CSS one gradient ColorValue becomes. Extracted so colorValueToCss (a text fill) and
+ * backgroundToCss (the scene background) can never drift apart, and so the frontend's live
+ * gradient-strip preview has one exact shape to mirror.
+ */
+export function gradientCss(color: Extract<ColorValue, { mode: 'gradient' }>): string {
+  // Sorted, because SVG gradient stops must be non-decreasing and satori does NOT reject an
+  // out-of-order CSS stop list — it renders a silently clamped, wrong picture (verified against
+  // the real satori+resvg: offsets 0/80/30/100 produced 25 distinct colors vs 39 sorted). A
+  // STABLE sort, so two stops sharing an offset keep author order, which is exactly CSS's
+  // "hard stop" semantics.
+  const stops = [...color.stops]
+    .sort((a, b) => a.offset - b.offset)
+    .map((s) => `${s.color} ${s.offset}%`)
+    .join(', ');
+  // Bare radial-gradient is CSS's own default (ellipse, farthest-corner, centre) — verified
+  // pixel-identical to the explicit `ellipse farthest-corner at 50% 50%` spelling.
+  return color.gradientType === 'radial'
+    ? `radial-gradient(${stops})`
+    : `linear-gradient(${color.angleDeg}deg, ${stops})`;
+}
+
+function colorValueToCss(rawColor: ColorValue): Record<string, unknown> {
+  // Normalized here rather than at every caller: this and backgroundToCss are the only two places
+  // a STORED (never re-validated on read) ColorValue reaches the renderer, so one call here
+  // covers the live stream, the preview endpoint and the per-track override alike.
+  const color = normalizeColorValue(rawColor);
   if (color.mode === 'solid') return { color: color.color };
   return {
-    backgroundImage: `linear-gradient(${color.angleDeg}deg, ${color.stops.join(', ')})`,
+    backgroundImage: gradientCss(color),
     backgroundClip: 'text',
     color: 'transparent',
   };
@@ -169,9 +195,10 @@ export interface SceneRendererOptions {
   background?: ColorValue;
 }
 
-function backgroundToCss(background: ColorValue): Record<string, unknown> {
+function backgroundToCss(rawBackground: ColorValue): Record<string, unknown> {
+  const background = normalizeColorValue(rawBackground);
   if (background.mode === 'solid') return { backgroundColor: background.color };
-  return { backgroundImage: `linear-gradient(${background.angleDeg}deg, ${background.stops.join(', ')})` };
+  return { backgroundImage: gradientCss(background) };
 }
 
 // Renders a template's elements + the current scene data (title, playlist window, cover) into

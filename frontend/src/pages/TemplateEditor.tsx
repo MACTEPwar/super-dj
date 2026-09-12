@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { getFontFamilies, TemplateElement, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
+import { normalizeColorValue } from '../api/colorValue';
 import { ApiError } from '../api/client';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { ColorField, ColorValueField, NumberField } from '../components/TemplateFormFields';
@@ -118,6 +119,14 @@ function defaultElement(type: AddableType, t: (key: string) => string): Template
 // normalizeEqualizerElement on the backend).
 function normalizeElements(elements: TemplateElement[]): TemplateElement[] {
   return elements.map((el) => {
+    // A template saved before ColorValue gained a gradientType/positioned stops (or before
+    // ColorValue existed at all, when `color` was a bare hex string) still sits in the database
+    // exactly as saved. Normalizing on LOAD is what keeps such a template openable, previewable
+    // and re-savable: the backend's isValidColorValue is strict on write, and the preview
+    // endpoint validates the draft body too.
+    if (el.type === 'title' || el.type === 'playlist' || el.type === 'text') {
+      return { ...el, color: normalizeColorValue(el.color) };
+    }
     if (el.type !== 'equalizer') return el;
     const raw = el as Partial<Record<keyof ReturnType<typeof defaultEqualizerStyle>, unknown>>;
     const defaults = defaultEqualizerStyle();

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { renderScene } from '../../src/render/sceneRenderer';
-import { TemplateElement } from '../../src/templates/templateTypes';
+import { renderScene, gradientCss } from '../../src/render/sceneRenderer';
+import { ColorValue, TemplateElement } from '../../src/templates/templateTypes';
 
 // A real, small local font so the renderer's actual output gets exercised end to end (no
 // fake/mocked satori or resvg here) — deliberately not the production DejaVu Sans path (only
@@ -83,7 +83,8 @@ describe('renderScene', () => {
   it('renders gradient text without throwing', async () => {
     const png = await renderScene(
       [{ type: 'title', x: 0, y: 0, width: 400, fontSize: 60,
-         color: { mode: 'gradient', stops: ['#ff0000', '#0000ff'], angleDeg: 0 },
+         color: { mode: 'gradient', gradientType: 'linear', angleDeg: 0,
+           stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }] },
          style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } }],
       { title: 'GRADIENT', playlistLines: [], coverDataUri: null },
       testOptions, testLoadFont,
@@ -167,7 +168,8 @@ describe('renderScene', () => {
          color: { mode: 'solid', color: '#ffffff' },
          style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } }],
       { title: 'BACKGROUND', playlistLines: [], coverDataUri: null },
-      { ...testOptions, background: { mode: 'gradient', stops: ['#ff0000', '#0000ff'], angleDeg: 45 } },
+      { ...testOptions, background: { mode: 'gradient', gradientType: 'linear', angleDeg: 45,
+        stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }] } },
       testLoadFont,
     );
     expect(png.length).toBeGreaterThan(0);
@@ -209,6 +211,81 @@ describe('renderScene', () => {
       { title: 'PROD DEFAULT', playlistLines: [], coverDataUri: null },
       testOptions,
     );
+    expect(png.length).toBeGreaterThan(0);
+  });
+});
+
+describe('gradientCss', () => {
+  it('emits a linear gradient with percent offsets', () => {
+    expect(gradientCss({
+      mode: 'gradient', gradientType: 'linear', angleDeg: 45,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }],
+    })).toBe('linear-gradient(45deg, #ff0000 0%, #0000ff 100%)');
+  });
+
+  // Bare radial-gradient == CSS's own default (ellipse, farthest-corner, centre) — verified
+  // pixel-identical to the explicit spelling against the real satori+resvg, with fewer moving
+  // parts. angleDeg is ignored here by design.
+  it('emits a bare radial gradient and ignores the angle', () => {
+    expect(gradientCss({
+      mode: 'gradient', gradientType: 'radial', angleDeg: 45,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }],
+    })).toBe('radial-gradient(#ff0000 0%, #0000ff 100%)');
+  });
+
+  // Satori does NOT reject an out-of-order stop list; it renders a silently clamped, wrong
+  // picture (measured: 25 distinct colors vs 39 for the same stops sorted). So sorting is the
+  // renderer's job, not validation's.
+  it('sorts stops by offset', () => {
+    expect(gradientCss({
+      mode: 'gradient', gradientType: 'linear', angleDeg: 0,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#00ff00', offset: 80 }, { color: '#0000ff', offset: 30 }],
+    })).toBe('linear-gradient(0deg, #ff0000 0%, #0000ff 30%, #00ff00 80%)');
+  });
+
+  it('keeps author order for stops that share an offset (a CSS hard stop)', () => {
+    expect(gradientCss({
+      mode: 'gradient', gradientType: 'linear', angleDeg: 0,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#00ff00', offset: 50 }, { color: '#0000ff', offset: 50 }],
+    })).toBe('linear-gradient(0deg, #ff0000 0%, #00ff00 50%, #0000ff 50%)');
+  });
+});
+
+describe('renderScene — gradient colors', () => {
+  const gradientTitle = (color: unknown): TemplateElement[] => ([
+    { type: 'title', x: 10, y: 10, width: 600, fontSize: 42, color,
+      style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } } as unknown as TemplateElement,
+  ]);
+  const scene = { title: 'Gradient', playlistLines: [], coverDataUri: null };
+  const opts = { width: 640, height: 120 };
+
+  it('renders a radial 6-stop gradient title', async () => {
+    const png = await renderScene(gradientTitle({
+      mode: 'gradient', gradientType: 'radial', angleDeg: 0,
+      stops: [0, 20, 40, 60, 80, 100].map((offset, i) => ({ color: ['#ff0000', '#ff8800', '#ffee00', '#00cc44', '#0066ff', '#aa00ff'][i], offset })),
+    }), scene, opts, testLoadFont);
+    expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    expect(png.length).toBeGreaterThan(1000);
+  });
+
+  // Both legacy shapes must render rather than throw — see normalizeColorValue.
+  it('renders a legacy plain-string color without throwing', async () => {
+    const png = await renderScene(gradientTitle('#ff00ff'), scene, opts, testLoadFont);
+    expect(png.length).toBeGreaterThan(1000);
+  });
+
+  it('renders a legacy bare-string-stops gradient without throwing', async () => {
+    const png = await renderScene(gradientTitle({ mode: 'gradient', stops: ['#ff0000', '#0000ff'], angleDeg: 45 }), scene, opts, testLoadFont);
+    expect(png.length).toBeGreaterThan(1000);
+  });
+
+  it('renders a legacy plain-string background override without throwing', async () => {
+    // Unlike the other legacy cases above, this scene has no elements at all — a flat solid-color
+    // background alone compresses to well under 1000 bytes, so (matching this file's own
+    // established convention for trivial-content renders, e.g. 'renders a gradient root
+    // background without throwing' above) the bar here is a valid PNG, not a size threshold.
+    const png = await renderScene([], scene, { ...opts, background: '#102030' as unknown as ColorValue }, testLoadFont);
+    expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     expect(png.length).toBeGreaterThan(0);
   });
 });

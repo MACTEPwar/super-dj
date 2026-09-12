@@ -1,4 +1,4 @@
-import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, DEFAULT_EQUALIZER_STYLE, isValidColorValue, normalizeEqualizerElement, globalPulseStrength } from '../../src/templates/templateTypes';
+import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, DEFAULT_EQUALIZER_STYLE, isValidColorValue, normalizeColorValue, normalizeEqualizerElement, globalPulseStrength } from '../../src/templates/templateTypes';
 import type { EqualizerElement } from '../../src/templates/templateTypes';
 import { MAX_GLOBAL_PULSE_STRENGTH } from '../../src/audio/pulseEngine';
 
@@ -92,28 +92,94 @@ describe('isValidTemplateElement — ColorValue and TextStyle', () => {
     })).toBe(true);
   });
 
-  it('accepts a title with a 3-stop gradient', () => {
-    expect(isValidTemplateElement({
-      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
-      color: { mode: 'gradient', stops: ['#ff0000', '#00ff00', '#0000ff'], angleDeg: 45 },
-      style: baseStyle,
-    })).toBe(true);
+  const titleWith = (color: unknown) => ({
+    type: 'title', x: 0, y: 0, width: 400, fontSize: 24, color,
+    style: { fontFamily: 'DejaVu Sans', bold: false, italic: false },
   });
 
-  it('rejects a gradient with an out-of-range angle', () => {
-    expect(isValidTemplateElement({
-      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
-      color: { mode: 'gradient', stops: ['#ff0000', '#00ff00'], angleDeg: 361 },
-      style: baseStyle,
-    })).toBe(false);
+  it('accepts a linear gradient with positioned stops', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'linear',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }],
+      angleDeg: 45,
+    }))).toBe(true);
   });
 
-  it('rejects a gradient with an invalid stop color', () => {
-    expect(isValidTemplateElement({
-      type: 'title', x: 10, y: 10, width: 200, fontSize: 20,
-      color: { mode: 'gradient', stops: ['#ff0000', 'not-a-color'], angleDeg: 0 },
-      style: baseStyle,
-    })).toBe(false);
+  it('accepts a radial gradient', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'radial',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }],
+      angleDeg: 0,
+    }))).toBe(true);
+  });
+
+  it('accepts the maximum of 6 stops', () => {
+    const stops = new Array(6).fill(null).map((_, i) => ({ color: '#ffffff', offset: i * 20 }));
+    expect(isValidTemplateElement(titleWith({ mode: 'gradient', gradientType: 'linear', stops, angleDeg: 0 }))).toBe(true);
+  });
+
+  it('rejects a gradient with fewer than 2 stops', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'linear', stops: [{ color: '#ff0000', offset: 0 }], angleDeg: 0,
+    }))).toBe(false);
+  });
+
+  it('rejects a gradient with more than 6 stops', () => {
+    const stops = new Array(7).fill(null).map((_, i) => ({ color: '#ffffff', offset: i * 10 }));
+    expect(isValidTemplateElement(titleWith({ mode: 'gradient', gradientType: 'linear', stops, angleDeg: 0 }))).toBe(false);
+  });
+
+  // conic-gradient throws inside satori (verified against the installed binary) — a value that
+  // reaches the renderer blanks the whole overlay layer, so it must never validate.
+  it('rejects an unknown gradientType', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'conic',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }], angleDeg: 0,
+    }))).toBe(false);
+  });
+
+  it('rejects a gradient with no gradientType', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }], angleDeg: 0,
+    }))).toBe(false);
+  });
+
+  it('rejects a stop offset outside 0-100', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'linear',
+      stops: [{ color: '#ff0000', offset: -1 }, { color: '#0000ff', offset: 100 }], angleDeg: 0,
+    }))).toBe(false);
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'linear',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 101 }], angleDeg: 0,
+    }))).toBe(false);
+  });
+
+  it('rejects a stop with a non-hex color', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'linear',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: 'not-a-color', offset: 100 }], angleDeg: 0,
+    }))).toBe(false);
+  });
+
+  it('rejects an angleDeg outside 0-360', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', gradientType: 'linear',
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }], angleDeg: 361,
+    }))).toBe(false);
+  });
+
+  // Strict on WRITE: the pre-positioned-stops shape is tolerated on read (normalizeColorValue)
+  // but must not be re-savable, so the union doesn't have to carry it forever.
+  it('rejects the legacy bare-string stops array', () => {
+    expect(isValidTemplateElement(titleWith({
+      mode: 'gradient', stops: ['#ff0000', '#0000ff'], angleDeg: 45,
+    }))).toBe(false);
+  });
+
+  it('rejects a legacy plain-string color', () => {
+    expect(isValidTemplateElement(titleWith('#ffffff'))).toBe(false);
   });
 
   it('accepts a style with stroke and shadow', () => {
@@ -491,5 +557,49 @@ describe('normalizeEqualizerElement', () => {
   it('drops the element when even the default style cannot make it valid (a corrupt position)', () => {
     const corrupt = { type: 'equalizer', x: -1, y: 10, width: 400, height: 150 } as unknown as EqualizerElement;
     expect(normalizeEqualizerElement(corrupt)).toBeNull();
+  });
+});
+
+describe('normalizeColorValue', () => {
+  it('passes a valid new-shape gradient through unchanged', () => {
+    const value = {
+      mode: 'gradient' as const, gradientType: 'radial' as const,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }], angleDeg: 0,
+    };
+    expect(normalizeColorValue(value)).toBe(value);
+  });
+
+  it('passes a valid solid through unchanged', () => {
+    const value = { mode: 'solid' as const, color: '#123456' };
+    expect(normalizeColorValue(value)).toBe(value);
+  });
+
+  // Pre-ColorValue templates stored a bare hex string. Today that reaches colorValueToCss, misses
+  // the solid branch and throws on `color.stops.join(...)` of undefined.
+  it('wraps a legacy plain hex string as a solid color', () => {
+    expect(normalizeColorValue('#abcdef')).toEqual({ mode: 'solid', color: '#abcdef' });
+  });
+
+  // Offsets spread evenly == exactly what CSS already does for an offset-less stop list, so these
+  // templates keep rendering the picture they render today.
+  it('migrates a legacy bare-string gradient to linear with evenly spread offsets', () => {
+    expect(normalizeColorValue({ mode: 'gradient', stops: ['#ff0000', '#00ff00', '#0000ff'], angleDeg: 45 })).toEqual({
+      mode: 'gradient', gradientType: 'linear', angleDeg: 45,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#00ff00', offset: 50 }, { color: '#0000ff', offset: 100 }],
+    });
+  });
+
+  it('defaults a legacy gradient with a missing/invalid angle to 0', () => {
+    const out = normalizeColorValue({ mode: 'gradient', stops: ['#ff0000', '#0000ff'] });
+    expect(out).toEqual({
+      mode: 'gradient', gradientType: 'linear', angleDeg: 0,
+      stops: [{ color: '#ff0000', offset: 0 }, { color: '#0000ff', offset: 100 }],
+    });
+  });
+
+  it('falls back to white for anything unrecognisable', () => {
+    expect(normalizeColorValue(null)).toEqual({ mode: 'solid', color: '#ffffff' });
+    expect(normalizeColorValue(42)).toEqual({ mode: 'solid', color: '#ffffff' });
+    expect(normalizeColorValue({ mode: 'rainbow' })).toEqual({ mode: 'solid', color: '#ffffff' });
   });
 });

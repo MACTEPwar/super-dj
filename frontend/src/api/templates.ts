@@ -1,10 +1,19 @@
 import { api, API_BASE_URL, ApiError } from './client';
 
 // Mirrors src/templates/templateTypes.ts on the backend — kept in sync by hand.
-// ColorValue represents both solid colors and gradients.
+export type GradientType = 'linear' | 'radial';
+export const GRADIENT_TYPES: GradientType[] = ['linear', 'radial'];
+
+export interface GradientStop {
+  color: string;
+  offset: number; // 0-100 (percent), matching the backend
+}
+
+// ColorValue represents both solid colors and gradients. `angleDeg` applies to 'linear' only —
+// it is retained (and still sent) for 'radial' so toggling between the two never loses it.
 export type ColorValue =
   | { mode: 'solid'; color: string }
-  | { mode: 'gradient'; stops: [string, string] | [string, string, string]; angleDeg: number };
+  | { mode: 'gradient'; gradientType: GradientType; stops: GradientStop[]; angleDeg: number };
 
 export interface TextStyle {
   fontFamily: string;

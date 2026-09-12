@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Route, Routes } from 'react-router-dom';
 import TemplateEditor from './TemplateEditor';
-import { getFontFamilies, TemplateElement, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
+import { ColorValue, getFontFamilies, TemplateElement, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
 import { renderWithProviders } from '../test/renderWithProviders';
 
 vi.mock('../api/templates');
@@ -312,6 +312,24 @@ describe('TemplateEditor', () => {
     expect(screen.queryByText('Stop 1')).not.toBeInTheDocument();
   });
 
+  it('opens a template whose title carries a legacy plain-string color without crashing', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'Legacy', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'title', x: 0, y: 0, width: 400, fontSize: 24,
+        color: '#ff00ff' as unknown as ColorValue,
+        style: DEFAULT_STYLE,
+      }],
+    });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Title', { selector: 'span' }));
+    // normalizeElements (TemplateEditor.tsx) turned the raw string into a solid ColorValue via
+    // normalizeColorValue, so the picker renders in solid mode with that color rather than
+    // throwing (which the pre-normalization code did: `color.stops.join(...)` of undefined).
+    expect(await screen.findByLabelText('Color')).toHaveValue('#ff00ff');
+    expect(screen.queryByLabelText('Stop 1')).not.toBeInTheDocument();
+  });
+
   it('timer selection never shows a gradient toggle', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
@@ -603,7 +621,8 @@ describe('TemplateEditor', () => {
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
       elements: [{
         type: 'title', x: 10, y: 10, width: 400, fontSize: 30,
-        color: { mode: 'gradient', stops: ['#ffffff', '#000000'], angleDeg: 0 },
+        color: { mode: 'gradient', gradientType: 'linear', angleDeg: 0,
+          stops: [{ color: '#ffffff', offset: 0 }, { color: '#000000', offset: 100 }] },
         style: DEFAULT_STYLE,
       }],
     });

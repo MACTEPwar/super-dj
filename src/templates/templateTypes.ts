@@ -3,9 +3,37 @@
 export const CANVAS_WIDTH = 1280;
 export const CANVAS_HEIGHT = 720;
 
+// One gradient stop: a color plus where along the gradient axis it sits.
+//
+// `offset` is a PERCENT (0-100), not a 0-1 fraction, for two concrete reasons: the CSS string
+// satori consumes is percent-based (`#00ff00 33.333%`), so the number goes straight into it with
+// no conversion or float-formatting decision at the boundary; and the editor's NumberField
+// primitive is integer-stepped and min/max-bounded, which 0-100 lands on as-is. `angleDeg` is
+// already a "human" 0-360 number in this same union, so this keeps the whole shape in one idiom.
+export interface GradientStop {
+  color: string;
+  offset: number; // 0-100
+}
+
+export type GradientType = 'linear' | 'radial';
+export const GRADIENT_TYPES: GradientType[] = ['linear', 'radial'];
+
 export type ColorValue =
   | { mode: 'solid'; color: string }
-  | { mode: 'gradient'; stops: [string, string] | [string, string, string]; angleDeg: number };
+  | {
+      // `gradientType` is deliberately only 'linear' | 'radial': verified against the installed
+      // satori (0.33.4) that both render — as a text fill and as an element background — while
+      // `conic-gradient` THROWS ("Invalid background image"), which in the live pipeline means
+      // StreamManager.buildOverlay blanks the WHOLE overlay layer, and on the preview endpoint a
+      // 500. See the design spec's Satori capability matrix.
+      mode: 'gradient';
+      gradientType: GradientType;
+      stops: GradientStop[]; // MIN_GRADIENT_STOPS..MAX_GRADIENT_STOPS
+      // 0-360. Meaningful for 'linear' only; retained (and still validated) for 'radial' so
+      // toggling linear -> radial -> linear in the editor never loses the author's angle, and so
+      // the validator below stays a flat sequence of checks rather than branching on the type.
+      angleDeg: number;
+    };
 
 export interface TextStyle {
   fontFamily: string;
@@ -150,6 +178,12 @@ const MIN_CORE_WIDTH = 1;
 const MAX_CORE_WIDTH = 6;
 const MIN_EQUALIZER_COLOR_STOPS = 2;
 const MAX_EQUALIZER_COLOR_STOPS = 6;
+// Same 2-6 window as the equalizer's colors[] — deliberately, so there is one mental model for
+// "how many color stops can I have" across the whole editor. Satori renders 8 stops fine, so 6 is
+// a product ceiling, not a renderer limit. Below 2 is not a gradient (that is what 'solid' is).
+export const MIN_GRADIENT_STOPS = 2;
+export const MAX_GRADIENT_STOPS = 6;
+const MAX_GRADIENT_OFFSET = 100;
 const MIN_SENSITIVITY = 0.5;
 const MAX_SENSITIVITY = 3;
 const MIN_SMOOTHING = 0;
@@ -245,18 +279,63 @@ function isValidEqualizerStyle(el: Record<string, unknown>): boolean {
     .every((field) => EQUALIZER_STYLE_VALIDATORS[field](el[field]));
 }
 
-// Exported (not module-private) — Task 8's Track.overlayOverride validation reuses this
-// exact function rather than re-implementing gradient/solid validation a second time.
+function isValidGradientStop(value: unknown): value is GradientStop {
+  if (typeof value !== 'object' || value === null) return false;
+  const s = value as Record<string, unknown>;
+  return isValidColor(s.color) && isNumberInRange(s.offset, 0, MAX_GRADIENT_OFFSET);
+}
+
+// Exported (not module-private) — Track.overlayOverride validation reuses this exact function
+// rather than re-implementing gradient/solid validation a second time.
+//
+// Deliberately STRICT: it accepts only the current shape, never the two older generations
+// normalizeColorValue below absorbs. Writes only ever come from the editor (which normalizes on
+// load), so keeping this strict is what stops the old shapes from being re-saved forever.
 export function isValidColorValue(value: unknown): value is ColorValue {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   if (v.mode === 'solid') return isValidColor(v.color);
   if (v.mode === 'gradient') {
-    if (!Array.isArray(v.stops) || (v.stops.length !== 2 && v.stops.length !== 3)) return false;
-    if (!v.stops.every((s) => isValidColor(s))) return false;
-    return isFiniteNumber(v.angleDeg) && v.angleDeg >= 0 && v.angleDeg <= 360;
+    if (!GRADIENT_TYPES.includes(v.gradientType as GradientType)) return false;
+    if (!Array.isArray(v.stops)) return false;
+    if (v.stops.length < MIN_GRADIENT_STOPS || v.stops.length > MAX_GRADIENT_STOPS) return false;
+    if (!v.stops.every(isValidGradientStop)) return false;
+    return isNumberInRange(v.angleDeg, 0, 360);
   }
   return false;
+}
+
+export const FALLBACK_COLOR_VALUE: ColorValue = { mode: 'solid', color: '#ffffff' };
+
+// Nothing re-validates a stored template's elements on READ, only on write (templateRoutes.ts) —
+// so the database still holds two older ColorValue generations, and one of them is already a
+// latent crash: a pre-ColorValue `color: '#ffffff'` string misses colorValueToCss's solid branch
+// and throws on `color.stops.join(...)` of undefined, which live means a blank overlay layer and
+// on the preview endpoint a 500. Same strict-on-write / patch-on-read split
+// normalizeEqualizerElement already uses.
+export function normalizeColorValue(value: unknown): ColorValue {
+  if (isValidColorValue(value)) return value;
+  // Pre-ColorValue: a bare hex string.
+  if (isValidColor(value)) return { mode: 'solid', color: value };
+  if (typeof value === 'object' && value !== null) {
+    const v = value as Record<string, unknown>;
+    if (v.mode === 'solid' && isValidColor(v.color)) return { mode: 'solid', color: v.color };
+    // Gen-1 gradient: bare-string stops, no gradientType, no offsets. Spreading the offsets
+    // evenly is exactly what CSS already does for an offset-less stop list, so these templates
+    // render byte-identically to what they render today — this migration is invisible.
+    if (v.mode === 'gradient' && Array.isArray(v.stops) && v.stops.every((s) => isValidColor(s))
+      && v.stops.length >= MIN_GRADIENT_STOPS && v.stops.length <= MAX_GRADIENT_STOPS) {
+      const n = v.stops.length;
+      return {
+        mode: 'gradient',
+        gradientType: 'linear',
+        stops: (v.stops as string[]).map((color, i) => ({ color, offset: n > 1 ? (i * MAX_GRADIENT_OFFSET) / (n - 1) : 0 })),
+        angleDeg: isNumberInRange(v.angleDeg, 0, 360) ? v.angleDeg : 0,
+      };
+    }
+  }
+  console.warn('[templates] unrecognisable color value, falling back to solid white');
+  return FALLBACK_COLOR_VALUE;
 }
 
 function isValidTextStyle(value: unknown): value is TextStyle {

@@ -82,7 +82,8 @@ describe('tracks API', () => {
   it('updateTrackOverlayOverride PATCHes /tracks/{id} with gradient color and backgroundColor', async () => {
     mockFetchOnce({});
     const override: TrackOverlayOverride = {
-      color: { mode: 'gradient', stops: ['#FF0000', '#00FF00', '#0000FF'], angleDeg: 45 },
+      color: { mode: 'gradient', gradientType: 'linear', angleDeg: 45,
+        stops: [{ color: '#FF0000', offset: 0 }, { color: '#00FF00', offset: 50 }, { color: '#0000FF', offset: 100 }] },
       backgroundColor: { mode: 'solid', color: '#000000' },
     };
     await updateTrackOverlayOverride('t1', override);
