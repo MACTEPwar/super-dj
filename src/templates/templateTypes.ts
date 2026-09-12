@@ -74,17 +74,51 @@ export interface EqualizerElement {
   glowLayers: number; // 3-9
   glowRadius: number; // 10-70, px — outer glow layer's half-width
   coreWidth: number; // 1-6, px — the bright core stroke
+  // Reactivity — how the line follows the audio (see PulseEngine in src/audio/pulseEngine.ts,
+  // which these feed directly):
+  sensitivity: number; // 0.5-3.0 — gain: how much a band's loudness translates into height
+  smoothing: number; // 0-1 — 0 = snappy attack/release, 1 = smooth/slow-following
+  beatBoost: number; // 0-1 — 0 = pure continuous spectrum, 1 = strong extra kick on real onsets
+  bandCount: number; // 8-112, integer — independent frequency bars across the element's width
+  // 0-20, integer — 0 = no whole-line "breathe" on a broadband beat, higher = a stronger one,
+  // linearly. Integer like glowLayers/bandCount rather than fractional like sensitivity/
+  // smoothing/beatBoost: the 0-20 range exists precisely so whole-number steps are fine-grained
+  // enough on their own (one step is a tenth of the engine's strength unit — see
+  // globalPulseStrength below), and a fractional step would be below what's visible anyway.
+  globalPulse: number;
 }
 
 // The approved "neon pulse" look from this feature's design — used by the frontend's
-// create-element factory and as the reference values in tests. Not consumed by backend
-// validation itself (a saved element must always specify every field).
+// create-element factory, by normalizeEqualizerElement (below) to patch a template saved before
+// a field existed, and as the reference values in tests. Not consumed by request validation
+// itself (a saved element must always specify every field).
 export const DEFAULT_EQUALIZER_STYLE = {
   colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
   glowLayers: 9,
   glowRadius: 42,
   coreWidth: 1,
+  sensitivity: 1.5,
+  smoothing: 0.4,
+  beatBoost: 0.5,
+  bandCount: 56,
+  // 8 is the value that reproduces the engine strength (0.8) the global pulse was approved at
+  // when it was still an internal-only A/B candidate — see globalPulseStrength below.
+  globalPulse: 8,
 } as const;
+
+// The equalizer's `globalPulse` field is a UI-scale 0-20 knob; PulseEngine (src/audio/
+// pulseEngine.ts) takes the same thing on its own strength scale, where 1.0 = the line scales
+// x(1 + GLOBAL_PULSE_GAIN) at the envelope's peak. This is the one place the two are related:
+// 10 UI steps per 1.0 of engine strength, so the field's ceiling (20) is the engine's
+// MAX_GLOBAL_PULSE_STRENGTH (2), the default (8) is exactly the 0.8 the user approved in the A/B
+// captures, and 0 is exactly 0 — the engine's "off, byte-identical to no option" path. A
+// division, not a multiplication by 0.1: IEEE division is correctly rounded, so e.g. 12/10 is
+// the double nearest 1.2, whereas 12*0.1 is 1.2000000000000002.
+export const GLOBAL_PULSE_STEPS_PER_STRENGTH = 10;
+
+export function globalPulseStrength(globalPulse: number): number {
+  return globalPulse / GLOBAL_PULSE_STEPS_PER_STRENGTH;
+}
 
 export type TemplateElement =
   | CoverElement | TitleElement | PlaylistElement | TimerElement | TextElement | ImageElement | EqualizerElement;
@@ -116,6 +150,20 @@ const MIN_CORE_WIDTH = 1;
 const MAX_CORE_WIDTH = 6;
 const MIN_EQUALIZER_COLOR_STOPS = 2;
 const MAX_EQUALIZER_COLOR_STOPS = 6;
+const MIN_SENSITIVITY = 0.5;
+const MAX_SENSITIVITY = 3;
+const MIN_SMOOTHING = 0;
+const MAX_SMOOTHING = 1;
+const MIN_BEAT_BOOST = 0;
+const MAX_BEAT_BOOST = 1;
+// Bounded above because every band is one more FFT-bin average per tick and one more polyline
+// point per rasterized frame, per active stream; below because pcmSpectrum.ts's log-spaced band
+// edges need a few bands to spread over at all.
+const MIN_BAND_COUNT = 8;
+const MAX_BAND_COUNT = 112;
+// See globalPulseStrength above for how this range maps onto PulseEngine's own strength scale.
+const MIN_GLOBAL_PULSE = 0;
+const MAX_GLOBAL_PULSE = 20;
 
 // Upper bounds for the text-decoration numerics. These are NOT cosmetic limits: an unbounded
 // shadow blur reaches resvg/tiny-skia's native rasterizer, where an extreme value panics in Rust
@@ -167,17 +215,34 @@ function isValidEqualizerColors(value: unknown): value is string[] {
     && value.every((c) => isValidColor(c));
 }
 
-// Just the style fields (colors/glowLayers/glowRadius/coreWidth) — split out from
-// isValidTemplateElement's equalizer branch so normalizeEqualizerElement (below) can check style
-// validity independently of position/size, which it deliberately does NOT re-validate the same
-// strict (integer) way: a fractional x/y/width/height is StreamManager's concern to round, not
-// this function's to reject.
+function isNumberInRange(value: unknown, min: number, max: number): value is number {
+  return isFiniteNumber(value) && value >= min && value <= max;
+}
+
+type EqualizerStyleField = keyof typeof DEFAULT_EQUALIZER_STYLE;
+
+// Per-field validators for the equalizer's style/reactivity fields (everything but position/
+// size), keyed by field so normalizeEqualizerElement (below) can patch exactly the fields that
+// are missing/invalid and keep the rest, and isValidEqualizerStyle can require all of them.
+const EQUALIZER_STYLE_VALIDATORS: Record<EqualizerStyleField, (value: unknown) => boolean> = {
+  colors: isValidEqualizerColors,
+  glowLayers: (v) => isNumberInRange(v, MIN_GLOW_LAYERS, MAX_GLOW_LAYERS) && Number.isInteger(v),
+  glowRadius: (v) => isNumberInRange(v, MIN_GLOW_RADIUS, MAX_GLOW_RADIUS),
+  coreWidth: (v) => isNumberInRange(v, MIN_CORE_WIDTH, MAX_CORE_WIDTH),
+  sensitivity: (v) => isNumberInRange(v, MIN_SENSITIVITY, MAX_SENSITIVITY),
+  smoothing: (v) => isNumberInRange(v, MIN_SMOOTHING, MAX_SMOOTHING),
+  beatBoost: (v) => isNumberInRange(v, MIN_BEAT_BOOST, MAX_BEAT_BOOST),
+  bandCount: (v) => isNumberInRange(v, MIN_BAND_COUNT, MAX_BAND_COUNT) && Number.isInteger(v),
+  globalPulse: (v) => isNumberInRange(v, MIN_GLOBAL_PULSE, MAX_GLOBAL_PULSE) && Number.isInteger(v),
+};
+
+// Just the style/reactivity fields — split out from isValidTemplateElement's equalizer branch
+// so normalizeEqualizerElement (below) can check them independently of position/size, which it
+// deliberately does NOT re-validate the same strict (integer) way: a fractional x/y/width/height
+// is StreamManager's concern to round, not this function's to reject.
 function isValidEqualizerStyle(el: Record<string, unknown>): boolean {
-  return isValidEqualizerColors(el.colors)
-    && isFiniteNumber(el.glowLayers) && Number.isInteger(el.glowLayers)
-    && el.glowLayers >= MIN_GLOW_LAYERS && el.glowLayers <= MAX_GLOW_LAYERS
-    && isFiniteNumber(el.glowRadius) && el.glowRadius >= MIN_GLOW_RADIUS && el.glowRadius <= MAX_GLOW_RADIUS
-    && isFiniteNumber(el.coreWidth) && el.coreWidth >= MIN_CORE_WIDTH && el.coreWidth <= MAX_CORE_WIDTH;
+  return (Object.keys(EQUALIZER_STYLE_VALIDATORS) as EqualizerStyleField[])
+    .every((field) => EQUALIZER_STYLE_VALIDATORS[field](el[field]));
 }
 
 // Exported (not module-private) — Task 8's Track.overlayOverride validation reuses this
@@ -263,17 +328,20 @@ export function isValidTemplateElements(value: unknown): value is TemplateElemen
   return Array.isArray(value) && value.every(isValidTemplateElement);
 }
 
-// A template's equalizer element saved before colors[]/glowLayers/glowRadius/coreWidth existed
-// (the old {color: string} showfreqs-MVP shape) can still sit in the database exactly as saved —
-// nothing re-validates a stored template's elements on read, only on write (see templateRoutes.ts).
-// Used as-is, this crashes StreamManager's whole process on the element's first render tick
-// (PulseVisualizer's buildPulseSvg does colors.map(...) on undefined, inside a bare setInterval
-// callback with nothing to catch it) — reproduced against a real deployed template. Patching in
-// the approved default style keeps the element's position/size exactly as saved (still
-// StreamManager's job to round to integers — see its own EqualizerConfig comment — not
-// re-validated the strict way here) while replacing only the missing/invalid style fields; falls
-// back to dropping the element entirely when even the position/size is unusable (e.g. negative or
-// out-of-canvas), the same "skip just the broken element" policy StreamManager's own
+// A template's equalizer element saved before a style field existed can still sit in the
+// database exactly as saved — nothing re-validates a stored template's elements on read, only on
+// write (see templateRoutes.ts). Two real generations of that: the old {color: string}
+// showfreqs-MVP shape with no colors[] at all, which used as-is crashes StreamManager's whole
+// process on the element's first render tick (PulseVisualizer's buildPulseSvg does
+// colors.map(...) on undefined, inside a bare setInterval callback with nothing to catch it —
+// reproduced against a real deployed template); and neon-pulse templates saved before the
+// sensitivity/smoothing/beatBoost/bandCount reactivity fields landed (and, one generation later,
+// before globalPulse did), whose own colors/glow must survive. So each missing/invalid style
+// field is patched with its default INDIVIDUALLY, never
+// the whole style at once. Position/size stay exactly as saved (still StreamManager's job to
+// round to integers — see its own EqualizerConfig comment — not re-validated the strict way
+// here); the element is dropped entirely only when even the position/size is unusable (e.g.
+// negative or out-of-canvas), the same "skip just the broken element" policy StreamManager's own
 // resolveImageAssets already uses for a malformed image element.
 export function normalizeEqualizerElement(element: EqualizerElement): EqualizerElement | null {
   if (!isValidPosition(element.x, element.y)
@@ -281,16 +349,16 @@ export function normalizeEqualizerElement(element: EqualizerElement): EqualizerE
     console.warn('[templates] dropping a template equalizer element with an invalid position/size');
     return null;
   }
-  if (isValidEqualizerStyle(element as unknown as Record<string, unknown>)) return element;
-  return {
-    ...element,
+  const raw = element as unknown as Record<string, unknown>;
+  if (isValidEqualizerStyle(raw)) return element;
+  const patched: Record<string, unknown> = { ...raw };
+  for (const field of Object.keys(EQUALIZER_STYLE_VALIDATORS) as EqualizerStyleField[]) {
+    if (EQUALIZER_STYLE_VALIDATORS[field](raw[field])) continue;
     // Spread a fresh mutable array rather than DEFAULT_EQUALIZER_STYLE.colors directly — it's a
     // readonly tuple (`as const`), not assignable to EqualizerElement's `colors: string[]`.
-    colors: [...DEFAULT_EQUALIZER_STYLE.colors],
-    glowLayers: DEFAULT_EQUALIZER_STYLE.glowLayers,
-    glowRadius: DEFAULT_EQUALIZER_STYLE.glowRadius,
-    coreWidth: DEFAULT_EQUALIZER_STYLE.coreWidth,
-  };
+    patched[field] = field === 'colors' ? [...DEFAULT_EQUALIZER_STYLE.colors] : DEFAULT_EQUALIZER_STYLE[field];
+  }
+  return patched as unknown as EqualizerElement;
 }
 
 // Used whenever a stream starts without an explicit templateId (it's optional — see

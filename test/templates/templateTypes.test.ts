@@ -1,5 +1,6 @@
-import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, isValidColorValue, normalizeEqualizerElement } from '../../src/templates/templateTypes';
+import { isValidTemplateElement, isValidTemplateElements, DEFAULT_TEMPLATE_ELEMENTS, DEFAULT_EQUALIZER_STYLE, isValidColorValue, normalizeEqualizerElement, globalPulseStrength } from '../../src/templates/templateTypes';
 import type { EqualizerElement } from '../../src/templates/templateTypes';
+import { MAX_GLOBAL_PULSE_STRENGTH } from '../../src/audio/pulseEngine';
 
 describe('isValidTemplateElement', () => {
   const baseStyle = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
@@ -259,10 +260,66 @@ describe('isValidTemplateElement — equalizer', () => {
     type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
     colors: ['#3b6fff', '#ff2f6e', '#3bdcff'],
     glowLayers: 9, glowRadius: 42, coreWidth: 1,
+    sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
   };
 
   it('accepts a valid equalizer element', () => {
     expect(isValidTemplateElement(validEqualizer)).toBe(true);
+  });
+
+  it('accepts every reactivity field at both ends of its range', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, sensitivity: 0.5, smoothing: 0, beatBoost: 0, bandCount: 8, globalPulse: 0 })).toBe(true);
+    expect(isValidTemplateElement({ ...validEqualizer, sensitivity: 3, smoothing: 1, beatBoost: 1, bandCount: 112, globalPulse: 20 })).toBe(true);
+  });
+
+  it('rejects globalPulse outside 0-20', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, globalPulse: -1 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, globalPulse: 21 })).toBe(false);
+  });
+
+  // Integer-only, like glowLayers/bandCount — the 0-20 range is what gives whole-number steps
+  // enough resolution (see EqualizerElement in templateTypes.ts).
+  it('rejects a non-integer globalPulse', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, globalPulse: 8.5 })).toBe(false);
+  });
+
+  it('rejects a missing or non-numeric globalPulse', () => {
+    const { globalPulse, ...withoutGlobalPulse } = validEqualizer;
+    expect(isValidTemplateElement(withoutGlobalPulse)).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, globalPulse: '8' })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, globalPulse: Number.NaN })).toBe(false);
+  });
+
+  it('rejects sensitivity outside 0.5-3.0', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, sensitivity: 0.49 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, sensitivity: 3.01 })).toBe(false);
+  });
+
+  it('rejects smoothing outside 0-1', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, smoothing: -0.01 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, smoothing: 1.01 })).toBe(false);
+  });
+
+  it('rejects beatBoost outside 0-1', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, beatBoost: -0.01 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, beatBoost: 1.01 })).toBe(false);
+  });
+
+  it('rejects bandCount outside 8-112', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, bandCount: 7 })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, bandCount: 113 })).toBe(false);
+  });
+
+  it('rejects a non-integer bandCount', () => {
+    expect(isValidTemplateElement({ ...validEqualizer, bandCount: 56.5 })).toBe(false);
+  });
+
+  it('rejects a missing or non-numeric reactivity field', () => {
+    const { sensitivity, ...withoutSensitivity } = validEqualizer;
+    expect(isValidTemplateElement(withoutSensitivity)).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, smoothing: '0.4' })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, beatBoost: Number.NaN })).toBe(false);
+    expect(isValidTemplateElement({ ...validEqualizer, bandCount: null })).toBe(false);
   });
 
   it('rejects an equalizer with fewer than 2 color stops', () => {
@@ -335,13 +392,86 @@ describe('isValidTemplateElement — equalizer', () => {
   });
 });
 
+describe('globalPulseStrength — the template field\'s 0-20 scale onto PulseEngine\'s own', () => {
+  // 0 must land on the engine's exact-zero path (byte-identical to an engine without the option
+  // — see pulseEngine.test.ts), not on some tiny positive strength.
+  it('maps 0 to exactly 0', () => {
+    expect(globalPulseStrength(0)).toBe(0);
+  });
+
+  // The default reproduces the engine strength the user approved in the internal-only A/B
+  // captures (0.8), so a template that never touches the knob gets the approved look.
+  it('maps the default (8) to the previously-approved engine strength 0.8, exactly', () => {
+    expect(DEFAULT_EQUALIZER_STYLE.globalPulse).toBe(8);
+    expect(globalPulseStrength(DEFAULT_EQUALIZER_STYLE.globalPulse)).toBe(0.8);
+  });
+
+  // Pins the two ends of the relationship together: the field's ceiling is the engine's clamp,
+  // so nothing in the field's range silently saturates (if this fails, one of the two moved).
+  it('maps the field\'s ceiling (20) onto the engine\'s MAX_GLOBAL_PULSE_STRENGTH', () => {
+    expect(globalPulseStrength(20)).toBe(MAX_GLOBAL_PULSE_STRENGTH);
+  });
+
+  it('is linear, with no float noise on an in-between value', () => {
+    expect(globalPulseStrength(12)).toBe(1.2);
+    expect(globalPulseStrength(3)).toBe(0.3);
+  });
+});
+
 describe('normalizeEqualizerElement', () => {
   it('returns an already-valid equalizer element unchanged', () => {
     const el: EqualizerElement = {
       type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
       colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 30, coreWidth: 2,
+      sensitivity: 2, smoothing: 0.7, beatBoost: 0.1, bandCount: 32, globalPulse: 3,
     };
     expect(normalizeEqualizerElement(el)).toEqual(el);
+  });
+
+  // The shape every neon-pulse template saved before sensitivity/smoothing/beatBoost/bandCount
+  // existed still has in the database. The user's own colors/glow must survive — only the fields
+  // that didn't exist yet get the defaults.
+  it('keeps the saved style and fills in only the missing reactivity fields for a template saved before they existed', () => {
+    const saved = {
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
+      colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+    } as unknown as EqualizerElement;
+    const result = normalizeEqualizerElement(saved);
+    expect(result).toEqual({
+      ...saved,
+      sensitivity: DEFAULT_EQUALIZER_STYLE.sensitivity,
+      smoothing: DEFAULT_EQUALIZER_STYLE.smoothing,
+      beatBoost: DEFAULT_EQUALIZER_STYLE.beatBoost,
+      bandCount: DEFAULT_EQUALIZER_STYLE.bandCount,
+      globalPulse: DEFAULT_EQUALIZER_STYLE.globalPulse,
+    });
+    expect(isValidTemplateElement(result)).toBe(true);
+  });
+
+  // The next generation of that: a template saved with the four reactivity fields but before
+  // globalPulse existed. It gets the default (8 — the approved look), not a validation failure
+  // and not "off".
+  it('fills in the default globalPulse for a template saved with the other reactivity fields but before globalPulse existed', () => {
+    const saved = {
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
+      colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+      sensitivity: 2, smoothing: 0.7, beatBoost: 0.1, bandCount: 32,
+    } as unknown as EqualizerElement;
+    const result = normalizeEqualizerElement(saved);
+    expect(result).toEqual({ ...saved, globalPulse: DEFAULT_EQUALIZER_STYLE.globalPulse });
+    expect(result!.globalPulse).toBe(8);
+    expect(isValidTemplateElement(result)).toBe(true);
+  });
+
+  it('replaces just an out-of-range reactivity field, keeping the valid ones', () => {
+    const saved = {
+      type: 'equalizer', x: 10, y: 10, width: 400, height: 150,
+      colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+      sensitivity: 99, smoothing: 0.7, beatBoost: 0.1, bandCount: 32, globalPulse: 3,
+    } as unknown as EqualizerElement;
+    const result = normalizeEqualizerElement(saved);
+    expect(result).toEqual({ ...saved, sensitivity: DEFAULT_EQUALIZER_STYLE.sensitivity });
+    expect(isValidTemplateElement(result)).toBe(true);
   });
 
   it('fills in the default neon-pulse style for a legacy MVP-shaped element (bare color string, no colors[])', () => {

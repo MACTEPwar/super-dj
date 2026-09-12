@@ -45,6 +45,31 @@ describe('NumberField', () => {
     expect(onChange).toHaveBeenCalledWith(100);
   });
 
+  // The equalizer's sensitivity (0.5-3.0) / smoothing / beatBoost (0-1) are genuinely fractional
+  // — with the default integer rounding a typed 0.4 would silently become 0.
+  it('with a fractional step, snaps to that step instead of to an integer', () => {
+    const onChange = vi.fn();
+    render(<NumberField label="Smoothing" value={0.4} min={0} max={1} step={0.05} onChange={onChange} />);
+
+    expect((screen.getByLabelText('Smoothing') as HTMLInputElement).value).toBe('0.4');
+    fireEvent.change(screen.getByLabelText('Smoothing'), { target: { value: '0.42' } });
+    expect(onChange).toHaveBeenCalledWith(0.4);
+
+    fireEvent.change(screen.getByLabelText('Smoothing'), { target: { value: '0.3' } });
+    // 6 * 0.05 is 0.30000000000000004 in floating point — the stored value must be the clean 0.3.
+    expect(onChange).toHaveBeenLastCalledWith(0.3);
+  });
+
+  it('clamps a stepped value to its min/max', () => {
+    const onChange = vi.fn();
+    render(<NumberField label="Sensitivity" value={1.5} min={0.5} max={3} step={0.1} onChange={onChange} />);
+
+    fireEvent.change(screen.getByLabelText('Sensitivity'), { target: { value: '0.2' } });
+    expect(onChange).toHaveBeenCalledWith(0.5);
+    fireEvent.change(screen.getByLabelText('Sensitivity'), { target: { value: '9' } });
+    expect(onChange).toHaveBeenLastCalledWith(3);
+  });
+
   it('calls onFocus/onBlur when provided', () => {
     const onFocus = vi.fn();
     const onBlur = vi.fn();

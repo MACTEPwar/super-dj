@@ -21,10 +21,12 @@ const DISPLAY_HEIGHT = (DISPLAY_WIDTH * CANVAS_HEIGHT) / CANVAS_WIDTH;
 const SCALE = DISPLAY_WIDTH / CANVAS_WIDTH;
 const PREVIEW_DEBOUNCE_MS = 400;
 const DEFAULT_FONT_FAMILY = 'DejaVu Sans';
+// Mirrors DEFAULT_EQUALIZER_STYLE in src/templates/templateTypes.ts.
 function defaultEqualizerStyle() {
   return {
     colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
     glowLayers: 9, glowRadius: 42, coreWidth: 1,
+    sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
   };
 }
 
@@ -104,17 +106,31 @@ function defaultElement(type: AddableType, t: (key: string) => string): Template
   }
 }
 
-// A template saved before the equalizer's colors[]/glowLayers/glowRadius/coreWidth schema landed
-// still has its old shape (`{type: 'equalizer', color: string}`) sitting in the database — nothing
-// re-validates a template's stored elements on read, only on write (see CLAUDE.md's Overlay
-// templates notes). Loading such a template into the editor without this normalization crashes
-// selecting the element (`selected.colors.map(...)` on `undefined`) with a blank white page.
+// A template saved before one of the equalizer's style fields existed still has its old shape
+// sitting in the database — nothing re-validates a template's stored elements on read, only on
+// write (see CLAUDE.md's Overlay templates notes). Two real generations of that: the original
+// `{type: 'equalizer', color: string}` shape with no colors[] at all, which without this crashes
+// selecting the element (`selected.colors.map(...)` on `undefined`) with a blank white page; and
+// neon-pulse templates saved before the sensitivity/smoothing/beatBoost/bandCount fields landed
+// (and, one generation later, before globalPulse did), which would otherwise put `undefined`
+// into those NumberFields and then fail the backend's validation on save. Each missing field
+// gets its own default so the user's saved colors/glow survive (mirrors
+// normalizeEqualizerElement on the backend).
 function normalizeElements(elements: TemplateElement[]): TemplateElement[] {
-  return elements.map((el) =>
-    el.type === 'equalizer' && !Array.isArray((el as { colors?: unknown }).colors)
-      ? { type: 'equalizer', x: el.x, y: el.y, width: el.width, height: el.height, ...defaultEqualizerStyle() }
-      : el,
-  );
+  return elements.map((el) => {
+    if (el.type !== 'equalizer') return el;
+    const raw = el as Partial<Record<keyof ReturnType<typeof defaultEqualizerStyle>, unknown>>;
+    const defaults = defaultEqualizerStyle();
+    const num = (field: 'glowLayers' | 'glowRadius' | 'coreWidth' | 'sensitivity' | 'smoothing' | 'beatBoost' | 'bandCount' | 'globalPulse') =>
+      (typeof raw[field] === 'number' && Number.isFinite(raw[field]) ? raw[field] as number : defaults[field]);
+    return {
+      type: 'equalizer', x: el.x, y: el.y, width: el.width, height: el.height,
+      colors: Array.isArray(raw.colors) ? el.colors : defaults.colors,
+      glowLayers: num('glowLayers'), glowRadius: num('glowRadius'), coreWidth: num('coreWidth'),
+      sensitivity: num('sensitivity'), smoothing: num('smoothing'), beatBoost: num('beatBoost'), bandCount: num('bandCount'),
+      globalPulse: num('globalPulse'),
+    };
+  });
 }
 
 // Non-cover/image elements have no stored height (drawtext/flex text sizes itself) — this is
@@ -568,6 +584,11 @@ export default function TemplateEditor() {
                   glowLayers={el.glowLayers}
                   glowRadius={el.glowRadius}
                   coreWidth={el.coreWidth}
+                  sensitivity={el.sensitivity}
+                  smoothing={el.smoothing}
+                  beatBoost={el.beatBoost}
+                  bandCount={el.bandCount}
+                  globalPulse={el.globalPulse}
                   boxWidth={el.width}
                   boxHeight={el.height}
                 />
@@ -786,6 +807,11 @@ export default function TemplateEditor() {
                   <NumberField label={t('templateEditor.fieldGlowLayers')} value={selected.glowLayers} min={3} max={9} onChange={(v) => updateElement(selectedIndex!, { glowLayers: Math.round(v) })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
                   <NumberField label={t('templateEditor.fieldGlowRadius')} value={selected.glowRadius} min={10} max={70} onChange={(v) => updateElement(selectedIndex!, { glowRadius: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
                   <NumberField label={t('templateEditor.fieldCoreWidth')} value={selected.coreWidth} min={1} max={6} onChange={(v) => updateElement(selectedIndex!, { coreWidth: Math.round(v) })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldSensitivity')} value={selected.sensitivity} min={0.5} max={3} step={0.1} onChange={(v) => updateElement(selectedIndex!, { sensitivity: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldSmoothing')} value={selected.smoothing} min={0} max={1} step={0.05} onChange={(v) => updateElement(selectedIndex!, { smoothing: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldBeatBoost')} value={selected.beatBoost} min={0} max={1} step={0.05} onChange={(v) => updateElement(selectedIndex!, { beatBoost: v })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldBandCount')} value={selected.bandCount} min={8} max={112} onChange={(v) => updateElement(selectedIndex!, { bandCount: Math.round(v) })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
+                  <NumberField label={t('templateEditor.fieldGlobalPulse')} value={selected.globalPulse} min={0} max={20} onChange={(v) => updateElement(selectedIndex!, { globalPulse: Math.round(v) })} onFocus={beginHistoryGesture} onBlur={commitHistoryGesture} />
                 </>
               )}
 

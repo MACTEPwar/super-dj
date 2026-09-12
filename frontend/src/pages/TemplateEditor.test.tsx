@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Route, Routes } from 'react-router-dom';
 import TemplateEditor from './TemplateEditor';
-import { getFontFamilies, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
+import { getFontFamilies, TemplateElement, templateImageUrl, templatesApi, uploadTemplateImage } from '../api/templates';
 import { renderWithProviders } from '../test/renderWithProviders';
 
 vi.mock('../api/templates');
@@ -346,16 +346,18 @@ describe('TemplateEditor', () => {
         type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
         colors: ['#3b6fff', '#b23bff', '#ff2f6e', '#b23bff', '#3bdcff'],
         glowLayers: 9, glowRadius: 42, coreWidth: 1,
+        sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
       }],
     }));
   });
 
-  it('selecting an equalizer element shows a color-stop editor and glow controls, no gradient toggle', async () => {
+  it('selecting an equalizer element shows a color-stop editor, glow and reactivity controls, no gradient toggle', async () => {
     vi.mocked(templatesApi.get).mockResolvedValue({
       id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
       elements: [{
         type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
         colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+        sensitivity: 2, smoothing: 0.7, beatBoost: 0.1, bandCount: 32, globalPulse: 12,
       }],
     });
     renderEditor();
@@ -367,8 +369,124 @@ describe('TemplateEditor', () => {
     expect(screen.getByLabelText('Glow layers')).toBeInTheDocument();
     expect(screen.getByLabelText('Glow radius')).toBeInTheDocument();
     expect(screen.getByLabelText('Core width')).toBeInTheDocument();
+    expect((screen.getByLabelText('Sensitivity') as HTMLInputElement).value).toBe('2');
+    expect((screen.getByLabelText('Smoothing') as HTMLInputElement).value).toBe('0.7');
+    expect((screen.getByLabelText('Beat boost') as HTMLInputElement).value).toBe('0.1');
+    expect((screen.getByLabelText('Bands') as HTMLInputElement).value).toBe('32');
+    expect((screen.getByLabelText('Global pulse') as HTMLInputElement).value).toBe('12');
     expect(screen.queryByText('Gradient')).not.toBeInTheDocument();
     expect(screen.queryByText('Solid')).not.toBeInTheDocument();
+  });
+
+  // globalPulse is a whole-number 0-20 knob (like Bands), not a fractional one like Smoothing:
+  // a typed fraction rounds, and the field clamps to the same 0-20 the backend validates.
+  it('editing the global pulse field stores a whole number clamped to 0-20', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+        sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
+      }],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Equalizer', { selector: 'span' }));
+
+    fireEvent.change(await screen.findByLabelText('Global pulse'), { target: { value: '99' } });
+    expect((screen.getByLabelText('Global pulse') as HTMLInputElement).value).toBe('20');
+    fireEvent.change(screen.getByLabelText('Global pulse'), { target: { value: '0' } });
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [expect.objectContaining({ type: 'equalizer', globalPulse: 0 })],
+    }));
+  });
+
+  it('editing a fractional reactivity field stores the fractional value, not a rounded one', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+        sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
+      }],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Equalizer', { selector: 'span' }));
+
+    fireEvent.change(await screen.findByLabelText('Smoothing'), { target: { value: '0.75' } });
+    fireEvent.change(screen.getByLabelText('Sensitivity'), { target: { value: '2.3' } });
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [expect.objectContaining({ type: 'equalizer', smoothing: 0.75, sensitivity: 2.3 })],
+    }));
+  });
+
+  // A neon-pulse template saved before sensitivity/smoothing/beatBoost/bandCount existed still
+  // sits in the database without them. The editor must fill in the defaults (and keep the user's
+  // own colors/glow), otherwise the new fields show as blank and the backend 400s the save.
+  it('fills in default reactivity fields for an equalizer saved before they existed, keeping its colors and glow', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+      } as unknown as TemplateElement],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Equalizer', { selector: 'span' }));
+
+    expect((await screen.findByLabelText('Sensitivity') as HTMLInputElement).value).toBe('1.5');
+    expect((screen.getByLabelText('Bands') as HTMLInputElement).value).toBe('56');
+    expect((screen.getByLabelText('Global pulse') as HTMLInputElement).value).toBe('8');
+
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+        sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
+      }],
+    }));
+  });
+
+  // The next generation of that: saved with the four reactivity fields but before globalPulse
+  // existed. Only globalPulse gets the default (8, the approved look — not 0/off); the user's
+  // own reactivity values survive.
+  it('fills in only the default globalPulse for an equalizer saved with the other reactivity fields but before globalPulse existed', async () => {
+    vi.mocked(templatesApi.get).mockResolvedValue({
+      id: 't1', name: 'My Theme', createdAt: '', updatedAt: '',
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+        sensitivity: 2, smoothing: 0.7, beatBoost: 0.1, bandCount: 32,
+      } as unknown as TemplateElement],
+    });
+    vi.mocked(templatesApi.update).mockResolvedValue({ id: 't1', name: 'My Theme', elements: [], createdAt: '', updatedAt: '' });
+    renderEditor();
+    await userEvent.click(await screen.findByText('Equalizer', { selector: 'span' }));
+
+    expect((await screen.findByLabelText('Global pulse') as HTMLInputElement).value).toBe('8');
+    expect((screen.getByLabelText('Sensitivity') as HTMLInputElement).value).toBe('2');
+
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(templatesApi.update).toHaveBeenCalledWith('t1', {
+      name: 'My Theme',
+      elements: [{
+        type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
+        colors: ['#123456', '#abcdef'], glowLayers: 4, glowRadius: 15, coreWidth: 3,
+        sensitivity: 2, smoothing: 0.7, beatBoost: 0.1, bandCount: 32, globalPulse: 8,
+      }],
+    }));
   });
 
   it('the equalizer canvas box renders an animated preview canvas, not a static placeholder', async () => {
@@ -377,6 +495,7 @@ describe('TemplateEditor', () => {
       elements: [{
         type: 'equalizer', x: 100, y: 500, width: 400, height: 150,
         colors: ['#3b6fff', '#ff2f6e'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+        sensitivity: 1.5, smoothing: 0.4, beatBoost: 0.5, bandCount: 56, globalPulse: 8,
       }],
     });
     renderEditor();

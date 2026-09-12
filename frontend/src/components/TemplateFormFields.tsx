@@ -9,26 +9,33 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-export function NumberField({ label, value, onChange, min = 0, max, onFocus, onBlur }: { label: string; value: number; onChange: (v: number) => void; min?: number; max: number; onFocus?: () => void; onBlur?: () => void }) {
+export function NumberField({ label, value, onChange, min = 0, max, step = 1, onFocus, onBlur }: { label: string; value: number; onChange: (v: number) => void; min?: number; max: number; step?: number; onFocus?: () => void; onBlur?: () => void }) {
+  // Values snap to the step's grid — whole numbers by default, since nearly every caller (x/y/
+  // width/height/fontSize/strokeWidth/shadow blur+offsets/gradient angle) is a whole-pixel or
+  // whole-degree value with no legitimate use for fractional precision. A fractional step (the
+  // equalizer's 0.5-3.0 sensitivity, 0-1 smoothing/beatBoost) snaps to that grid instead, with
+  // the float noise of e.g. 3 * 0.1 = 0.30000000000000004 trimmed so state stays as clean as
+  // what the field displays.
+  const decimals = step >= 1 ? 0 : Math.ceil(-Math.log10(step));
+  const snap = (n: number) => Number((Math.round(n / step) * step).toFixed(decimals));
   return (
     <label className="block text-xs text-gray-600">
       {label}
       <input
         type="number"
-        value={Math.round(value)}
+        value={snap(value)}
         min={min}
         max={max}
+        step={step}
         onFocus={onFocus}
         onBlur={onBlur}
         onChange={(e) => {
           const n = Number(e.target.value);
-          // Rounded before clamping/storing, not just before display (the input's `value` above
-          // already rounds for display, but onChange used to pass the raw fractional value
+          // Snapped before clamping/storing, not just before display (the input's `value` above
+          // already snaps for display, but onChange used to pass the raw fractional value
           // through — round-tripping a typed "400.5" back as a state value of 400.5 even though
-          // the field visibly showed "401"). Every current caller (x/y/width/height/fontSize/
-          // strokeWidth/shadow blur+offsets/gradient angle) is a whole-pixel or whole-degree
-          // value with no legitimate use for fractional precision.
-          if (Number.isFinite(n)) onChange(clamp(Math.round(n), min, max));
+          // the field visibly showed "401").
+          if (Number.isFinite(n)) onChange(clamp(snap(n), min, max));
         }}
         className="mt-1 w-full rounded border px-2 py-1 text-sm"
       />

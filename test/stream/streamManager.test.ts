@@ -96,6 +96,9 @@ function buildDeps() {
     ...fakeChild(),
     videoPipe: new PassThrough(),
     audioPipe: new PassThrough(),
+    // Always present on a real ChildProcessWithPipes (see createPipeSpawner) — PulseVisualizer
+    // registers a 'drain' listener on it at attach().
+    pulsePipe: new PassThrough(),
   });
   const templateRepository = { findById: jest.fn() };
   const templateImageService = {
@@ -344,7 +347,69 @@ describe('StreamManager', () => {
       expect(filterComplex).toContain('x=5:y=5:fontsize=20:fontcolor=#ffffff');
     });
 
-    const equalizerStyle = { colors: ['#00ff00', '#0000ff'], glowLayers: 5, glowRadius: 20, coreWidth: 2 };
+    const equalizerStyle = {
+      colors: ['#00ff00', '#0000ff'], glowLayers: 5, glowRadius: 20, coreWidth: 2,
+      sensitivity: 2.5, smoothing: 0.8, beatBoost: 0.2, bandCount: 24, globalPulse: 12,
+    };
+
+    it('passes the equalizer element\'s reactivity fields (sensitivity/smoothing/beatBoost/bandCount) through to PulseVisualizer', async () => {
+      const { deps, templateRepository } = buildDeps();
+      const equalizerEl = { type: 'equalizer', x: 20, y: 30, width: 200, height: 100, ...equalizerStyle };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [equalizerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      // bandCount in particular is silent if dropped: PulseVisualizer has its own 56 default, so
+      // a template's 24 would just render as 56 with nothing failing.
+      expect(PulseVisualizer).toHaveBeenCalledWith(expect.objectContaining({
+        sensitivity: 2.5, smoothing: 0.8, beatBoost: 0.2, bandCount: 24,
+      }));
+    });
+
+    // Unlike the four above, globalPulse is NOT passed through as-is: the template field is a
+    // 0-20 knob and PulseVisualizer/PulseEngine take the engine's own strength scale (10 steps
+    // per 1.0). Passing the raw 12 through would be clamped to the engine's maximum (2) — every
+    // template value from 2 upward would silently read as "maximum".
+    it('converts the equalizer element\'s globalPulse (0-20) onto the engine strength scale before it reaches PulseVisualizer', async () => {
+      const { deps, templateRepository } = buildDeps();
+      const equalizerEl = { type: 'equalizer', x: 20, y: 30, width: 200, height: 100, ...equalizerStyle };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [equalizerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(PulseVisualizer).toHaveBeenCalledWith(expect.objectContaining({ globalPulse: 1.2 }));
+    });
+
+    it('a template globalPulse of 0 reaches PulseVisualizer as exactly 0 (the engine\'s "off" path), and the default 8 as the approved 0.8', async () => {
+      for (const [field, expected] of [[0, 0], [8, 0.8]] as const) {
+        jest.clearAllMocks();
+        const { deps, templateRepository } = buildDeps();
+        const equalizerEl = { type: 'equalizer', x: 20, y: 30, width: 200, height: 100, ...equalizerStyle, globalPulse: field };
+        templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [equalizerEl] });
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        expect(PulseVisualizer).toHaveBeenCalledWith(expect.objectContaining({ globalPulse: expected }));
+      }
+    });
+
+    // A template saved before globalPulse existed goes through normalizeEqualizerElement on
+    // read, which fills in the default — so the stream gets the approved 0.8, not undefined
+    // (which PulseEngine would read as 0 = off, a silent regression for every older template).
+    it('an equalizer element saved before globalPulse existed streams with the default strength (0.8), not off', async () => {
+      const { deps, templateRepository } = buildDeps();
+      const { globalPulse, ...legacyStyle } = equalizerStyle;
+      const equalizerEl = { type: 'equalizer', x: 20, y: 30, width: 200, height: 100, ...legacyStyle };
+      templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [equalizerEl] });
+      const manager = new StreamManager(deps as any);
+
+      await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+      expect(PulseVisualizer).toHaveBeenCalledWith(expect.objectContaining({ globalPulse: 0.8 }));
+    });
 
     it('passes the template equalizer element position/size through to PersistentEncoder, and its style through to a new PulseVisualizer', async () => {
       const { deps, templateRepository, pipeSpawner } = buildDeps();

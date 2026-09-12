@@ -27,7 +27,10 @@ export type TemplateElement =
   // Mirrors src/templates/templateTypes.ts's EqualizerElement — colors[] feeds resvg's SVG
   // gradient (a real CSS-color renderer), not an ffmpeg filter directly, so ordinary CSS hex
   // (including 3/4-digit shorthand) is fine here, unlike 'timer' above.
-  | { type: 'equalizer'; x: number; y: number; width: number; height: number; colors: string[]; glowLayers: number; glowRadius: number; coreWidth: number };
+  // sensitivity 0.5-3 / smoothing 0-1 / beatBoost 0-1 / bandCount 8-112 (integer) /
+  // globalPulse 0-20 (integer; 0 = no whole-line beat pulse, higher = stronger) — the
+  // reactivity knobs, see the backend's EqualizerElement for what each does.
+  | { type: 'equalizer'; x: number; y: number; width: number; height: number; colors: string[]; glowLayers: number; glowRadius: number; coreWidth: number; sensitivity: number; smoothing: number; beatBoost: number; bandCount: number; globalPulse: number };
 
 export interface TemplateSummary {
   id: string;

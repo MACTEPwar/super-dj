@@ -20,7 +20,7 @@ import { DestinationRepository } from '../destinations/destinationRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
 import { TemplateImageService, InvalidAssetIdError } from '../templates/templateImageService';
-import { TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS, normalizeEqualizerElement } from '../templates/templateTypes';
+import { TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS, normalizeEqualizerElement, globalPulseStrength } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 import { SessionOverlayCache } from './sessionOverlayCache';
@@ -346,6 +346,12 @@ export class StreamManager extends EventEmitter {
               glowLayers: equalizerElement.glowLayers,
               glowRadius: equalizerElement.glowRadius,
               coreWidth: equalizerElement.coreWidth,
+              sensitivity: equalizerElement.sensitivity,
+              smoothing: equalizerElement.smoothing,
+              beatBoost: equalizerElement.beatBoost,
+              bandCount: equalizerElement.bandCount,
+              // The template field is a 0-20 knob; the engine wants its own strength scale.
+              globalPulse: globalPulseStrength(equalizerElement.globalPulse),
             })
           : undefined,
         onError: () => {
