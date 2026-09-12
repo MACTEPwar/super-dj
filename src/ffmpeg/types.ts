@@ -21,6 +21,12 @@ export interface ChildProcessWithPipes extends ChildProcessLike {
   // always exists once spawned — see createPipeSpawner), simply never written to when there's no
   // equalizer element for a given session.
   readonly pulsePipe: NodeJS.WritableStream;
+  // The second canvas layer, fed only when the resolved template's baked elements straddle its
+  // first animated-gif element — see CanvasPlacement in persistentEncoderArgs.ts and
+  // CanvasFeeder's aboveOverlayImagePath. Same "always present on the child, only sometimes
+  // written to" arrangement as pulsePipe above: createPipeSpawner opens the stdio slot
+  // unconditionally, and buildPersistentEncoderArgs only declares `-i pipe:6` when it's needed.
+  readonly aboveCanvasPipe: NodeJS.WritableStream;
 }
 
 export type PipeSpawner = (command: string, args: string[]) => ChildProcessWithPipes;

@@ -52,9 +52,11 @@ export function createSpawner(): Spawner {
 export function createPipeSpawner(): PipeSpawner {
   return (command: string, args: string[]): ChildProcessWithPipes => {
     // fd0 (stdin) unused, fd1 (stdout) unused — this process's real output is the RTMP push, not
-    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4/fd5 are
-    // the video/audio/pulse pipes ffmpeg's own args reference as pipe:3/pipe:4/pipe:5.
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe'] });
+    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4/fd5/fd6
+    // are the video/audio/pulse/above-canvas pipes ffmpeg's own args reference as
+    // pipe:3/pipe:4/pipe:5/pipe:6. The slots are always opened; whether ffmpeg is told to read
+    // pipe:5 or pipe:6 depends on the template (see buildPersistentEncoderArgs).
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] });
     child.on('error', (err) => {
       console.error('persistent encoder process failed to spawn', err);
     });
@@ -69,6 +71,7 @@ export function createPipeSpawner(): PipeSpawner {
     const videoPipe = stdio[3];
     const audioPipe = stdio[4];
     const pulsePipe = stdio[5];
+    const aboveCanvasPipe = stdio[6];
     // An 'error' event with no listener is an uncaught exception in Node, which would crash the
     // whole process (every tenant's active stream, not just this one) — the same hazard the
     // earlier per-segment pipeline's FIFO write-stream guard existed for. Writes fail with EPIPE
@@ -77,7 +80,8 @@ export function createPipeSpawner(): PipeSpawner {
     videoPipe.on('error', (err) => { console.error('video pipe write error', err); });
     audioPipe.on('error', (err) => { console.error('audio pipe write error', err); });
     pulsePipe.on('error', (err) => { console.error('pulse pipe write error', err); });
-    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe, pulsePipe }) as ChildProcessWithPipes;
+    aboveCanvasPipe.on('error', (err) => { console.error('above-canvas pipe write error', err); });
+    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe, pulsePipe, aboveCanvasPipe }) as ChildProcessWithPipes;
   };
 }
 

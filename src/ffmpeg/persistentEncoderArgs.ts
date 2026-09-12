@@ -32,6 +32,30 @@ export interface GifOverlayConfig {
 // equalizer overlay below for why it doesn't need it.)
 const GIF_OVERLAY_FORMAT = 'format=rgb';
 
+/**
+ * Where the Satori-baked canvas sits relative to the animated-gif overlays.
+ *
+ * Every non-gif element is baked into one flat PNG, so the canvas can only be composited as a
+ * whole — but a template's element ORDER says which of those elements belong behind a gif and
+ * which in front of it. StreamManager splits the baked elements around the first gif element's
+ * position and picks the placement that reproduces that order:
+ *
+ * - `top` — the canvas goes over every gif. The only possibility when there are no gifs at all,
+ *   and also correct when every baked element is listed after the first gif. This is exactly the
+ *   single-layer graph that predates the split, byte for byte.
+ * - `bottom` — the canvas goes under every gif, for a template whose baked elements are all
+ *   listed before the first gif (e.g. just a full-frame background image with a gif over it).
+ *   Still one canvas input; only the compositing order moves.
+ * - `split` — baked elements exist on BOTH sides of the first gif, so there are two canvas
+ *   layers: pipe:3 carries the below one, pipe:6 the above one, and the gifs composite between.
+ *   This is the only placement that costs a second Satori render and a second pipe.
+ *
+ * Before this existed the canvas was always `top`, which meant a full-frame opaque element listed
+ * BEFORE a gif hid it completely — verified against a real ffmpeg binary: zero frame-to-frame
+ * change in the gif's region, at a flat luma matching the canvas's own background.
+ */
+export type CanvasPlacement = 'top' | 'bottom' | 'split';
+
 export function buildPersistentEncoderArgs(params: {
   width: number;
   height: number;
@@ -47,9 +71,14 @@ export function buildPersistentEncoderArgs(params: {
   backgroundPath: string;
   equalizer?: EqualizerConfig;
   gifOverlays?: GifOverlayConfig[];
+  // Defaults to 'top' — the pre-split behaviour, and the only meaningful value with no gifs.
+  canvasPlacement?: CanvasPlacement;
 }): string[] {
-  const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [] } = params;
+  const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [], canvasPlacement = 'top' } = params;
   const pulseInputIndex = 3 + gifOverlays.length;
+  // Appended after the pulse input, not before it, so neither the gif input indices (3...) nor
+  // pulseInputIndex above moves when a template gains a second canvas layer.
+  const aboveCanvasInputIndex = pulseInputIndex + (equalizer ? 1 : 0);
   const inputs = [
     // yuva420p, not yuv420p: this pipe used to carry an opaque frame (CanvasFeeder flattened the
     // background into it before every write), which meant nothing composited "under" [0:v] in
@@ -81,6 +110,13 @@ export function buildPersistentEncoderArgs(params: {
     // filter like the earlier showfreqs MVP. Placed last, after every gif input, so adding it
     // never renumbers the gif input indices above.
     ...(equalizer ? ['-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${equalizer.width}x${equalizer.height}`, '-r', String(fps), '-i', 'pipe:5'] : []),
+    // The second ("above") canvas layer, present only for a 'split' template — same declaration
+    // as pipe:3 because it carries exactly the same kind of frame, produced by the same
+    // CanvasFeeder on the same heartbeat. Last in the list for the same non-renumbering reason
+    // the pulse input is placed after the gifs.
+    ...(canvasPlacement === 'split'
+      ? ['-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', `${width}x${height}`, '-r', String(heartbeatFps), '-i', 'pipe:6']
+      : []),
   ];
 
   const filterLines: string[] = [
@@ -95,11 +131,20 @@ export function buildPersistentEncoderArgs(params: {
     // frames over a 3s clip without this stage, dup=0 with it. Cheap fix — `fps` duplicates
     // already-decoded frames inside the filter graph, no extra CanvasFeeder writes/renders.
     `[0:v]fps=${fps},format=yuva420p[vcanvas]`,
+    // Same treatment for the second layer when there is one — see CanvasPlacement.
+    ...(canvasPlacement === 'split' ? [`[${aboveCanvasInputIndex}:v]fps=${fps},format=yuva420p[vcanvas2]`] : []),
   ];
   let videoPad = 'vbg';
 
-  // Each gif is composited onto the background, in template-element order, before the canvas is
-  // laid on top of all of them — see the canvas-overlay stage below for why that order matters.
+  // For 'bottom' and 'split', the elements the template lists BEFORE its first gif go down first,
+  // so the gifs below then composite over them instead of under them.
+  if (canvasPlacement !== 'top') {
+    filterLines.push(`[${videoPad}][vcanvas]overlay=0:0[vcanvas_below]`);
+    videoPad = 'vcanvas_below';
+  }
+
+  // Each gif is composited in template-element order onto whatever is underneath it so far — the
+  // background, plus the below-canvas layer when the template has one.
   gifOverlays.forEach((gif, i) => {
     const inputIndex = 3 + i;
     const gifPad = `gif${i}`;
@@ -118,15 +163,18 @@ export function buildPersistentEncoderArgs(params: {
     videoPad = nextPad;
   });
 
-  // The canvas (every Satori-baked element — cover/title/playlist/text/static image) always
-  // composites on top of the background and every gif overlay, exactly like it did when Satori
-  // was the only renderer and painted everything in one pass. Pulling an animated-gif element out
-  // into its own native overlay branch must not change where the REST of the template's elements
-  // land in the stack, or a full-frame background gif silently hides title/playlist text that
-  // was meant to render above it — a real bug this fixes (verified against a real ffmpeg binary
-  // and a real deployed template).
-  filterLines.push(`[${videoPad}][vcanvas]overlay=0:0[vcanvas_top]`);
-  videoPad = 'vcanvas_top';
+  // Whatever the template lists AFTER its first gif composites on top of every gif: the whole
+  // canvas for 'top' (the no-gif case — this is the original single-layer behaviour, which must
+  // not change), or the second canvas layer for 'split'. 'bottom' has nothing left to lay on top,
+  // so the last gif stage is already the final video pad. Getting this wrong in either direction
+  // is a real, observed bug: with the canvas pinned on top, a full-frame element listed before a
+  // gif hid it entirely; with the canvas pinned below, a full-frame gif would hide the title/
+  // playlist text meant to sit over it.
+  if (canvasPlacement === 'top' || canvasPlacement === 'split') {
+    const topCanvasPad = canvasPlacement === 'split' ? 'vcanvas2' : 'vcanvas';
+    filterLines.push(`[${videoPad}][${topCanvasPad}]overlay=0:0[vcanvas_top]`);
+    videoPad = 'vcanvas_top';
+  }
 
   if (equalizer) {
     // format=yuva420p is the actual straight-alpha compositing conversion — the input is declared
@@ -140,7 +188,8 @@ export function buildPersistentEncoderArgs(params: {
     // far less contended than the deployment host. It isn't needed for containment: the pulse
     // frame is inset from every edge by at least its own stroke margin (see layoutPulsePoints in
     // src/render/pulseSvg.ts), so the <=1px rounding of an odd coordinate moves the picture a
-    // pixel WITHIN the box and can never paint outside it — verified on the composited output at
+    // pixel WITHIN the box and can never paint outside it (pulseGeometry in pulseSvg.ts keeps at
+    // least EDGE_CLEARANCE_PX of empty pixels on every edge, for any glow/box combination) — verified on the composited output at
     // an odd position (141:501): nothing outside the box beyond x264's own ringing (max 7/255),
     // identical to the even-position run.
     filterLines.push(`[${videoPad}][pulse]overlay=${equalizer.x}:${equalizer.y}[vout]`);

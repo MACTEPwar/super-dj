@@ -11,6 +11,7 @@ function fakeChild(): ChildProcessWithPipes & { emitExit: (code: number | null) 
     videoPipe: new PassThrough(),
     audioPipe: new PassThrough(),
     pulsePipe: new PassThrough(),
+    aboveCanvasPipe: new PassThrough(),
     kill: jest.fn(),
     once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
       if (event === 'exit') exitListener = listener as (code: number | null) => void;

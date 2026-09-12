@@ -257,19 +257,35 @@ function widthsFor(glowRadius: number, glowLayers: number): number[] {
   const out: number[] = [];
   for (let i = 0; i < glowLayers; i++) {
     const f = i / (glowLayers - 1 || 1);
-    out.push(glowRadius * Math.pow(1 - f, 1.5) + 0.4);
+    out.push(glowRadius * Math.pow(1 - f, 1.5) + GLOW_LAYER_PAD);
   }
   return out;
 }
 
-// Port of the backend's strokeMarginPx + layoutPulsePoints (src/render/pulseSvg.ts): the polyline
-// is inset from every edge by half the widest stroke (plus a pixel of anti-aliasing) so the whole
-// glow lands inside the box instead of being chopped flat at its edges, the baseline sits at the
-// vertical centre, and the loudest value reaches exactly the top margin. Same cap for a box
-// smaller than its own glow.
-function layoutPulsePoints(values: number[], boxWidth: number, boxHeight: number, glowRadius: number, coreWidth: number): { x: number; y: number }[] {
-  const strokeMargin = Math.ceil(Math.max(glowRadius + 0.4, coreWidth) / 2) + 1;
-  const margin = Math.min(strokeMargin, Math.floor(Math.min(boxWidth, boxHeight) / 4));
+// Port of the backend's pulseGeometry + strokeMarginPx (src/render/pulseSvg.ts) — see that file
+// for the full reasoning. The short version: the polyline is inset from every edge by half the
+// widest stroke plus EDGE_CLEARANCE_PX, so the whole glow lands inside the box with visible room
+// to spare instead of being chopped flat at (or hugging) its edges; and when the configured glow
+// is too wide for the box, the STROKES shrink to what the box can hold rather than being drawn at
+// full width and clipped. Both the layout below and the draw loop read this one function, exactly
+// as layoutPulsePoints and buildPulseSvg both do on the backend — them deriving it separately is
+// what let the drawn glow outgrow the inset in the first place.
+const EDGE_CLEARANCE_PX = 3;
+const GLOW_LAYER_PAD = 0.4;
+const MAX_MARGIN_SHARE = 4;
+
+function pulseGeometry(boxWidth: number, boxHeight: number, glowRadius: number, coreWidth: number): { margin: number; glowRadius: number; coreWidth: number } {
+  const wanted = Math.ceil(Math.max(glowRadius + GLOW_LAYER_PAD, coreWidth) / 2) + EDGE_CLEARANCE_PX;
+  const maxMargin = Math.floor(Math.min(boxWidth, boxHeight) / MAX_MARGIN_SHARE);
+  if (wanted <= maxMargin) return { margin: wanted, glowRadius, coreWidth };
+  const margin = Math.max(0, maxMargin);
+  const widest = Math.max(0, 2 * (margin - EDGE_CLEARANCE_PX));
+  return { margin, glowRadius: Math.max(0, widest - GLOW_LAYER_PAD), coreWidth: Math.min(coreWidth, widest) };
+}
+
+// Port of the backend's layoutPulsePoints: the baseline sits at the vertical centre and the
+// loudest value reaches exactly the top margin.
+function layoutPulsePoints(values: number[], boxWidth: number, boxHeight: number, margin: number): { x: number; y: number }[] {
   const n = values.length;
   const usableWidth = boxWidth - 2 * margin;
   const baseline = boxHeight / 2;
@@ -305,6 +321,10 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
     canvas.width = boxWidth;
     canvas.height = boxHeight;
 
+    // Resolved once per prop change, not per frame — the box and the style are fixed for the
+    // life of this effect, and the layout and the strokes must both come from the same result.
+    const geometry = pulseGeometry(boxWidth, boxHeight, glowRadius, coreWidth);
+
     const engine = new PreviewPulseEngine(bandCount, sensitivity, smoothing, beatBoost, globalPulse / GLOBAL_PULSE_STEPS_PER_STRENGTH);
     const magnitudes = new Array<number>(bandCount).fill(0);
     let lastT = 0;
@@ -325,9 +345,9 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
       const grad = ctx.createLinearGradient(0, 0, boxWidth, 0);
       colors.forEach((c, i) => grad.addColorStop(i / (colors.length - 1 || 1), c));
 
-      const points = layoutPulsePoints(values, boxWidth, boxHeight, glowRadius, coreWidth);
+      const points = layoutPulsePoints(values, boxWidth, boxHeight, geometry.margin);
 
-      const widths = widthsFor(glowRadius, glowLayers);
+      const widths = widthsFor(geometry.glowRadius, glowLayers);
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
       ctx.globalCompositeOperation = 'lighter';
@@ -343,7 +363,7 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
       ctx.globalAlpha = 1;
       tracePath(ctx, points);
       ctx.strokeStyle = '#fbf3ff';
-      ctx.lineWidth = coreWidth;
+      ctx.lineWidth = geometry.coreWidth;
       ctx.stroke();
 
       if (running && !reduceMotion) raf = requestAnimationFrame(draw);

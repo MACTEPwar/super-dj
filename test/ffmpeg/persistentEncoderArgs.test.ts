@@ -186,6 +186,81 @@ describe('buildPersistentEncoderArgs', () => {
     });
   });
 
+  // The canvas being ONE flat layer always composited on top of every gif is only right when the
+  // template's gif elements are listed before everything else. A full-frame opaque element listed
+  // BEFORE a gif (a static image, a cover, or a per-track overlayOverride background) hid the gif
+  // completely — reproduced against a real ffmpeg binary: the gif's region showed zero
+  // frame-to-frame change at a flat luma matching the canvas background. StreamManager now splits
+  // the baked elements around the first gif's position and tells this builder where the canvas
+  // (or canvases) belong.
+  describe('canvasPlacement', () => {
+    const gifs = [
+      { x: 10, y: 10, width: 100, height: 100, filePath: '/a.gif', frameCount: 5 },
+      { x: 20, y: 20, width: 200, height: 200, filePath: '/b.gif', frameCount: 8 },
+    ];
+
+    it("defaults to 'top' — byte-for-byte the pre-split behaviour, canvas over every gif", () => {
+      const omitted = buildPersistentEncoderArgs({ ...base, gifOverlays: gifs });
+      const explicit = buildPersistentEncoderArgs({ ...base, gifOverlays: gifs, canvasPlacement: 'top' });
+      expect(explicit).toEqual(omitted);
+      const filterArg = omitted[omitted.indexOf('-filter_complex') + 1];
+      expect(filterArg).toContain('[vgif1][vcanvas]overlay=0:0[vcanvas_top]');
+      expect(omitted).not.toEqual(expect.arrayContaining(['pipe:6']));
+    });
+
+    it("'bottom' composites the one canvas under every gif, with no second canvas input", () => {
+      const args = buildPersistentEncoderArgs({ ...base, gifOverlays: gifs, canvasPlacement: 'bottom' });
+
+      const filterArg = args[args.indexOf('-filter_complex') + 1];
+      // The canvas lands on the background first; the gifs then chain on top of THAT, not on [vbg].
+      expect(filterArg).toContain('[vbg][vcanvas]overlay=0:0[vcanvas_below]');
+      expect(filterArg).toContain('[vcanvas_below][gif0]overlay=10:10:format=rgb[vgif0]');
+      expect(filterArg).toContain('[vgif0][gif1]overlay=20:20:format=rgb[vgif1]');
+      expect(filterArg).not.toContain('[vcanvas_top]');
+      expect(args).toEqual(expect.arrayContaining(['-map', '[vgif1]']));
+      expect(args).not.toEqual(expect.arrayContaining(['pipe:6']));
+    });
+
+    it("'split' adds a second canvas pipe and composites the gifs between the two canvas layers", () => {
+      const args = buildPersistentEncoderArgs({ ...base, gifOverlays: gifs, canvasPlacement: 'split' });
+
+      // Same declaration as pipe:3 — it carries the same kind of frame, from the same CanvasFeeder.
+      expect(args).toEqual(expect.arrayContaining([
+        '-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', '1280x720', '-r', '5', '-i', 'pipe:6',
+      ]));
+      const filterArg = args[args.indexOf('-filter_complex') + 1];
+      // background -> below canvas -> gifs in order -> above canvas
+      expect(filterArg).toContain('[vbg][vcanvas]overlay=0:0[vcanvas_below]');
+      expect(filterArg).toContain('[vcanvas_below][gif0]overlay=10:10:format=rgb[vgif0]');
+      expect(filterArg).toContain('[vgif0][gif1]overlay=20:20:format=rgb[vgif1]');
+      expect(filterArg).toContain('[5:v]fps=30,format=yuva420p[vcanvas2]');
+      expect(filterArg).toContain('[vgif1][vcanvas2]overlay=0:0[vcanvas_top]');
+      expect(args).toEqual(expect.arrayContaining(['-map', '[vcanvas_top]']));
+    });
+
+    it("keeps the equalizer on top of both canvas layers, and gives the second canvas an input index that doesn't renumber the gif or pulse inputs", () => {
+      const args = buildPersistentEncoderArgs({
+        ...base,
+        gifOverlays: gifs,
+        equalizer: { x: 40, y: 500, width: 400, height: 150 },
+        canvasPlacement: 'split',
+      });
+
+      const filterArg = args[args.indexOf('-filter_complex') + 1];
+      // gif inputs still 3 and 4, pulse still 5 (3 + gifCount) — the second canvas is appended
+      // last, at 6, so neither of the existing index formulas moves.
+      expect(filterArg).toContain('[3:v]loop=loop=-1:size=5,fps=30,scale=100:100[gif0]');
+      expect(filterArg).toContain('[4:v]loop=loop=-1:size=8,fps=30,scale=200:200[gif1]');
+      expect(filterArg).toContain('[5:v]format=yuva420p[pulse]');
+      expect(filterArg).toContain('[6:v]fps=30,format=yuva420p[vcanvas2]');
+      expect(filterArg).toContain('[vgif1][vcanvas2]overlay=0:0[vcanvas_top]');
+      expect(filterArg).toContain('[vcanvas_top][pulse]overlay=40:500[vout]');
+      expect(args).toEqual(expect.arrayContaining(['-map', '[vout]', '-map', '1:a']));
+      // pipe:5 still comes before pipe:6 in the input list.
+      expect(args.indexOf('pipe:5')).toBeLessThan(args.indexOf('pipe:6'));
+    });
+  });
+
   it('is byte-for-byte identical to the no-equalizer output when equalizer is omitted vs. explicitly undefined', () => {
     const omitted = buildPersistentEncoderArgs(base);
     const explicitUndefined = buildPersistentEncoderArgs({ ...base, equalizer: undefined });

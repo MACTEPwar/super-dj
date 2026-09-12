@@ -1,6 +1,11 @@
 import * as fs from 'fs';
 import { Spawner } from './types';
 import { buildCanvasFrameArgs, NowPlayingOverlay, TimerOverlay } from './segmentArgs';
+import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
+
+function needsDrain(pipe: NodeJS.WritableStream): boolean {
+  return (pipe as unknown as { writableNeedDrain?: boolean }).writableNeedDrain === true;
+}
 
 export interface CanvasFeederOptions {
   spawner: Spawner;
@@ -8,6 +13,18 @@ export interface CanvasFeederOptions {
   // pattern the earlier per-segment pipeline always used, just now feeding a one-shot render
   // instead of a continuous encode.
   overlayImagePath: string;
+  // Set only for a template whose baked elements straddle its first animated-gif element — see
+  // NowPlayingOverlay.overlayPngAbove and CanvasPlacement in persistentEncoderArgs.ts. Its
+  // presence is what makes this feeder a two-layer one for the life of the session: the overlay's
+  // `overlayPngAbove` is rendered to its own frame and written to a second pipe, and the timer
+  // drawtext moves onto that upper layer so a gif can never end up covering it.
+  //
+  // Both layers are owned by ONE feeder rather than two instances on purpose. ffmpeg synthesizes
+  // each raw pipe's PTS purely from how many frames it has received (both are declared at a fixed
+  // `-r heartbeatFps` with no timestamps), so two independent heartbeats — each with its own
+  // backpressure check and its own timer drift — would slide the two layers permanently out of
+  // register with each other. One heartbeat writing both, or neither, cannot.
+  aboveOverlayImagePath?: string;
   fontFile: string;
   width: number;
   height: number;
@@ -23,16 +40,24 @@ export interface CanvasFeederOptions {
 export class CanvasFeeder {
   private readonly writeFileSync: (path: string, data: Buffer) => void;
   private cachedFrame: Buffer | null = null;
+  private cachedAboveFrame: Buffer | null = null;
   private videoPipe: NodeJS.WritableStream | null = null;
+  private aboveVideoPipe: NodeJS.WritableStream | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: CanvasFeederOptions) {
     this.writeFileSync = options.writeFileSync ?? fs.writeFileSync;
   }
 
-  /** Called once, right after the persistent encoder starts — see StreamController.start(). */
-  attach(videoPipe: NodeJS.WritableStream): void {
+  /**
+   * Called once, right after the persistent encoder starts — see StreamController.start().
+   * `aboveVideoPipe` is the encoder's second canvas pipe; it is only ever written to when this
+   * feeder was configured with an `aboveOverlayImagePath`, so a single-layer session passing it
+   * in changes nothing.
+   */
+  attach(videoPipe: NodeJS.WritableStream, aboveVideoPipe?: NodeJS.WritableStream): void {
     this.videoPipe = videoPipe;
+    this.aboveVideoPipe = this.options.aboveOverlayImagePath ? aboveVideoPipe ?? null : null;
     this.startHeartbeat();
   }
 
@@ -44,21 +69,30 @@ export class CanvasFeeder {
    * case (elapsed time, called once a second) and the frozen-on-pause case (same code path).
    */
   async render(overlay: NowPlayingOverlay, timerText: string | null): Promise<void> {
+    const abovePath = this.options.aboveOverlayImagePath;
     this.writeFileSync(this.options.overlayImagePath, overlay.overlayPng);
+    if (abovePath) this.writeFileSync(abovePath, overlay.overlayPngAbove ?? BLANK_OVERLAY_PNG);
 
     const timer: TimerOverlay | null = overlay.timer && timerText !== null
       ? { ...overlay.timer, text: timerText }
       : null;
 
-    const args = buildCanvasFrameArgs({
-      overlayPngPath: this.options.overlayImagePath,
+    const frameArgs = (overlayPngPath: string, frameTimer: TimerOverlay | null) => buildCanvasFrameArgs({
+      overlayPngPath,
       fontFile: this.options.fontFile,
-      timer,
+      timer: frameTimer,
       width: this.options.width,
       height: this.options.height,
     });
 
-    this.cachedFrame = await this.runOneShot(args);
+    // The timer belongs on whichever layer ends up on top, so nothing composited between the two
+    // layers (i.e. a gif) can cover it — it has always rendered above everything else.
+    const [frame, aboveFrame] = await Promise.all([
+      this.runOneShot(frameArgs(this.options.overlayImagePath, abovePath ? null : timer)),
+      abovePath ? this.runOneShot(frameArgs(abovePath, timer)) : Promise.resolve(null),
+    ]);
+    this.cachedFrame = frame;
+    this.cachedAboveFrame = aboveFrame;
     // This write IS this cycle's frame — resync the heartbeat's phase from here (kill the old
     // timer, start a fresh one) so the total write cadence stays exactly one frame per
     // heartbeatMs. Without this resync, this write would be an EXTRA frame on top of whatever
@@ -74,10 +108,13 @@ export class CanvasFeeder {
 
   close(): void {
     this.stopHeartbeat();
-    try {
-      fs.unlinkSync(this.options.overlayImagePath);
-    } catch {
-      // Never written, or already gone — either way there's nothing left to clean up.
+    for (const path of [this.options.overlayImagePath, this.options.aboveOverlayImagePath]) {
+      if (!path) continue;
+      try {
+        fs.unlinkSync(path);
+      } catch {
+        // Never written, or already gone — either way there's nothing left to clean up.
+      }
     }
   }
 
@@ -100,12 +137,18 @@ export class CanvasFeeder {
 
   private writeCachedFrame(): void {
     if (!this.cachedFrame || !this.videoPipe) return;
+    const split = this.aboveVideoPipe !== null;
+    if (split && !this.cachedAboveFrame) return;
     // Backpressure: if Node's own write buffer for this pipe is already backed up, skip this
     // tick rather than piling more ~1.3MB raw frames into unbounded memory — ffmpeg will just
     // hold the last frame it has a little longer, which is harmless since the content hasn't
-    // changed anyway.
-    if ((this.videoPipe as unknown as { writableNeedDrain?: boolean }).writableNeedDrain) return;
+    // changed anyway. With two layers it's both pipes or neither: each pipe's PTS is synthesized
+    // from its own frame count, so writing one while skipping the other would leave the layers
+    // permanently one frame further apart for the rest of the session.
+    if (needsDrain(this.videoPipe)) return;
+    if (split && needsDrain(this.aboveVideoPipe!)) return;
     this.videoPipe.write(this.cachedFrame);
+    if (split) this.aboveVideoPipe!.write(this.cachedAboveFrame!);
   }
 
   private runOneShot(args: string[]): Promise<Buffer> {

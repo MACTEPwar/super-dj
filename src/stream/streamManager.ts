@@ -8,7 +8,7 @@ import { CanvasFeeder } from '../ffmpeg/canvasFeeder';
 import { AudioRelay } from '../ffmpeg/audioRelay';
 import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
 import { PulseVisualizer } from '../ffmpeg/pulseVisualizer';
-import { GifOverlayConfig } from '../ffmpeg/persistentEncoderArgs';
+import { CanvasPlacement, GifOverlayConfig } from '../ffmpeg/persistentEncoderArgs';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
 import { getImageFrameCount } from '../ffmpeg/imageFrameCount';
@@ -254,17 +254,44 @@ export class StreamManager extends EventEmitter {
       // A timer isn't baked into the rendered PNG (see TimerElement's doc comment) — split it
       // out once here, since the template is fixed for the life of this session, rather than on
       // every buildOverlay() call.
-      const bakedElements = templateElements.filter((e) =>
-        e.type !== 'timer' && e.type !== 'equalizer' && !(e.type === 'image' && animatedImageAssetIds.has(e.assetId)),
-      );
+      const isBaked = (e: TemplateElement) =>
+        e.type !== 'timer' && e.type !== 'equalizer' && !(e.type === 'image' && animatedImageAssetIds.has(e.assetId));
+
+      // Every baked element is flattened into ONE picture by Satori, so the canvas can only be
+      // composited as a whole — but the template's element order says which of those elements
+      // belong behind a gif and which in front of it. Split them at the first gif's position: a
+      // full-frame opaque element listed before a gif used to hide it completely, because the
+      // single canvas was always composited on top of every gif (reproduced against a real ffmpeg
+      // binary: zero frame-to-frame change in the gif's region). See CanvasPlacement.
+      //
+      // Note this is a two-layer approximation, not a full per-element z-order: with gifs on both
+      // sides of a baked element (e.g. [a, gif1, b, gif2]), `b` lands above BOTH gifs rather than
+      // between them. Every element still ends up on the correct side of the FIRST gif, which is
+      // what the reported bug is about; a full interleave would mean one Satori render and one
+      // pipe per gif.
+      const firstGifIndex = templateElements.findIndex((e) => e.type === 'image' && animatedImageAssetIds.has(e.assetId));
+      const hasGifs = gifOverlays.length > 0;
+      const belowElements = hasGifs ? templateElements.slice(0, firstGifIndex).filter(isBaked) : templateElements.filter(isBaked);
+      const aboveElements = hasGifs ? templateElements.slice(firstGifIndex + 1).filter(isBaked) : [];
+      // The timer is a native drawtext rather than part of either baked picture, and has always
+      // rendered above everything else — so it needs an upper layer to sit on even when no baked
+      // element does, instead of being drawn under a gif that could then cover it.
+      const splitCanvas = hasGifs && (aboveElements.length > 0 || timerElement !== null);
+      // With gifs present the canvas is never pinned on top: a track's own overlayOverride
+      // background is the bottom-most thing in the scene and has to be able to go UNDER them, and
+      // whether any given track carries one isn't knowable when the encoder's args are built.
+      const canvasPlacement: CanvasPlacement = !hasGifs ? 'top' : splitCanvas ? 'split' : 'bottom';
+      const aboveOverlayImagePath = splitCanvas
+        ? path.join(this.deps.fifoDir, `super-dj-overlay-above-${destinationId}.png`)
+        : undefined;
 
       const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
         const currentIndex = tracks.findIndex((t) => t.name === track.name);
         const playlistLines = buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
         const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
-        const render = () => renderTemplatePng({
-          elements: applyOverlayOverride(bakedElements, track.overlayOverride),
+        const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => renderTemplatePng({
+          elements: applyOverlayOverride(elements, track.overlayOverride),
           title: track.name,
           playlistLines,
           coverPath: track.coverPath ?? this.deps.defaultCoverPath,
@@ -272,30 +299,45 @@ export class StreamManager extends EventEmitter {
           height: VIDEO_HEIGHT,
           fontPath: this.deps.fontFile,
           fontFamily: this.deps.fontFamily,
-          imageAssets: resolveImageAssets(bakedElements, this.deps.templateImageService, destination.userId, options?.templateId ?? ''),
-          background: track.overlayOverride?.backgroundColor,
+          imageAssets: resolveImageAssets(elements, this.deps.templateImageService, destination.userId, options?.templateId ?? ''),
+          // The track's own background override is the bottom-most thing in the scene, so it only
+          // ever belongs on the lower layer — painted on the upper one it would cover every gif.
+          background: layer === 'below' ? track.overlayOverride?.backgroundColor : undefined,
         });
 
-        let overlayPng: Buffer;
-        try {
-          overlayPng = options?.overlayCache && options.sessionId
-            ? await options.overlayCache.getOrRender(
-              { sessionId: options.sessionId, trackName: track.name, templateId: options.templateId ?? null },
-              render,
+        // The cache key carries the layer too: the two layers of one (track, template) are
+        // different pictures and must never be served for each other.
+        const renderShared = (elements: TemplateElement[], layer: 'below' | 'above') =>
+          (options?.overlayCache && options.sessionId
+            ? options.overlayCache.getOrRender(
+              { sessionId: options.sessionId, trackName: track.name, templateId: options.templateId ?? null, layer },
+              () => renderLayer(elements, layer),
             )
-            : await render();
+            : renderLayer(elements, layer));
+
+        let overlayPng: Buffer;
+        let overlayPngAbove: Buffer | undefined;
+        try {
+          [overlayPng, overlayPngAbove] = await Promise.all([
+            renderShared(belowElements, 'below'),
+            splitCanvas ? renderShared(aboveElements, 'above') : Promise.resolve(undefined),
+          ]);
         } catch (err) {
           // The RTMP connection staying up matters more than any one segment's picture — see
           // CLAUDE.md's overlay-templates notes. /templates/{id}/preview (an interactive,
           // synchronous request) deliberately does NOT catch the same failure; only the live
-          // pipeline falls back silently.
+          // pipeline falls back silently. Both layers go blank together: a declared canvas pipe
+          // that never receives a frame would stall the encoder's whole filter graph, so the
+          // upper layer always gets SOMETHING when the template has one.
           console.error('template render failed for a live segment, falling back to a blank overlay', err);
           overlayPng = BLANK_OVERLAY_PNG;
+          overlayPngAbove = splitCanvas ? BLANK_OVERLAY_PNG : undefined;
         }
 
         return {
           durationSeconds,
           overlayPng,
+          overlayPngAbove,
           timer: timerElement
             ? { x: timerElement.x, y: timerElement.y, fontSize: timerElement.fontSize, color: timerElement.color, style: timerElement.style }
             : null,
@@ -312,6 +354,7 @@ export class StreamManager extends EventEmitter {
         createCanvasFeeder: () => new CanvasFeeder({
           spawner: this.deps.spawner,
           overlayImagePath,
+          aboveOverlayImagePath,
           fontFile: this.deps.fontFile,
           width: VIDEO_WIDTH,
           height: VIDEO_HEIGHT,
@@ -341,6 +384,7 @@ export class StreamManager extends EventEmitter {
               }
             : undefined,
           gifOverlays,
+          canvasPlacement,
         }),
         createPulseVisualizer: equalizerElement
           ? () => new PulseVisualizer({

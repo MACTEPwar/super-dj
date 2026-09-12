@@ -99,6 +99,8 @@ function buildDeps() {
     // Always present on a real ChildProcessWithPipes (see createPipeSpawner) — PulseVisualizer
     // registers a 'drain' listener on it at attach().
     pulsePipe: new PassThrough(),
+    // Likewise always present; only written to by a two-layer CanvasFeeder (see CanvasPlacement).
+    aboveCanvasPipe: new PassThrough(),
   });
   const templateRepository = { findById: jest.fn() };
   const templateImageService = {
@@ -656,6 +658,139 @@ describe('StreamManager', () => {
       const filterComplex = producerCall![1][producerCall![1].indexOf('-filter_complex') + 1];
       expect(filterComplex).toContain('loop=loop=-1:size=6,fps=30,scale=401:151');
       expect(filterComplex).toContain('overlay=20:31');
+    });
+
+    // The canvas being one flat layer over every gif ignored the template's own element order:
+    // a full-frame opaque element listed BEFORE a gif (a static image, a cover, or a per-track
+    // overlayOverride background) hid that gif completely. Reproduced against a real ffmpeg
+    // binary before the fix: zero frame-to-frame change in the gif's region, at a flat luma
+    // matching the canvas background. The baked elements are now split around the first gif's
+    // position — see CanvasPlacement in persistentEncoderArgs.ts.
+    describe('canvas layering around an animated gif', () => {
+      const gifEl = { type: 'image', x: 900, y: 40, width: 150, height: 150, assetId: 'gif-1' };
+
+      // Only `gif-1` is animated; any other image element in the template stays a static, baked
+      // one (frame count 1), so these tests exercise the split rather than accidentally turning
+      // every image element into its own gif overlay.
+      function withGif(templateRepository: { findById: jest.Mock }, templateImageService: { resolveOriginalPath: jest.Mock }, elements: unknown[]) {
+        templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements });
+        templateImageService.resolveOriginalPath.mockImplementation(async (_u: string, _t: string, assetId: string) =>
+          `/uploads/user-1/templates/tpl-1/images/${assetId}.original`);
+        (getImageFrameCount as jest.Mock).mockImplementation(async (p: string) => (p.includes('gif-1') ? 10 : 1));
+      }
+
+      function filterComplexOf(pipeSpawner: jest.Mock): string {
+        const call = pipeSpawner.mock.calls.find((c) => c[1].includes('-filter_complex'));
+        expect(call).toBeDefined();
+        return call![1][call![1].indexOf('-filter_complex') + 1];
+      }
+
+      it('renders TWO canvas layers, split at the first gif, when baked elements sit on both sides of it', async () => {
+        const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+        const backdrop = { type: 'image', x: 0, y: 0, width: 1280, height: 720, assetId: 'asset-1' };
+        const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+        withGif(templateRepository, templateImageService, [backdrop, gifEl, coverEl]);
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        // One render per layer: what the template lists before the gif, and what it lists after.
+        const renderedElementLists = (renderTemplatePng as jest.Mock).mock.calls.map((c) => c[0].elements);
+        expect(renderedElementLists).toEqual([[backdrop], [coverEl]]);
+        const filterComplex = filterComplexOf(pipeSpawner as jest.Mock);
+        expect(filterComplex).toContain('[vbg][vcanvas]overlay=0:0[vcanvas_below]');
+        expect(filterComplex).toContain('[vcanvas_below][gif0]overlay=900:40');
+        expect(filterComplex).toContain('[vgif0][vcanvas2]overlay=0:0[vcanvas_top]');
+        const encoderArgs = (pipeSpawner as jest.Mock).mock.calls.find((c) => c[1].includes('-filter_complex'))![1];
+        expect(encoderArgs).toEqual(expect.arrayContaining(['-i', 'pipe:6']));
+      });
+
+      it('keeps ONE canvas and just moves it under the gif when every baked element is listed before it', async () => {
+        const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+        const backdrop = { type: 'image', x: 0, y: 0, width: 1280, height: 720, assetId: 'asset-1' };
+        withGif(templateRepository, templateImageService, [backdrop, gifEl]);
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        // No second Satori render: there is nothing to draw above the gif.
+        expect(renderTemplatePng).toHaveBeenCalledTimes(1);
+        const filterComplex = filterComplexOf(pipeSpawner as jest.Mock);
+        expect(filterComplex).toContain('[vbg][vcanvas]overlay=0:0[vcanvas_below]');
+        expect(filterComplex).toContain('[vcanvas_below][gif0]overlay=900:40');
+        const encoderArgs = (pipeSpawner as jest.Mock).mock.calls.find((c) => c[1].includes('-filter_complex'))![1];
+        expect(encoderArgs).not.toEqual(expect.arrayContaining(['pipe:6']));
+      });
+
+      // Even with nothing listed before the gif, the lower layer is kept: a track's own
+      // overlayOverride background is the bottom-most thing in the scene and has to be able to
+      // render UNDER the gifs, and which tracks carry one isn't knowable when the encoder's args
+      // are built (playByName can insert any of the user's tracks mid-session).
+      it('still keeps a lower layer for a track background override when everything baked is listed after the gif', async () => {
+        const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+        const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+        withGif(templateRepository, templateImageService, [gifEl, coverEl]);
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        const renderedElementLists = (renderTemplatePng as jest.Mock).mock.calls.map((c) => c[0].elements);
+        expect(renderedElementLists).toEqual([[], [coverEl]]);
+        const filterComplex = filterComplexOf(pipeSpawner as jest.Mock);
+        expect(filterComplex).toContain('[vbg][vcanvas]overlay=0:0[vcanvas_below]');
+        expect(filterComplex).toContain('[vcanvas_below][gif0]overlay=900:40');
+        expect(filterComplex).toContain('[vgif0][vcanvas2]overlay=0:0[vcanvas_top]');
+      });
+
+      it('renders a track background override onto the lower layer only, so it can never cover the gifs', async () => {
+        const { deps, templateRepository, templateImageService, playlistRepository } = buildDeps();
+        const backdrop = { type: 'image', x: 0, y: 0, width: 1280, height: 720, assetId: 'asset-1' };
+        const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+        withGif(templateRepository, templateImageService, [backdrop, gifEl, coverEl]);
+        playlistRepository.listTracks.mockResolvedValue([
+          { name: 'a', audioPath: '/music/a.mp3', coverPath: null, overlayOverride: { backgroundColor: { mode: 'solid', color: '#123456' } } },
+        ]);
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        const backgrounds = (renderTemplatePng as jest.Mock).mock.calls.map((c) => c[0].background);
+        expect(backgrounds).toEqual([{ mode: 'solid', color: '#123456' }, undefined]);
+      });
+
+      // The timer is a native drawtext, not part of either baked PNG, and has always rendered on
+      // top of everything — so it forces an upper layer even when no baked element needs one,
+      // rather than being laid down under a gif that could then cover it.
+      it('gives a template with a timer an upper layer to draw it on, even with nothing baked above the gif', async () => {
+        const { deps, templateRepository, templateImageService, pipeSpawner } = buildDeps();
+        const backdrop = { type: 'image', x: 0, y: 0, width: 1280, height: 720, assetId: 'asset-1' };
+        const timerEl = { type: 'timer', x: 10, y: 660, fontSize: 20, color: '#ffffff', style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
+        withGif(templateRepository, templateImageService, [backdrop, gifEl, timerEl]);
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        const filterComplex = filterComplexOf(pipeSpawner as jest.Mock);
+        expect(filterComplex).toContain('[vgif0][vcanvas2]overlay=0:0[vcanvas_top]');
+        const encoderArgs = (pipeSpawner as jest.Mock).mock.calls.find((c) => c[1].includes('-filter_complex'))![1];
+        expect(encoderArgs).toEqual(expect.arrayContaining(['-i', 'pipe:6']));
+      });
+
+      // The overwhelming majority of streams have no gif at all and must not pay for any of this.
+      it('renders exactly one canvas layer, with no second pipe, for a template with no gif element', async () => {
+        const { deps, templateRepository, pipeSpawner } = buildDeps();
+        const coverEl = { type: 'cover', x: 0, y: 0, width: 10, height: 10 };
+        templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [coverEl] });
+        const manager = new StreamManager(deps as any);
+
+        await manager.start('dest-1', 'playlist-1', undefined, { templateId: 'tpl-1' });
+
+        expect(renderTemplatePng).toHaveBeenCalledTimes(1);
+        const filterComplex = filterComplexOf(pipeSpawner as jest.Mock);
+        expect(filterComplex).toBe('[2:v]scale=1280:720[vbg];[0:v]fps=30,format=yuva420p[vcanvas];[vbg][vcanvas]overlay=0:0[vcanvas_top]');
+        const encoderArgs = (pipeSpawner as jest.Mock).mock.calls.find((c) => c[1].includes('-filter_complex'))![1];
+        expect(encoderArgs).not.toEqual(expect.arrayContaining(['pipe:6']));
+      });
     });
 
     it('does not add a gif-loop stage when every image element is static (background+canvas compositing still happens)', async () => {

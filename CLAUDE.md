@@ -31,6 +31,11 @@ fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` 
   switch, pause, resume, a once-a-second timer tick — and independently resends the last-rendered
   frame on a fixed `heartbeatMs` cadence the rest of the time, so `PersistentEncoder`'s declared
   input framerate (`heartbeatFps` in `persistentEncoderArgs.ts`) matches real wall-clock time.
+  A template with an animated-gif element makes it a **two-layer** feeder (one extra pipe, `fd 6`
+  / `pipe:6`) — see the `CanvasPlacement` note under "Overlay templates" below. The second layer
+  is owned by this same instance, not a second one, precisely so both pipes share one heartbeat:
+  ffmpeg synthesizes each raw pipe's PTS from its own frame count alone, so a write one feeder
+  made and the other skipped would slide the two layers permanently out of register.
   **Every actual pipe write — heartbeat or fresh render — must land exactly `heartbeatMs` apart**;
   `render()` resyncs the heartbeat's phase from its own write rather than writing an extra frame on
   top of the timer's independent schedule (a real bug: writing both left the video timeline running
@@ -216,6 +221,29 @@ lands:
   live preview that renders through the real Satori+resvg pipeline (Stage 0's preview endpoint) —
   what's shown while editing is what will actually appear on stream, not an approximation. Routed
   at `/templates` and `/templates/:id`, linked from the sidebar.
+- **Canvas layering around animated gifs (`CanvasPlacement`, `persistentEncoderArgs.ts`).** Every
+  non-gif ("baked") element is flattened into ONE Satori picture, so the canvas can only be
+  composited as a whole — but the template's element ORDER says which elements belong behind a gif
+  and which in front of it. The canvas used to be pinned on top of every gif, so a full-frame
+  opaque element listed *before* a gif (a static image, a cover, or a per-track
+  `overlayOverride.backgroundColor`) hid that gif completely. `StreamManager` now splits the baked
+  elements at the first gif element's index and picks a placement: `top` (no gifs — the original
+  single-layer graph, byte for byte), `bottom` (one canvas, composited under the gifs), or `split`
+  (two canvases — `pipe:3` below the gifs, `pipe:6` above them, one extra Satori render per frame
+  and one extra `CanvasFeeder` layer). With gifs present the canvas is never pinned on top, so a
+  track's `overlayOverride` background always has a layer beneath them to land on. The timer's
+  `drawtext` goes on whichever layer ends up on top, preserving "the timer draws above
+  everything". Deliberately a two-layer approximation rather than a full per-element z-order: with
+  gifs on both sides of a baked element, that element lands above *both* — a full interleave would
+  cost one Satori render and one pipe per gif.
+- **Equalizer containment (`pulseGeometry`, `src/render/pulseSvg.ts`).** `layoutPulsePoints` (the
+  inset) and `buildPulseSvg` (the stroke widths) must agree about how wide the glow is allowed to
+  be, and they read one shared `pulseGeometry()` for exactly that reason: they used to derive it
+  independently, and the layout capping its inset for a box too small for its configured glow
+  while the renderer kept drawing that glow at full width is what painted the neon line onto the
+  element's outermost pixels. The engine's own output ceiling (`MAX_VALUE`) is enforced *after*
+  the `globalPulse` multiplication (`pulseEngine.ts`), so no template setting can push a value
+  past what the inset was sized for — measured across the whole configurable range.
 - **Stage 4 (done):** `StartStreamDrawer` (`frontend/src/components/StartStreamDrawer.tsx`) has a
   template picker wired to the real `POST /stream-sessions`/`.../stream/start` calls, passing the
   selected `templateId` through — the sample scene data Stage 0's preview endpoint uses is still
@@ -270,7 +298,8 @@ src/
                             long-lived encoder process per destination), segmentArgs.ts (canvas-
                             frame render args + overlay/timer types), duration.ts (ffprobe),
                             overlayText.ts (formatDuration, playlist-window text),
-                            types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes)
+                            types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes
+                            — pipes: fd3 canvas, fd4 audio, fd5 equalizer, fd6 above-canvas)
   templates/                templateRepository.ts (Prisma), templateRoutes.ts (mounted at
                             /templates, incl. POST /:id/preview), templateTypes.ts
                             (TemplateElement union + isValidTemplateElement(s) +

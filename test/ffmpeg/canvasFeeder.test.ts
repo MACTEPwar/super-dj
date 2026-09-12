@@ -184,6 +184,153 @@ describe('CanvasFeeder', () => {
     }
   });
 
+  // A template whose elements straddle its first animated-gif element needs the baked canvas in
+  // TWO layers, one composited under the gifs and one over them (see CanvasPlacement in
+  // persistentEncoderArgs.ts). Both are fed by this one feeder rather than a second instance,
+  // specifically so they share one heartbeat: two independent heartbeats would each drive their
+  // own pipe's frame count, and ffmpeg synthesizes each pipe's PTS from that count alone, so any
+  // write one made and the other skipped would slide the two layers permanently out of register.
+  describe('the second ("above") canvas layer', () => {
+    const splitOverlay: NowPlayingOverlay = {
+      ...overlay,
+      overlayPngAbove: Buffer.from('fake-above-png-bytes'),
+    };
+
+    function buildSplitFeeder(spawner: Spawner, heartbeatMs = 200) {
+      const writeFileSync = jest.fn();
+      const feeder = new CanvasFeeder({
+        spawner,
+        overlayImagePath: '/tmp/overlay-dest-1.png',
+        aboveOverlayImagePath: '/tmp/overlay-dest-1-above.png',
+        fontFile: '/fonts/DejaVuSans-Bold.ttf',
+        width: 1280,
+        height: 720,
+        heartbeatMs,
+        writeFileSync,
+      });
+      const belowChunks: Buffer[] = [];
+      const aboveChunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { belowChunks.push(chunk); cb(); } });
+      const abovePipe = new Writable({ write(chunk, _enc, cb) { aboveChunks.push(chunk); cb(); } });
+      return { feeder, writeFileSync, videoPipe, abovePipe, belowChunks, aboveChunks };
+    }
+
+    it('renders both layers and writes each to its own pipe', async () => {
+      const below = fakeChild(['below-frame']);
+      const above = fakeChild(['above-frame']);
+      const spawner: Spawner = jest.fn().mockReturnValueOnce(below).mockReturnValueOnce(above);
+      const { feeder, writeFileSync, videoPipe, abovePipe, belowChunks, aboveChunks } = buildSplitFeeder(spawner);
+      feeder.attach(videoPipe, abovePipe);
+
+      const promise = feeder.render(splitOverlay, null);
+      below.emitClose(0);
+      above.emitClose(0);
+      await promise;
+
+      expect(writeFileSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png', splitOverlay.overlayPng);
+      expect(writeFileSync).toHaveBeenCalledWith('/tmp/overlay-dest-1-above.png', splitOverlay.overlayPngAbove);
+      expect(Buffer.concat(belowChunks).toString()).toBe('below-frame');
+      expect(Buffer.concat(aboveChunks).toString()).toBe('above-frame');
+    });
+
+    it('puts the timer drawtext on the above layer only, so a gif can never cover the ticking timer', async () => {
+      const below = fakeChild();
+      const above = fakeChild();
+      const spawner: Spawner = jest.fn().mockReturnValueOnce(below).mockReturnValueOnce(above);
+      const { feeder, videoPipe, abovePipe } = buildSplitFeeder(spawner);
+      feeder.attach(videoPipe, abovePipe);
+
+      const promise = feeder.render({ ...overlayWithTimer, overlayPngAbove: Buffer.from('above') }, '0:37 / 1:05');
+      below.emitClose(0);
+      above.emitClose(0);
+      await promise;
+
+      const calls = (spawner as jest.Mock).mock.calls;
+      const filterOf = (args: string[]) => args[args.indexOf('-filter_complex') + 1];
+      expect(filterOf(calls[0][1] as string[])).not.toContain('drawtext');
+      expect(filterOf(calls[1][1] as string[])).toContain("text='0\\:37 / 1\\:05'");
+    });
+
+    it('feeds both pipes on the same heartbeat tick, one frame each, so the two layers can never drift apart', async () => {
+      jest.useFakeTimers();
+      try {
+        const below = fakeChild(['below-frame']);
+        const above = fakeChild(['above-frame']);
+        const spawner: Spawner = jest.fn().mockReturnValueOnce(below).mockReturnValueOnce(above);
+        const { feeder, videoPipe, abovePipe, belowChunks, aboveChunks } = buildSplitFeeder(spawner);
+        feeder.attach(videoPipe, abovePipe);
+
+        const promise = feeder.render(splitOverlay, null);
+        below.emitClose(0);
+        above.emitClose(0);
+        await promise;
+        belowChunks.length = 0;
+        aboveChunks.length = 0;
+
+        jest.advanceTimersByTime(600); // 3 heartbeat ticks at 200ms
+
+        expect(belowChunks.length).toBe(3);
+        expect(aboveChunks.length).toBe(3);
+        expect(belowChunks.every((c) => c.toString() === 'below-frame')).toBe(true);
+        expect(aboveChunks.every((c) => c.toString() === 'above-frame')).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('skips BOTH pipes when either one reports backpressure, rather than letting one run ahead', async () => {
+      jest.useFakeTimers();
+      try {
+        const below = fakeChild(['below-frame']);
+        const above = fakeChild(['above-frame']);
+        const spawner: Spawner = jest.fn().mockReturnValueOnce(below).mockReturnValueOnce(above);
+        const { feeder, videoPipe, abovePipe, belowChunks, aboveChunks } = buildSplitFeeder(spawner);
+        Object.defineProperty(abovePipe, 'writableNeedDrain', { get: () => true });
+        feeder.attach(videoPipe, abovePipe);
+
+        const promise = feeder.render(splitOverlay, null);
+        below.emitClose(0);
+        above.emitClose(0);
+        await promise;
+        belowChunks.length = 0;
+        aboveChunks.length = 0;
+
+        jest.advanceTimersByTime(600);
+
+        expect(belowChunks.length).toBe(0);
+        expect(aboveChunks.length).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('close() removes both overlay image files', () => {
+      const unlinkSync = jest.spyOn(require('fs'), 'unlinkSync').mockImplementation(() => {});
+      const { feeder, videoPipe, abovePipe } = buildSplitFeeder(jest.fn().mockReturnValue(fakeChild()) as Spawner);
+      feeder.attach(videoPipe, abovePipe);
+
+      feeder.close();
+
+      expect(unlinkSync).toHaveBeenCalledWith('/tmp/overlay-dest-1.png');
+      expect(unlinkSync).toHaveBeenCalledWith('/tmp/overlay-dest-1-above.png');
+      unlinkSync.mockRestore();
+    });
+
+    it('is a no-op for a feeder with no above layer configured, even when a second pipe is attached', async () => {
+      const child = fakeChild(['frame-one']);
+      const spawner: Spawner = jest.fn().mockReturnValue(child);
+      const { feeder } = buildFeeder({ spawner });
+      const aboveChunks: Buffer[] = [];
+      const abovePipe = new Writable({ write(chunk, _enc, cb) { aboveChunks.push(chunk); cb(); } });
+      feeder.attach(new PassThrough(), abovePipe);
+
+      await renderAndClose(feeder, child, splitOverlay, null);
+
+      expect(spawner).toHaveBeenCalledTimes(1);
+      expect(aboveChunks.length).toBe(0);
+    });
+  });
+
   it('skips a heartbeat write when the video pipe reports backpressure, instead of buffering unboundedly', async () => {
     jest.useFakeTimers();
     try {

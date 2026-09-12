@@ -240,7 +240,10 @@ export class StreamController {
     this.encoder = this.deps.createPersistentEncoder();
     const child = this.encoder.start((exitCode) => this.handleUnexpectedExit(exitCode));
     this.canvasFeeder = this.deps.createCanvasFeeder();
-    this.canvasFeeder.attach(child.videoPipe);
+    // The second pipe is only written to when StreamManager configured this feeder with an above
+    // layer (a template whose baked elements straddle its first animated gif) — passing it
+    // unconditionally keeps the wiring identical for every session, exactly like pulsePipe.
+    this.canvasFeeder.attach(child.videoPipe, child.aboveCanvasPipe);
     this.audioRelay = this.deps.createAudioRelay();
     this.audioRelay.attach(child.audioPipe);
     if (this.deps.createPulseVisualizer) {

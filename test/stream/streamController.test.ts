@@ -45,7 +45,7 @@ function buildDeps() {
     close: jest.fn(),
   };
   const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
-  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {} };
+  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {} };
   const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const deps: any = {
     library, queue,
@@ -65,7 +65,9 @@ describe('StreamController', () => {
     await controller.start();
 
     expect(encoder.start).toHaveBeenCalled();
-    expect(canvasFeeder.attach).toHaveBeenCalledWith(encoderChild.videoPipe);
+    // The second canvas pipe is handed over unconditionally, exactly like pulsePipe — CanvasFeeder
+    // only writes to it when StreamManager configured it with an above layer (see CanvasPlacement).
+    expect(canvasFeeder.attach).toHaveBeenCalledWith(encoderChild.videoPipe, encoderChild.aboveCanvasPipe);
     expect(audioRelay.attach).toHaveBeenCalledWith(encoderChild.audioPipe);
     expect(audioRelay.switchTrack).toHaveBeenCalledWith('/music/a.mp3', 0);
     // overlayFor()'s tracks have no timer element, so timerText() is null, not a formatted

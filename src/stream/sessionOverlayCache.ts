@@ -2,6 +2,11 @@ export interface SessionOverlayCacheKey {
   sessionId: string;
   trackName: string;
   templateId: string | null;
+  // Which canvas layer this render is, for a template whose baked elements straddle its first
+  // animated-gif element (see CanvasPlacement in persistentEncoderArgs.ts). The two layers of one
+  // (track, template) are different pictures, so they must never share a cache entry. Absent for
+  // every single-layer template, which is the common case.
+  layer?: 'below' | 'above';
 }
 
 // Avoids redundant renders when several destinations in the same StreamSession are showing the
@@ -20,7 +25,7 @@ export class SessionOverlayCache {
   constructor(private readonly ttlMs = 30000) {}
 
   private key(k: SessionOverlayCacheKey): string {
-    return `${k.sessionId}::${k.trackName}::${k.templateId ?? ''}`;
+    return `${k.sessionId}::${k.trackName}::${k.templateId ?? ''}::${k.layer ?? ''}`;
   }
 
   getOrRender(key: SessionOverlayCacheKey, render: () => Promise<Buffer>): Promise<Buffer> {

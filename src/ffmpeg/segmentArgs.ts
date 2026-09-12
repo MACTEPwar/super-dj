@@ -16,6 +16,12 @@ export interface NowPlayingOverlay {
   // composites it via ffmpeg's own `overlay` filter, replacing the hand-built drawtext filter
   // graph this used to be.
   overlayPng: Buffer;
+  // The second canvas layer, present only for a template whose baked elements straddle its first
+  // animated-gif element (see CanvasPlacement in persistentEncoderArgs.ts): `overlayPng` then
+  // holds only the elements listed BEFORE that gif and is composited under every gif, while this
+  // holds the ones listed after it and is composited over them. Absent for every other template,
+  // which keeps rendering as one flat layer exactly as before.
+  overlayPngAbove?: Buffer;
   // Position/style for the template's timer element, if it has one — null if not. Unlike
   // overlayPng, this isn't baked into a picture: it becomes a native ffmpeg drawtext, given
   // its `text` as an already-formatted plain string (see TimerOverlay below).
