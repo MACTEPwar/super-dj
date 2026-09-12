@@ -8,6 +8,7 @@ import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { formatDuration } from '../ffmpeg/overlayText';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
+import { ReconnectPolicy, ReconnectDecision, SHORT_LIVED_UPTIME_MS } from './reconnectPolicy';
 
 export interface LibraryLike {
   list(): Track[];
@@ -22,6 +23,12 @@ export interface StreamControllerDeps {
   createPersistentEncoder: () => PersistentEncoder;
   createPulseVisualizer?: () => PulseVisualizer;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
+  // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
+  // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so StreamManager
+  // can fold in provider-specific knowledge (e.g. a YouTube destination's lifecycle being in a
+  // terminal phase, or having seen an auth-class failure) without StreamController itself having
+  // to know anything YouTube-specific — see reconnectPolicy.ts.
+  reconnectPolicy?: ReconnectPolicy;
   onError?: (exitCode: number | null) => void;
   onStatusChanged?: () => void;
 }
@@ -44,8 +51,20 @@ export class StreamController {
   // Distinguishes "this track ended naturally" (advance to the next one) from "this track was
   // superseded/torn down by next/previous/pause/stop/start" (do nothing) — same role
   // segmentGeneration always had, renamed because there's no more per-segment process for
-  // "segment" to describe.
+  // "segment" to describe. Also doubles as the reconnect mechanism's staleness guard: a scheduled
+  // respawn captures this value at schedule time and bails if it no longer matches when its timer
+  // fires (the same pattern feedCurrentTrack already uses for a stale overlay probe).
   private sessionGeneration = 0;
+
+  // When the currently-running encoder (if any) was spawned — used to compute how long it lived
+  // once it exits unexpectedly (see reconnectPolicy.ts's SHORT_LIVED_UPTIME_MS: exit codes carry
+  // no useful signal, ffmpeg exits 1 for almost everything, so uptime is the recoverability
+  // signal instead).
+  private encoderStartedAt: number | null = null;
+  private pendingReconnect: { timer: NodeJS.Timeout; scheduledGeneration: number } | null = null;
+  private reconnectAttempt = 0;
+  private reconnectFirstFailureAt: number | null = null;
+  private consecutiveShortLivedFailures = 0;
 
   constructor(private readonly deps: StreamControllerDeps) {}
 
@@ -57,22 +76,9 @@ export class StreamController {
 
     this.sessionGeneration += 1;
     this.teardown();
+    this.resetReconnectBookkeeping();
 
-    this.encoder = this.deps.createPersistentEncoder();
-    const child = this.encoder.start((exitCode) => {
-      this.state = 'error';
-      this.deps.onError?.(exitCode);
-      this.deps.onStatusChanged?.();
-    });
-    this.canvasFeeder = this.deps.createCanvasFeeder();
-    this.canvasFeeder.attach(child.videoPipe);
-    this.audioRelay = this.deps.createAudioRelay();
-    this.audioRelay.attach(child.audioPipe);
-    if (this.deps.createPulseVisualizer) {
-      this.pulseVisualizer = this.deps.createPulseVisualizer();
-      this.pulseVisualizer.attach(child.pulsePipe);
-      this.audioRelay.attachTap(this.pulseVisualizer.audioSink);
-    }
+    this.spawnPipeline();
     this.pausedElapsedSeconds = 0;
     this.trackStartedAt = null;
 
@@ -208,6 +214,7 @@ export class StreamController {
   }
 
   private teardown(): void {
+    this.clearPendingReconnect();
     this.stopTimerTicker();
     this.audioRelay?.close();
     this.canvasFeeder?.close();
@@ -217,10 +224,129 @@ export class StreamController {
     this.canvasFeeder = null;
     this.pulseVisualizer = null;
     this.encoder = null;
+    this.encoderStartedAt = null;
     this.trackStartedAt = null;
     this.trackStartOffsetSeconds = 0;
     this.pausedElapsedSeconds = 0;
     this.currentOverlay = null;
+  }
+
+  // Creates the persistent encoder and wires CanvasFeeder/AudioRelay/PulseVisualizer to its
+  // pipes exactly as start() always has — shared with the reconnect respawn path (performReconnect)
+  // so an in-place respawn goes through the identical wiring sequence a fresh start() does,
+  // rather than a second hand-rolled copy of it.
+  private spawnPipeline(): void {
+    this.encoderStartedAt = Date.now();
+    this.encoder = this.deps.createPersistentEncoder();
+    const child = this.encoder.start((exitCode) => this.handleUnexpectedExit(exitCode));
+    this.canvasFeeder = this.deps.createCanvasFeeder();
+    this.canvasFeeder.attach(child.videoPipe);
+    this.audioRelay = this.deps.createAudioRelay();
+    this.audioRelay.attach(child.audioPipe);
+    if (this.deps.createPulseVisualizer) {
+      this.pulseVisualizer = this.deps.createPulseVisualizer();
+      this.pulseVisualizer.attach(child.pulsePipe);
+      this.audioRelay.attachTap(this.pulseVisualizer.audioSink);
+    }
+  }
+
+  private resetReconnectBookkeeping(): void {
+    this.reconnectAttempt = 0;
+    this.reconnectFirstFailureAt = null;
+    this.consecutiveShortLivedFailures = 0;
+  }
+
+  private clearPendingReconnect(): void {
+    if (this.pendingReconnect) {
+      clearTimeout(this.pendingReconnect.timer);
+      this.pendingReconnect = null;
+    }
+  }
+
+  // The encoder's exit callback — invoked for ANY unexpected exit (a real dropped RTMP
+  // connection, ffmpeg crashing, etc; never for a deliberate stop(), which sets stopRequested on
+  // the encoder first so this callback is skipped entirely, see PersistentEncoder.stop()).
+  //
+  // Tears down every collaborator IMMEDIATELY, regardless of what happens next — this is the fix
+  // for the real resource-leak bug: previously this callback only set state='error' and left
+  // CanvasFeeder's heartbeat, AudioRelay's decode process and PulseVisualizer's render tick loop
+  // all running indefinitely against a dead pipe until a human called start()/stop().
+  private handleUnexpectedExit(exitCode: number | null): void {
+    const uptimeMs = this.encoderStartedAt !== null ? Date.now() - this.encoderStartedAt : 0;
+    // Must be captured BEFORE teardown() resets trackStartedAt/trackStartOffsetSeconds — this is
+    // the position a successful reconnect needs to resume from.
+    const capturedElapsedSeconds = this.elapsedTrackSeconds();
+    const capturedTrack = this.deps.queue.current();
+    const generationAtExit = this.sessionGeneration;
+
+    this.teardown();
+
+    const decision: ReconnectDecision = (this.deps.reconnectPolicy && capturedTrack)
+      ? this.evaluateReconnect(uptimeMs)
+      : { retry: false };
+
+    if (decision.retry && capturedTrack) {
+      const track = capturedTrack;
+      this.state = 'reconnecting';
+      this.deps.onStatusChanged?.();
+      const timer = setTimeout(() => {
+        this.pendingReconnect = null;
+        // The session moved on (a manual stop()/start() bumps sessionGeneration) while this
+        // attempt was waiting — same stale-async-result guard feedCurrentTrack already uses.
+        if (this.sessionGeneration !== generationAtExit) return;
+        this.performReconnect(track, capturedElapsedSeconds).catch((err) => {
+          console.error('failed to respawn the encoder after a reconnect attempt', err);
+        });
+      }, decision.delayMs);
+      this.pendingReconnect = { timer, scheduledGeneration: generationAtExit };
+      return;
+    }
+
+    this.state = 'error';
+    this.deps.onError?.(exitCode);
+    this.deps.onStatusChanged?.();
+  }
+
+  private evaluateReconnect(uptimeMs: number): ReconnectDecision {
+    if (uptimeMs < SHORT_LIVED_UPTIME_MS) {
+      this.consecutiveShortLivedFailures += 1;
+    } else {
+      this.consecutiveShortLivedFailures = 0;
+    }
+    if (this.reconnectFirstFailureAt === null) this.reconnectFirstFailureAt = Date.now();
+    this.reconnectAttempt += 1;
+    const totalElapsedMs = Date.now() - this.reconnectFirstFailureAt;
+
+    return this.deps.reconnectPolicy!.decide({
+      attempt: this.reconnectAttempt,
+      uptimeMs,
+      totalElapsedMs,
+      consecutiveShortLivedFailures: this.consecutiveShortLivedFailures,
+    });
+  }
+
+  // Respawns the encoder pipeline in place (same session — no re-read of the DB, no fresh
+  // provider.prepareSession(), no new YouTube broadcast) and resumes playback at the position it
+  // was at when the encoder died — reusing feedCurrentTrack's existing -ss-based seek path, the
+  // same mechanism next()/resume() already use, rather than inventing a new one.
+  private async performReconnect(capturedTrack: Track, capturedElapsedSeconds: number): Promise<void> {
+    this.spawnPipeline();
+    this.state = 'streaming';
+    this.deps.onStatusChanged?.();
+
+    const current = this.deps.queue.current();
+    if (!current) return;
+    // next()/previous() are allowed while 'reconnecting' (they just mutate the queue without
+    // feeding, since nothing is streaming yet) — if that happened while this attempt was
+    // pending, the queue has moved on to a DIFFERENT track than the one that was playing when
+    // the encoder died, so the captured offset no longer applies; start the new current track
+    // from 0 instead of seeking into it at a stale position.
+    const offsetSeconds = current === capturedTrack ? capturedElapsedSeconds : 0;
+    await this.feedCurrentTrack(current, offsetSeconds);
+
+    // A full recovery — reset the reconnect budget so a LATER, unrelated disconnect gets its own
+    // fresh attempt/time budget instead of inheriting this incident's counters.
+    this.resetReconnectBookkeeping();
   }
 
   playByName(name: string): void {

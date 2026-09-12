@@ -1,4 +1,5 @@
 import { YoutubeProvider } from '../../src/destinations/youtubeProvider';
+import { YoutubeApiError } from '../../src/destinations/youtubeApiClient';
 import { encrypt } from '../../src/crypto/streamKeyCipher';
 
 const KEY = 'a'.repeat(64);
@@ -116,6 +117,36 @@ describe('YoutubeProvider', () => {
 
     expect(session.lifecycle!.phase()).toBe('error');
     expect(client.deleteStream).toHaveBeenCalledWith('at', 'stream-1');
+  });
+
+  it('short-circuits on an auth-class failure (a revoked/expired grant) instead of retrying for the rest of the health-check timeout', async () => {
+    const authError = new YoutubeApiError(401, null, 'getStreamStatus', {});
+    const client = fakeClient({ getStreamStatus: jest.fn().mockRejectedValue(authError) } as any);
+    let now = 0;
+    const { provider, runNextScheduledPoll, scheduled } = buildProvider(client as any, { clock: () => now, healthTimeoutMs: 90_000, pollIntervalMs: 3000 });
+    const session = await provider.prepareSession(destination, meta);
+    session.lifecycle!.onPushStarted();
+
+    // Only a few ms have passed — nowhere near the 90s timeout — yet a single poll must still
+    // give up immediately rather than scheduling another one.
+    now = 100;
+    await runNextScheduledPoll();
+
+    expect(session.lifecycle!.phase()).toBe('error');
+    expect(client.deleteStream).toHaveBeenCalledWith('at', 'stream-1');
+    expect(scheduled.length).toBe(0);
+    expect(session.lifecycle!.isAuthError!()).toBe(true);
+  });
+
+  it('isAuthError stays false when the poll only ever saw non-auth failures', async () => {
+    const client = fakeClient({ getStreamStatus: jest.fn().mockRejectedValue(new Error('network blip')) } as any);
+    const { provider, runNextScheduledPoll } = buildProvider(client as any);
+    const session = await provider.prepareSession(destination, meta);
+    session.lifecycle!.onPushStarted();
+
+    await runNextScheduledPoll();
+
+    expect(session.lifecycle!.isAuthError!()).toBe(false);
   });
 
   it('a poll already in flight when finalize() runs does not transition to live or overwrite the phase', async () => {

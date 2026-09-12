@@ -285,7 +285,8 @@
     "idle": "не активен",
     "streaming": "в эфире",
     "paused": "на паузе",
-    "error": "ошибка"
+    "error": "ошибка",
+    "reconnecting": "переподключение"
   },
   "drawer": {
     "close": "Закрыть"

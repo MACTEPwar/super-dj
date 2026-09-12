@@ -17,6 +17,12 @@ export interface DestinationLifecycle {
   watchUrl(): string | null;
   finalize(): Promise<void>;
   onPhaseChange?(cb: () => void): void;
+  // True once this lifecycle has seen an auth-class failure (e.g. a revoked YouTube OAuth
+  // grant) from the underlying provider API — used to short-circuit a health-check poll that
+  // would otherwise retry silently for the full timeout, and to veto a reconnect attempt against
+  // a destination whose credentials are known to be dead (see reconnectPolicy.ts). Absent for a
+  // provider with no such concept (e.g. CustomRtmpProvider, which has no lifecycle at all).
+  isAuthError?(): boolean;
 }
 
 export interface PreparedSession {

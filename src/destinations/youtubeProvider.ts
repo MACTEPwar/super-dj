@@ -1,7 +1,7 @@
 import { StreamDestination } from '@prisma/client';
 import { ApiError } from '../errors';
 import { decrypt } from '../crypto/streamKeyCipher';
-import { YoutubeApiClient } from './youtubeApiClient';
+import { YoutubeApiClient, isAuthClassError } from './youtubeApiClient';
 import { OAuthConnectionRepository } from './oauthConnectionRepository';
 import { BroadcastMeta, DestinationLifecycle, DestinationLifecyclePhase, PreparedSession, StreamDestinationProvider } from './streamDestinationProvider';
 
@@ -44,7 +44,22 @@ export class YoutubeProvider implements StreamDestinationProvider {
     let phase: DestinationLifecyclePhase = 'creating';
     let pushStarted = false;
     let finalized = false;
+    let authErrorSeen = false;
     let phaseChangeListener: (() => void) | null = null;
+
+    // Finalizes and leaves phase at the terminal 'error' (not finalize()'s own 'complete') —
+    // shared by the health-check timeout and the auth-class short-circuit below, both of which
+    // mean "this destination is done, stop polling and don't let anything (including a reconnect
+    // attempt) try to keep using it." finalize() itself sets phase to 'complete' and notifies
+    // (that's the right outcome for a normal user-initiated stop) — this overwrites it with
+    // 'error' afterward and notifies again, so a listener reacting to the phase (StreamManager
+    // stopping the owning StreamController — see point 6a) observes the terminal-failure phase,
+    // not the "user stopped it on purpose" one.
+    const giveUp = async (): Promise<void> => {
+      await lifecycle.finalize();
+      phase = 'error';
+      phaseChangeListener?.();
+    };
 
     const lifecycle: DestinationLifecycle = {
       onPushStarted: () => {
@@ -73,10 +88,17 @@ export class YoutubeProvider implements StreamDestinationProvider {
             }
           } catch (err) {
             console.error('YouTube health-check poll failed', err);
+            if (isAuthClassError(err)) {
+              // A revoked/expired grant will never resolve itself by waiting — short-circuit
+              // instead of retrying silently for the rest of the (up to 90s) timeout window.
+              authErrorSeen = true;
+              await giveUp();
+              return;
+            }
           }
+          if (finalized) return;
           if (this.clock() >= deadline) {
-            await lifecycle.finalize();
-            phase = 'error';
+            await giveUp();
             return;
           }
           this.scheduleNextPoll(() => poll(), this.pollIntervalMs);
@@ -87,6 +109,7 @@ export class YoutubeProvider implements StreamDestinationProvider {
       phase: () => phase,
       watchUrl: () => `https://www.youtube.com/watch?v=${broadcast.id}`,
       onPhaseChange: (cb) => { phaseChangeListener = cb; },
+      isAuthError: () => authErrorSeen,
 
       finalize: async () => {
         if (finalized) return;

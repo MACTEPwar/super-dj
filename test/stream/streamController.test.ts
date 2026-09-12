@@ -167,6 +167,213 @@ describe('StreamController', () => {
     expect(controller.status().state).toBe('error');
   });
 
+  it('an unexpected exit tears down every collaborator IMMEDIATELY, before deciding whether to retry (the resource-leak fix: previously CanvasFeeder\'s heartbeat/AudioRelay\'s decoder/PulseVisualizer kept running against a dead pipe until a human called start()/stop())', async () => {
+    const { deps, encoder, canvasFeeder, audioRelay } = buildDeps();
+    const pulseVisualizer = { attach: jest.fn(), audioSink: {}, close: jest.fn() };
+    deps.createPulseVisualizer = jest.fn().mockReturnValue(pulseVisualizer);
+    // No reconnectPolicy — this is the "give up immediately" path, but teardown must still run
+    // first regardless of the eventual retry-or-not decision.
+    const controller = new StreamController(deps);
+    await controller.start();
+
+    const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+    onExit(1);
+
+    expect(canvasFeeder.close).toHaveBeenCalledTimes(1);
+    expect(audioRelay.close).toHaveBeenCalledTimes(1);
+    expect(pulseVisualizer.close).toHaveBeenCalledTimes(1);
+    expect(encoder.stop).toHaveBeenCalledTimes(1);
+  });
+
+  describe('reconnect on an unexpected exit', () => {
+    // A minimal fake policy — these tests are about StreamController's OWN mechanics (does it
+    // compute uptime/capture the elapsed position/schedule+cancel the timer/respawn correctly),
+    // not about the actual default policy's numeric thresholds (that's reconnectPolicy.test.ts).
+    function fakePolicy(decide: jest.Mock) {
+      return { decide };
+    }
+
+    it('schedules a reconnect (state -> reconnecting, notifies) when the policy says to retry, and does NOT call onError', async () => {
+      const { deps, encoder } = buildDeps();
+      const onError = jest.fn();
+      const onStatusChanged = jest.fn();
+      deps.onError = onError;
+      deps.onStatusChanged = onStatusChanged;
+      deps.reconnectPolicy = fakePolicy(jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }));
+      const controller = new StreamController(deps);
+      await controller.start();
+      onStatusChanged.mockClear();
+
+      const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+      onExit(1);
+
+      expect(controller.status().state).toBe('reconnecting');
+      expect(onError).not.toHaveBeenCalled();
+      expect(onStatusChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('a policy that says not to retry behaves exactly like the pre-reconnect give-up path: state -> error, onError invoked', async () => {
+      const { deps, encoder } = buildDeps();
+      const onError = jest.fn();
+      deps.onError = onError;
+      deps.reconnectPolicy = fakePolicy(jest.fn().mockReturnValue({ retry: false }));
+      const controller = new StreamController(deps);
+      await controller.start();
+
+      const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+      onExit(1);
+
+      expect(controller.status().state).toBe('error');
+      expect(onError).toHaveBeenCalledWith(1);
+    });
+
+    it('passes the just-died encoder\'s uptime to the policy, computed from when it was spawned', async () => {
+      const { deps, encoder } = buildDeps();
+      const decide = jest.fn().mockReturnValue({ retry: false });
+      deps.reconnectPolicy = fakePolicy(decide);
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(0);
+        const controller = new StreamController(deps);
+        await controller.start();
+
+        jest.setSystemTime(23_000);
+        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+        onExit(1);
+
+        expect(decide).toHaveBeenCalledWith(expect.objectContaining({ uptimeMs: 23_000, attempt: 1 }));
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('after the backoff delay elapses, respawns the encoder and resumes the track that was playing at its captured elapsed position (the same -ss seek path pause/resume already use)', async () => {
+      const { deps, encoder, audioRelay, canvasFeeder } = buildDeps();
+      deps.reconnectPolicy = fakePolicy(jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }));
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(0);
+        const controller = new StreamController(deps);
+        await controller.start(); // trackStartedAt = 0, track 'a'
+
+        jest.setSystemTime(7_500); // 7.5s into track 'a' when the encoder dies
+        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+        onExit(1);
+        expect(controller.status().state).toBe('reconnecting');
+
+        audioRelay.switchTrack.mockClear();
+        canvasFeeder.render.mockClear();
+
+        await jest.advanceTimersByTimeAsync(5000);
+
+        expect(encoder.start).toHaveBeenCalledTimes(2);
+        expect(audioRelay.switchTrack).toHaveBeenCalledWith('/music/a.mp3', 7.5);
+        expect(controller.status().state).toBe('streaming');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('a stale sessionGeneration at fire-time (stop() ran while the reconnect was pending) cancels the scheduled respawn', async () => {
+      const { deps, encoder } = buildDeps();
+      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
+      jest.useFakeTimers();
+      try {
+        const controller = new StreamController(deps);
+        await controller.start();
+        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+        onExit(1);
+        expect(controller.status().state).toBe('reconnecting');
+
+        controller.stop();
+        expect(controller.status().state).toBe('idle');
+
+        await jest.advanceTimersByTimeAsync(5000);
+
+        // stop() bumped sessionGeneration, so the pending respawn must have bailed instead of
+        // reviving a session the user explicitly stopped.
+        expect(encoder.start).toHaveBeenCalledTimes(1);
+        expect(controller.status().state).toBe('idle');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('stop() while reconnecting clears the pending timer outright (belt-and-suspenders alongside the generation guard)', async () => {
+      const { deps, encoder } = buildDeps();
+      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
+      jest.useFakeTimers();
+      try {
+        const controller = new StreamController(deps);
+        await controller.start();
+        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+        onExit(1);
+
+        controller.stop();
+        const pendingCountBefore = jest.getTimerCount();
+
+        await jest.advanceTimersByTimeAsync(5000);
+
+        expect(jest.getTimerCount()).toBeLessThanOrEqual(pendingCountBefore);
+        expect(encoder.start).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('next()/previous() do not throw while reconnecting (they may mutate the queue; the pending respawn reads queue.current() when it fires)', async () => {
+      const { deps, encoder, queue } = buildDeps();
+      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
+      const controller = new StreamController(deps);
+      await controller.start();
+      const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+      onExit(1);
+      expect(controller.status().state).toBe('reconnecting');
+
+      await expect(controller.next()).resolves.toBeUndefined();
+      await expect(controller.previous()).resolves.toBeUndefined();
+      expect(queue.next).toHaveBeenCalled();
+      expect(queue.previous).toHaveBeenCalled();
+    });
+
+    it('pause()/resume() still reject while reconnecting', async () => {
+      const { deps, encoder } = buildDeps();
+      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
+      const controller = new StreamController(deps);
+      await controller.start();
+      const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+      onExit(1);
+
+      expect(() => controller.pause()).toThrow(ApiError);
+      await expect(controller.resume()).rejects.toThrow(ApiError);
+    });
+
+    it('if next() advances the queue while reconnecting, the eventual respawn feeds the NEW current track from 0, not the old track at its stale captured offset', async () => {
+      const { deps, encoder, audioRelay, queue } = buildDeps();
+      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(0);
+        const controller = new StreamController(deps);
+        await controller.start(); // track 'a'
+
+        jest.setSystemTime(9_000);
+        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+        onExit(1);
+
+        await controller.next(); // queue now points at track 'b'
+        queue.current.mockReturnValue({ name: 'b', audioPath: '/music/b.mp3', coverPath: null });
+        audioRelay.switchTrack.mockClear();
+
+        await jest.advanceTimersByTimeAsync(5000);
+
+        expect(audioRelay.switchTrack).toHaveBeenCalledWith('/music/b.mp3', 0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   it('pause() switches the audio relay to silence and renders a frozen timer text, then resume() seeks the audio relay back', async () => {
     const { deps, audioRelay, canvasFeeder } = buildDeps();
     const nowSpy = jest.spyOn(Date, 'now');

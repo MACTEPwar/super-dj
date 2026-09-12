@@ -25,6 +25,7 @@ import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
 import { SessionOverlayCache } from './sessionOverlayCache';
 import { BroadcastMeta, DestinationLifecycle, StreamDestinationProvider } from '../destinations/streamDestinationProvider';
+import { createReconnectPolicy } from './reconnectPolicy';
 
 // Also declared (as '1280x720'/'30fps'-shaped strings) in src/destinations/youtubeApiClient.ts's
 // createStream — keep both in sync if this ever changes.
@@ -139,10 +140,14 @@ export class StreamManager extends EventEmitter {
       if (state === 'streaming' || state === 'paused') {
         throw new ApiError(409, 'a stream is already active for this destination');
       }
-      if (state === 'error') {
+      if (state === 'error' || state === 'reconnecting') {
         // An error-state controller's collaborators (CanvasFeeder's heartbeat, AudioRelay's
-        // decode process) are still alive until torn down — stop() runs that teardown. Skipped
-        // for 'idle' (already torn down; stop() would throw 409 for a non-active session).
+        // decode process) are still alive until torn down — stop() runs that teardown. A
+        // reconnecting controller has a pending respawn timer instead — stop() cancels that too.
+        // A manual restart while reconnecting is a deliberate user override: tear down and start
+        // fresh (a brand-new provider.prepareSession() below, a new YouTube broadcast if
+        // applicable), same as it's always behaved for 'error'. Skipped for 'idle' (already torn
+        // down; stop() would throw 409 for a non-active session).
         existing.stop();
       }
       this.controllers.delete(destinationId);
@@ -354,6 +359,21 @@ export class StreamManager extends EventEmitter {
               globalPulse: globalPulseStrength(equalizerElement.globalPulse),
             })
           : undefined,
+        // Generic uptime/crash-loop/attempt/time-budget gating lives in reconnectPolicy.ts;
+        // the only thing folded in here is provider-specific knowledge StreamController itself
+        // must not know about — a YouTube destination's lifecycle being in a terminal phase, or
+        // having already seen an auth-class failure (a revoked OAuth grant won't fix itself by
+        // retrying). Absent lifecycle (CustomRtmpProvider — no broadcast/lifecycle concept at
+        // all) means no provider-side veto; reconnect is then gated purely on uptime/crash-loop.
+        reconnectPolicy: createReconnectPolicy({
+          isRetryableDestination: () => {
+            if (!session.lifecycle) return true;
+            const phase = session.lifecycle.phase();
+            if (phase === 'error' || phase === 'complete') return false;
+            if (session.lifecycle.isAuthError?.()) return false;
+            return true;
+          },
+        }),
         onError: (exitCode) => {
           // Previously silent — an operator watching a real dropped stream (e.g. the RTMP
           // connection itself breaking) had nothing in the app's own logs saying this happened at
@@ -387,7 +407,32 @@ export class StreamManager extends EventEmitter {
 
       if (session.lifecycle) {
         this.lifecycles.set(destinationId, { providerType: destination.provider, lifecycle: session.lifecycle });
-        session.lifecycle.onPhaseChange?.(() => { this.emit('statusChanged', destinationId); });
+        session.lifecycle.onPhaseChange?.(() => {
+          const phase = session.lifecycle!.phase();
+          // A terminal phase (the health-check timeout, or an auth-class failure short-
+          // circuiting it — see youtubeProvider.ts) means the destination's YouTube side is
+          // confirmed dead: the local StreamController must actually stop instead of continuing
+          // to push to a dead ingest forever (previously it just sat there until a human called
+          // /stream/stop), and must NOT attempt to reconnect against it — the reconnectPolicy
+          // above already refuses to retry once phase is terminal, but the controller itself
+          // also needs to be torn down since nothing else will stop a still-alive local pipeline.
+          if (phase === 'error' || phase === 'complete') {
+            // Guard against acting on a DIFFERENT, newer session for this same destinationId —
+            // a manual restart could have already replaced both map entries by the time this
+            // (async) phase-change callback fires. Same stale-async-result hazard as the onError
+            // hook above (see CLAUDE.md's "Known follow-ups"); closing over `controller`/
+            // `session.lifecycle` from this start() call and comparing against the CURRENT map
+            // entries avoids introducing a new instance of it here.
+            if (this.controllers.get(destinationId) === controller) {
+              if (controller.status().state !== 'idle') controller.stop();
+              this.controllers.delete(destinationId);
+            }
+            if (this.lifecycles.get(destinationId)?.lifecycle === session.lifecycle) {
+              this.lifecycles.delete(destinationId);
+            }
+          }
+          this.emit('statusChanged', destinationId);
+        });
         session.lifecycle.onPushStarted();
       }
     } finally {

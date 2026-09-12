@@ -38,10 +38,55 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 const YOUTUBE_API = 'https://www.googleapis.com/youtube/v3';
 
+// A machine-inspectable version of the generic 502 ApiError readJsonOrThrow used to throw —
+// carries the real upstream HTTP status and Google's own error/reason string, instead of just
+// stringifying both into the message. Needed so both the health-check poll and the reconnect
+// policy can reliably detect an auth-class failure (a revoked/expired OAuth grant) without
+// parsing message strings.
+export class YoutubeApiError extends ApiError {
+  constructor(
+    public readonly upstreamStatus: number,
+    public readonly reason: string | null,
+    context: string,
+    body: unknown,
+  ) {
+    super(502, `YouTube API error (${context}): ${upstreamStatus} ${JSON.stringify(body)}`);
+  }
+}
+
+// Google shapes an error body differently depending on the endpoint:
+//  - the OAuth token endpoint (refreshAccessToken/exchangeCode): { error: 'invalid_grant', error_description }
+//  - the Data API v3 (everything else): { error: { code, message, errors: [{ reason }], status } }
+function extractReason(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const errorField = (body as Record<string, unknown>).error;
+  if (typeof errorField === 'string') return errorField;
+  if (errorField && typeof errorField === 'object') {
+    const errors = (errorField as Record<string, unknown>).errors;
+    const firstReason = Array.isArray(errors) ? (errors[0] as Record<string, unknown> | undefined)?.reason : undefined;
+    if (typeof firstReason === 'string') return firstReason;
+    const status = (errorField as Record<string, unknown>).status;
+    if (typeof status === 'string') return status;
+  }
+  return null;
+}
+
 async function readJsonOrThrow(res: Response, context: string): Promise<any> {
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(502, `YouTube API error (${context}): ${res.status} ${JSON.stringify(body)}`);
+  if (!res.ok) throw new YoutubeApiError(res.status, extractReason(body), context, body);
   return body;
+}
+
+// 401/403 always mean the credentials themselves are no good; invalid_grant (a revoked/expired
+// refresh token, from the OAuth token endpoint) and forbidden/insufficientPermissions/
+// unauthorized (from the Data API's own error.errors[].reason) are the reason strings actually
+// observed for the same underlying problem. Anything else (rate limiting, a transient 5xx, a
+// malformed request) is NOT auth-class — those are worth retrying.
+export function isAuthClassError(err: unknown): boolean {
+  if (!(err instanceof YoutubeApiError)) return false;
+  if (err.upstreamStatus === 401 || err.upstreamStatus === 403) return true;
+  const reason = (err.reason ?? '').toLowerCase();
+  return reason === 'invalid_grant' || reason === 'forbidden' || reason === 'insufficientpermissions' || reason === 'unauthorized';
 }
 
 function authHeader(accessToken: string): Record<string, string> {

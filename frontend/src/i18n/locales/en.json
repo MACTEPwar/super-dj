@@ -283,7 +283,8 @@
     "idle": "idle",
     "streaming": "streaming",
     "paused": "paused",
-    "error": "error"
+    "error": "error",
+    "reconnecting": "reconnecting"
   },
   "drawer": {
     "close": "Close"

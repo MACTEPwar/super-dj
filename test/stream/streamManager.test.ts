@@ -260,6 +260,20 @@ describe('StreamManager', () => {
     expect(crashed.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('start() replaces a controller stuck in reconnecting state instead of rejecting with 409 (a manual restart is a deliberate user override, same as it already is for error)', async () => {
+    const { deps } = buildDeps();
+    const manager = new StreamManager(deps as any);
+    const reconnecting = { status: () => ({ state: 'reconnecting', currentTrack: null, nextTrack: null }), stop: jest.fn() };
+    (manager as any).controllers.set('dest-1', reconnecting);
+
+    await expect(manager.start('dest-1', 'playlist-1')).resolves.toBeUndefined();
+
+    expect(manager.get('dest-1')).toBeDefined();
+    expect(manager.get('dest-1')).not.toBe(reconnecting);
+    expect(manager.status('dest-1').state).toBe('streaming');
+    expect(reconnecting.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('start() finalizes a stale lifecycle left behind by a crashed controller instead of dropping it', async () => {
     const { deps } = buildDeps();
     const manager = new StreamManager(deps as any);
@@ -284,6 +298,19 @@ describe('StreamManager', () => {
     const manager = new StreamManager(deps as any);
     expect(() => manager.pause('never-started')).toThrow(ApiError);
     await expect(manager.next('never-started')).rejects.toThrow(ApiError);
+  });
+
+  it('an unexpected pusher exit for a custom (non-YouTube) destination also schedules a reconnect — no provider/lifecycle involvement needed, just uptime/crash-loop', async () => {
+    const { deps, pipeSpawner } = buildDeps();
+    const manager = new StreamManager(deps as any);
+    await manager.start('dest-1', 'playlist-1');
+    expect(manager.status('dest-1').state).toBe('streaming');
+
+    const encoderChild = (pipeSpawner as jest.Mock).mock.results[0].value;
+    const onExit = encoderChild.once.mock.calls.find((call: any[]) => call[0] === 'exit')?.[1];
+    onExit(1);
+
+    expect(manager.status('dest-1').state).toBe('reconnecting');
   });
 
   it('stop() tears the controller down and removes it from the registry', async () => {
@@ -710,26 +737,87 @@ describe('StreamManager', () => {
       expect(manager.status('dest-1').provider).toBeUndefined();
     });
 
-    it('an unexpected pusher exit finalizes the lifecycle via the onError hook', async () => {
+    // Grabs the same onExit callback the "onError hook" tests below trigger directly to simulate
+    // the persistent encoder's ffmpeg dying unexpectedly — see the comment at its original call
+    // site (kept here since every test in this block needs it).
+    function grabEncoderOnExit(pipeSpawner: jest.Mock, index = 0): (code: number | null) => void {
+      const encoderChild = pipeSpawner.mock.results[index].value;
+      return encoderChild.once.mock.calls.find((call: any[]) => call[0] === 'exit')?.[1];
+    }
+
+    it('an unexpected pusher exit against a destination whose lifecycle is already in a terminal phase finalizes immediately via the onError hook, instead of retrying', async () => {
       const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
       const { deps, destinationRepository, youtubeLifecycle, pipeSpawner } = buildDeps() as any;
+      // Simulates the destination's YouTube side already being confirmed dead (e.g. the
+      // health-check timeout already ran) at the moment the local encoder also dies — the
+      // reconnectPolicy's terminal-phase veto must refuse to retry regardless of uptime.
+      youtubeLifecycle.phase.mockReturnValue('error');
       const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
       await manager.start('dest-1', 'playlist-1');
 
-      // StreamController.start() calls createPersistentEncoder().start(...) — which spawns the
-      // encoder's ffmpeg via pipeSpawner — before anything else touches the regular spawner
-      // (feeding a track's AudioRelay/CanvasFeeder calls). PersistentEncoder.start() registers
-      // `child.once('exit', onExitCallback)` — grab that same callback and invoke it directly to
-      // simulate the persistent encoder's ffmpeg dying unexpectedly.
-      const encoderChild = pipeSpawner.mock.results[0].value;
-      const onExit = encoderChild.once.mock.calls.find((call: any[]) => call[0] === 'exit')?.[1];
+      const onExit = grabEncoderOnExit(pipeSpawner);
       onExit(1);
 
+      expect(manager.status('dest-1').state).toBe('error');
       expect(youtubeLifecycle.finalize).toHaveBeenCalledTimes(1);
       // Previously silent — an operator had nothing in the app's own logs pointing at which
       // destination died or why, only ffmpeg's raw stderr to reverse-engineer it from.
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('dest-1: persistent encoder exited unexpectedly (code=1)'));
       errorSpy.mockRestore();
+    });
+
+    it('an unexpected pusher exit against a destination whose lifecycle has seen an auth-class error finalizes immediately, without retrying', async () => {
+      const { deps, destinationRepository, youtubeLifecycle, pipeSpawner } = buildDeps() as any;
+      youtubeLifecycle.phase.mockReturnValue('waitingForYoutube');
+      youtubeLifecycle.isAuthError = jest.fn().mockReturnValue(true);
+      const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
+      await manager.start('dest-1', 'playlist-1');
+
+      const onExit = grabEncoderOnExit(pipeSpawner);
+      onExit(1);
+
+      expect(manager.status('dest-1').state).toBe('error');
+      expect(youtubeLifecycle.finalize).toHaveBeenCalledTimes(1);
+    });
+
+    it('an unexpected pusher exit against a destination with a healthy (non-terminal) lifecycle schedules a reconnect instead of immediately finalizing', async () => {
+      const { deps, destinationRepository, youtubeLifecycle, pipeSpawner } = buildDeps() as any;
+      // Default fakeLifecycle() phase is 'waitingForYoutube' — not terminal.
+      const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
+      await manager.start('dest-1', 'playlist-1');
+
+      const onExit = grabEncoderOnExit(pipeSpawner);
+      onExit(1);
+
+      expect(manager.status('dest-1').state).toBe('reconnecting');
+      expect(youtubeLifecycle.finalize).not.toHaveBeenCalled();
+    });
+
+    it('the lifecycle phase-change handler stops the owning controller once the phase becomes a terminal failure (e.g. the health-check timeout), instead of leaving it pushing to a dead ingest', async () => {
+      const { deps, destinationRepository, youtubeLifecycle } = buildDeps();
+      const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
+      await manager.start('dest-1', 'playlist-1');
+      expect(manager.status('dest-1').state).toBe('streaming');
+
+      const registeredCallback = youtubeLifecycle.onPhaseChange.mock.calls[0][0];
+      youtubeLifecycle.phase.mockReturnValue('error');
+      registeredCallback();
+
+      expect(manager.get('dest-1')).toBeUndefined();
+      expect(manager.status('dest-1').state).toBe('idle');
+    });
+
+    it('the phase-change handler does nothing to the controller when the phase is still a normal, non-terminal one', async () => {
+      const { deps, destinationRepository, youtubeLifecycle } = buildDeps();
+      const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
+      await manager.start('dest-1', 'playlist-1');
+
+      const registeredCallback = youtubeLifecycle.onPhaseChange.mock.calls[0][0];
+      youtubeLifecycle.phase.mockReturnValue('live');
+      registeredCallback();
+
+      expect(manager.get('dest-1')).toBeDefined();
+      expect(manager.status('dest-1').state).toBe('streaming');
     });
   });
 

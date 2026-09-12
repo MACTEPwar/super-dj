@@ -1,4 +1,4 @@
-import { createYoutubeApiClient } from '../../src/destinations/youtubeApiClient';
+import { createYoutubeApiClient, YoutubeApiError, isAuthClassError } from '../../src/destinations/youtubeApiClient';
 
 function mockFetchOnce(status: number, body: unknown) {
   (global.fetch as jest.Mock).mockResolvedValueOnce({
@@ -112,5 +112,50 @@ describe('createYoutubeApiClient', () => {
     const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });
 
     await expect(client.getChannel('at')).rejects.toMatchObject({ status: 502 });
+  });
+
+  describe('YoutubeApiError / isAuthClassError (typed, inspectable upstream failures)', () => {
+    it('wraps a non-ok response as a YoutubeApiError carrying the real upstream status and reason', async () => {
+      mockFetchOnce(403, { error: { code: 403, errors: [{ reason: 'forbidden' }], status: 'PERMISSION_DENIED' } });
+      const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });
+
+      try {
+        await client.getChannel('at');
+        throw new Error('expected getChannel to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(YoutubeApiError);
+        expect((err as YoutubeApiError).upstreamStatus).toBe(403);
+        expect((err as YoutubeApiError).reason).toBe('forbidden');
+      }
+    });
+
+    it('extracts the OAuth token endpoint\'s bare error string (e.g. invalid_grant) as the reason', async () => {
+      mockFetchOnce(400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' });
+      const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });
+
+      try {
+        await client.refreshAccessToken('rt');
+        throw new Error('expected refreshAccessToken to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(YoutubeApiError);
+        expect((err as YoutubeApiError).reason).toBe('invalid_grant');
+        expect((err as YoutubeApiError).upstreamStatus).toBe(400);
+      }
+    });
+
+    it('isAuthClassError recognizes 401/403 and known auth-related reason strings', () => {
+      expect(isAuthClassError(new YoutubeApiError(401, null, 'ctx', {}))).toBe(true);
+      expect(isAuthClassError(new YoutubeApiError(403, null, 'ctx', {}))).toBe(true);
+      expect(isAuthClassError(new YoutubeApiError(400, 'invalid_grant', 'ctx', {}))).toBe(true);
+      expect(isAuthClassError(new YoutubeApiError(403, 'forbidden', 'ctx', {}))).toBe(true);
+      expect(isAuthClassError(new YoutubeApiError(403, 'insufficientPermissions', 'ctx', {}))).toBe(true);
+    });
+
+    it('isAuthClassError returns false for a non-auth failure (e.g. a transient 5xx or rate limiting) and for a non-YoutubeApiError', () => {
+      expect(isAuthClassError(new YoutubeApiError(500, null, 'ctx', {}))).toBe(false);
+      expect(isAuthClassError(new YoutubeApiError(429, 'rateLimitExceeded', 'ctx', {}))).toBe(false);
+      expect(isAuthClassError(new Error('boom'))).toBe(false);
+      expect(isAuthClassError(null)).toBe(false);
+    });
   });
 });

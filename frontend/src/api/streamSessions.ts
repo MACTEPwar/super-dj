@@ -1,6 +1,9 @@
 import { api, API_BASE_URL } from './client';
 
-export type SessionState = 'idle' | 'streaming' | 'paused' | 'error';
+// 'reconnecting' — the backend is retrying an in-place respawn of this destination's encoder
+// after an unexpected disconnect (same session, same RTMP target/YouTube broadcast); distinct
+// from 'error', which still means dead and needs a manual restart.
+export type SessionState = 'idle' | 'streaming' | 'paused' | 'error' | 'reconnecting';
 
 export interface ProviderStatus {
   type: string;
