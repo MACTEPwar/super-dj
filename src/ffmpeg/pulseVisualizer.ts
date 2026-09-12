@@ -2,7 +2,7 @@ import { Writable } from 'stream';
 import { magnitudesFromPcm } from '../audio/pcmSpectrum';
 import { PcmRingBuffer } from '../audio/pcmRingBuffer';
 import { PulseEngine } from '../audio/pulseEngine';
-import { buildPulseSvg, PulsePoint } from '../render/pulseSvg';
+import { buildPulseSvg, layoutPulsePoints } from '../render/pulseSvg';
 import { unpremultiplyRgbaInPlace } from '../render/unpremultiply';
 import { renderPulseFrame as renderPulseFrameViaPool } from '../render/pulseRenderWorkerPool';
 
@@ -185,10 +185,14 @@ export class PulseVisualizer {
     this.loadAnalysisWindow();
     const magnitudes = this.analyzeSpectrum(this.pcmWindow, this.bandCount);
     const values = this.engine.update(magnitudes, dtSeconds);
-    const points: PulsePoint[] = values.map((v, i) => ({
-      x: (i / (this.bandCount - 1)) * this.options.width,
-      y: this.options.height / 2 - v * this.options.height * 0.4,
-    }));
+    // Inset so the whole stroke (glow included) stays inside the element's box — see
+    // layoutPulsePoints for why the line no longer runs edge to edge.
+    const points = layoutPulsePoints(values, {
+      width: this.options.width,
+      height: this.options.height,
+      glowRadius: this.options.glowRadius,
+      coreWidth: this.options.coreWidth,
+    });
     const svg = buildPulseSvg(points, {
       width: this.options.width,
       height: this.options.height,

@@ -262,6 +262,24 @@ function widthsFor(glowRadius: number, glowLayers: number): number[] {
   return out;
 }
 
+// Port of the backend's strokeMarginPx + layoutPulsePoints (src/render/pulseSvg.ts): the polyline
+// is inset from every edge by half the widest stroke (plus a pixel of anti-aliasing) so the whole
+// glow lands inside the box instead of being chopped flat at its edges, the baseline sits at the
+// vertical centre, and the loudest value reaches exactly the top margin. Same cap for a box
+// smaller than its own glow.
+function layoutPulsePoints(values: number[], boxWidth: number, boxHeight: number, glowRadius: number, coreWidth: number): { x: number; y: number }[] {
+  const strokeMargin = Math.ceil(Math.max(glowRadius + 0.4, coreWidth) / 2) + 1;
+  const margin = Math.min(strokeMargin, Math.floor(Math.min(boxWidth, boxHeight) / 4));
+  const n = values.length;
+  const usableWidth = boxWidth - 2 * margin;
+  const baseline = boxHeight / 2;
+  const amplitude = baseline - margin;
+  return values.map((v, i) => ({
+    x: margin + (n > 1 ? i / (n - 1) : 0.5) * usableWidth,
+    y: baseline - (clamp(v, 0, MAX_VALUE) / MAX_VALUE) * amplitude,
+  }));
+}
+
 function tracePath(ctx: CanvasRenderingContext2D, points: { x: number; y: number }[]): void {
   ctx.beginPath();
   ctx.moveTo(points[0].x, points[0].y);
@@ -307,10 +325,7 @@ export function PulseEqualizerPreview({ colors, glowLayers, glowRadius, coreWidt
       const grad = ctx.createLinearGradient(0, 0, boxWidth, 0);
       colors.forEach((c, i) => grad.addColorStop(i / (colors.length - 1 || 1), c));
 
-      const points = values.map((v, i) => ({
-        x: (i / (bandCount - 1 || 1)) * boxWidth,
-        y: boxHeight / 2 - v * boxHeight * 0.4,
-      }));
+      const points = layoutPulsePoints(values, boxWidth, boxHeight, glowRadius, coreWidth);
 
       const widths = widthsFor(glowRadius, glowLayers);
       ctx.lineJoin = 'round';

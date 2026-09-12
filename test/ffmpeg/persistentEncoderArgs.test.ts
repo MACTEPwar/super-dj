@@ -103,7 +103,8 @@ describe('buildPersistentEncoderArgs', () => {
     // frozen on the first frame indefinitely, while `loop=loop=-1:size=<frameCount>` inside the
     // filter graph genuinely cycled through all of the GIF's frames.
     expect(filterArg).toContain('[3:v]loop=loop=-1:size=10,fps=30,scale=150:150[gif0]');
-    expect(filterArg).toContain('[vbg][gif0]overlay=900:40[vgif0]');
+    // :format=rgb — exact placement at odd coordinates, see the 'odd overlay coordinates' tests.
+    expect(filterArg).toContain('[vbg][gif0]overlay=900:40:format=rgb[vgif0]');
   });
 
   it('chains multiple gifOverlays entries, one file input and one loop/overlay stage per entry, in array order', () => {
@@ -117,10 +118,10 @@ describe('buildPersistentEncoderArgs', () => {
 
     const filterArg = args[args.indexOf('-filter_complex') + 1];
     expect(filterArg).toContain('[3:v]loop=loop=-1:size=5,fps=30,scale=100:100[gif0]');
-    expect(filterArg).toContain('[vbg][gif0]overlay=10:10[vgif0]');
+    expect(filterArg).toContain('[vbg][gif0]overlay=10:10:format=rgb[vgif0]');
     expect(filterArg).toContain('[4:v]loop=loop=-1:size=8,fps=30,scale=200:200[gif1]');
     // second gif overlays on top of the first gif's own output pad, not back on [vbg].
-    expect(filterArg).toContain('[vgif0][gif1]overlay=20:20[vgif1]');
+    expect(filterArg).toContain('[vgif0][gif1]overlay=20:20:format=rgb[vgif1]');
     // the canvas composites on top of the LAST gif stage.
     expect(filterArg).toContain('[vgif1][vcanvas]overlay=0:0[vcanvas_top]');
     expect(args).toEqual(expect.arrayContaining(['-map', '[vcanvas_top]']));
@@ -143,11 +144,46 @@ describe('buildPersistentEncoderArgs', () => {
     // gif input is still index 3 (unchanged from the no-equalizer gif test above) — the pulse
     // input is appended after it, at index 4, not inserted before it.
     expect(filterArg).toContain('[3:v]loop=loop=-1:size=10,fps=30,scale=150:150[gif0]');
-    expect(filterArg).toContain('[vbg][gif0]overlay=900:40[vgif0]');
+    expect(filterArg).toContain('[vbg][gif0]overlay=900:40:format=rgb[vgif0]');
     expect(filterArg).toContain('[vgif0][vcanvas]overlay=0:0[vcanvas_top]');
     expect(filterArg).toContain('[4:v]format=yuva420p[pulse]');
     expect(filterArg).toContain('[vcanvas_top][pulse]overlay=40:500[vout]');
     expect(args).toEqual(expect.arrayContaining(['-i', '/cover.gif', '-i', 'pipe:5']));
+  });
+
+  // ffmpeg's overlay filter composites in yuv420 by default and silently rounds an odd x/y DOWN
+  // to even, displacing the whole overlay one pixel up/left — verified against a real ffmpeg
+  // binary: a white box at overlay=141:501 lit rows 500-501 and left its own last row/column
+  // unpainted. A gif is opaque to its edge, so at an odd position it painted one row/column
+  // OUTSIDE its declared box; `format=rgb` composites in packed RGB, where placement is exact.
+  describe('odd overlay coordinates', () => {
+    it('composites gif overlays in rgb mode so an odd position lands exactly where the template put it', () => {
+      const args = buildPersistentEncoderArgs({
+        ...base,
+        gifOverlays: [
+          { x: 901, y: 41, width: 150, height: 150, filePath: '/a.gif', frameCount: 10 },
+          { x: 20, y: 20, width: 100, height: 100, filePath: '/b.gif', frameCount: 5 },
+        ],
+      });
+
+      const filterArg = args[args.indexOf('-filter_complex') + 1];
+      expect(filterArg).toContain('[3:v]loop=loop=-1:size=10,fps=30,scale=150:150[gif0]');
+      expect(filterArg).toContain('[vbg][gif0]overlay=901:41:format=rgb[vgif0]');
+      // Uniformly, not just for odd coordinates — one code path, same conversion count either way.
+      expect(filterArg).toContain('[vgif0][gif1]overlay=20:20:format=rgb[vgif1]');
+      expect(filterArg).not.toContain('pad=');
+    });
+
+    it('keeps the equalizer overlay in the default yuv420 mode at its exact template coordinates, odd or not', () => {
+      // The pulse frame is inset from every edge by its own stroke margin (layoutPulsePoints), so
+      // the <=1px rounding stays inside the box, and rgb-mode compositing here would cost an RGB
+      // round trip of the whole frame — see buildPersistentEncoderArgs.
+      const args = buildPersistentEncoderArgs({ ...base, equalizer: { x: 141, y: 501, width: 601, height: 151 } });
+
+      const filterArg = args[args.indexOf('-filter_complex') + 1];
+      expect(filterArg).toContain('[3:v]format=yuva420p[pulse]');
+      expect(filterArg).toContain('[vcanvas_top][pulse]overlay=141:501[vout]');
+    });
   });
 
   it('is byte-for-byte identical to the no-equalizer output when equalizer is omitted vs. explicitly undefined', () => {

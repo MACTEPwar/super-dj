@@ -18,6 +18,20 @@ export interface GifOverlayConfig {
   frameCount: number;
 }
 
+// ffmpeg's `overlay` filter composites in yuv420 by default and silently rounds an odd x/y DOWN
+// to the even chroma grid, displacing the WHOLE overlay one pixel up/left — verified against a
+// real ffmpeg binary: a white box at overlay=141:501 lit rows 500 and 501 and left its own last
+// row/column unpainted (odd width/height are handled fine; only the position matters). A gif
+// element is opaque right up to its edge, so at an odd position its picture landed one row/column
+// OUTSIDE its declared box. `format=rgb` makes the overlay composite in packed RGB, where there
+// is no chroma grid and the placement is exact (verified: 0/255/255/0 on the rows and columns
+// around the box). It's effectively free here — the main input at this point in the graph is the
+// decoded background image, already RGB, so the one RGB->yuv420p conversion of the 1280x720
+// chain simply moves from the first gif overlay to the canvas overlay below. (Measured on the
+// pulse stage, whose main is already yuv420p, the same option costs ~0.85ms per frame — see the
+// equalizer overlay below for why it doesn't need it.)
+const GIF_OVERLAY_FORMAT = 'format=rgb';
+
 export function buildPersistentEncoderArgs(params: {
   width: number;
   height: number;
@@ -99,7 +113,8 @@ export function buildPersistentEncoderArgs(params: {
       // for the same duplicate-frame reason as the `[vcanvas]` stage above.
       `[${inputIndex}:v]loop=loop=-1:size=${gif.frameCount},fps=${fps},scale=${gif.width}:${gif.height}[${gifPad}]`,
     );
-    filterLines.push(`[${videoPad}][${gifPad}]overlay=${gif.x}:${gif.y}[${nextPad}]`);
+    // See GIF_OVERLAY_FORMAT: exact placement at odd coordinates.
+    filterLines.push(`[${videoPad}][${gifPad}]overlay=${gif.x}:${gif.y}:${GIF_OVERLAY_FORMAT}[${nextPad}]`);
     videoPad = nextPad;
   });
 
@@ -119,6 +134,15 @@ export function buildPersistentEncoderArgs(params: {
     // same conversion stage every other alpha-carrying branch in this graph already goes through
     // (compare [0:v]'s own format=yuva420p above).
     filterLines.push(`[${pulseInputIndex}:v]format=yuva420p[pulse]`);
+    // Deliberately NOT GIF_OVERLAY_FORMAT: the main input here is already yuv420p (the canvas
+    // overlay's output), so compositing in RGB would add an RGB round trip of the whole 1280x720
+    // frame — measured at ~0.85ms per frame (1.40 -> 2.25ms for the encode stage) on a machine
+    // far less contended than the deployment host. It isn't needed for containment: the pulse
+    // frame is inset from every edge by at least its own stroke margin (see layoutPulsePoints in
+    // src/render/pulseSvg.ts), so the <=1px rounding of an odd coordinate moves the picture a
+    // pixel WITHIN the box and can never paint outside it — verified on the composited output at
+    // an odd position (141:501): nothing outside the box beyond x264's own ringing (max 7/255),
+    // identical to the even-position run.
     filterLines.push(`[${videoPad}][pulse]overlay=${equalizer.x}:${equalizer.y}[vout]`);
     videoPad = 'vout';
   }

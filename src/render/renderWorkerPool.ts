@@ -22,6 +22,13 @@ function getPool(): Piscina {
       filename: path.join(__dirname, 'renderWorker.js'),
       maxThreads: Math.max(1, Math.min(4, os.cpus().length)),
       idleTimeout: 60000,
+      // Same defect as pulseRenderWorkerPool.ts (see the full explanation there): with piscina's
+      // default Atomics.wait() dispatch the worker never returns to its event loop, so the Node-API
+      // finalizers that free resvg's native memory (a full 1280x720 pixmap plus the PNG, per
+      // render) never run until the worker is torn down. This pool renders far less often — once
+      // per track switch/pause/resume, not 30 times a second — but a worker that stays busy
+      // enough never to hit idleTimeout leaks every render it has ever done, indefinitely.
+      useAtomics: false,
     });
   }
   return pool;

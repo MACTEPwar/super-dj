@@ -29,13 +29,14 @@ export const DEFAULT_BEAT_BOOST = 0.5;
 const DEFAULT_FLOOR_DECAY_PER_SECOND = 2.2;
 const DEFAULT_TRIGGER_RATIO = 1.6;
 
-// The ceiling the returned values are clamped to. PulseVisualizer maps a value v to
-// y = height/2 - v * height * 0.4, so the continuous level's own full height (1.0) sits 10% below
-// the box's top edge and this leaves the beat accent exactly that 10% to poke above it — the
-// accent is visible as an overshoot past where the level alone can reach, without the line ever
-// leaving the box. (The old random-sign pulse engine clamped to [-1.3, 1.5] — an up-and-down
-// spike aesthetic that let the line leave the box in both directions; nothing here goes below the
-// baseline any more, so the lower bound is simply zero.)
+// The ceiling the returned values are clamped to. layoutPulsePoints (src/render/pulseSvg.ts)
+// maps a value v to a height of v / MAX_VALUE of the usable amplitude above the baseline, so the
+// continuous level's own full height (1.0) sits 20% below the top of that amplitude and this
+// leaves the beat accent exactly that 20% to poke above it — the accent is visible as an
+// overshoot past where the level alone can reach, without the line ever leaving the box. (The
+// old random-sign pulse engine clamped to [-1.3, 1.5] — an up-and-down spike aesthetic that let
+// the line leave the box in both directions; nothing here goes below the baseline any more, so
+// the lower bound is simply zero.)
 export const MAX_VALUE = 1.25;
 
 // Per-band normalization. Real per-band magnitudes span ~100x between bass and treble (measured

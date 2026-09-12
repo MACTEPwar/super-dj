@@ -13,6 +13,20 @@ function getPool(): Piscina {
       filename: path.join(__dirname, 'pulseRenderWorker.js'),
       maxThreads: Math.max(1, Math.min(4, os.cpus().length)),
       idleTimeout: 60000,
+      // NOT piscina's default (true). This was a real ~2.3GB/min RSS leak on a deployed stream,
+      // reproduced locally against the real pipeline at ~60MB/s for a 1000x300 element:
+      // piscina's Atomics-based dispatch blocks the worker in Atomics.wait() (no timeout) and
+      // pulls the next task straight off the port via receiveMessageOnPort(), so as long as
+      // frames keep coming — 30/s per stream here — the WORKER'S EVENT LOOP NEVER TURNS. Node-API
+      // runs native finalizers on that loop (SetImmediate), and resvg's per-frame native memory
+      // (the RenderedImage's Rust pixmap plus the external `pixels` buffer, ~2.8MB per frame at
+      // that size) is only ever freed by those finalizers. V8 sees none of it as external memory
+      // either, so even a forced full GC inside the worker freed nothing; only worker teardown
+      // did. Measured: 1889MB RSS after 30s of renders with the default, flat ~200MB with this
+      // off, everything else identical. The per-task cost of dispatching through the loop
+      // instead is microseconds against a ~15ms render. (piscina 5 renames this knob to
+      // `atomics: 'disabled'`.)
+      useAtomics: false,
     });
   }
   return pool;
