@@ -354,7 +354,13 @@ export class StreamManager extends EventEmitter {
               globalPulse: globalPulseStrength(equalizerElement.globalPulse),
             })
           : undefined,
-        onError: () => {
+        onError: (exitCode) => {
+          // Previously silent — an operator watching a real dropped stream (e.g. the RTMP
+          // connection itself breaking) had nothing in the app's own logs saying this happened at
+          // all, only ffmpeg's raw, unattributed, untimestamped stderr to reverse-engineer it from.
+          console.error(
+            `[${new Date().toISOString()}] destination ${destinationId}: persistent encoder exited unexpectedly (code=${exitCode}), tearing down and finalizing lifecycle`,
+          );
           const entry = this.lifecycles.get(destinationId);
           this.lifecycles.delete(destinationId);
           entry?.lifecycle.finalize().catch((err) => {

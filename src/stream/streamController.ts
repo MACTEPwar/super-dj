@@ -22,7 +22,7 @@ export interface StreamControllerDeps {
   createPersistentEncoder: () => PersistentEncoder;
   createPulseVisualizer?: () => PulseVisualizer;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
-  onError?: () => void;
+  onError?: (exitCode: number | null) => void;
   onStatusChanged?: () => void;
 }
 
@@ -59,9 +59,9 @@ export class StreamController {
     this.teardown();
 
     this.encoder = this.deps.createPersistentEncoder();
-    const child = this.encoder.start(() => {
+    const child = this.encoder.start((exitCode) => {
       this.state = 'error';
-      this.deps.onError?.();
+      this.deps.onError?.(exitCode);
       this.deps.onStatusChanged?.();
     });
     this.canvasFeeder = this.deps.createCanvasFeeder();

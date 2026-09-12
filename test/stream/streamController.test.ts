@@ -163,6 +163,7 @@ describe('StreamController', () => {
     onExit(1);
 
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(1);
     expect(controller.status().state).toBe('error');
   });
 

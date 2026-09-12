@@ -39,6 +39,10 @@ export function createSpawner(): Spawner {
   return (command: string, args: string[]): ChildProcessLike => {
     const child = spawn(command, args);
     child.stderr?.on('data', (chunk: Buffer) => {
+      // Timestamped so a real incident's ffmpeg output (which arrives in irregular, often large
+      // \r-joined progress chunks with no timestamp of its own) can be lined up against the app's
+      // own timestamped logs below — found missing while investigating a real dropped stream.
+      process.stderr.write(`[${new Date().toISOString()}] `);
       process.stderr.write(chunk);
     });
     return child as unknown as ChildProcessLike;
@@ -55,6 +59,7 @@ export function createPipeSpawner(): PipeSpawner {
       console.error('persistent encoder process failed to spawn', err);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
+      process.stderr.write(`[${new Date().toISOString()}] `);
       process.stderr.write(chunk);
     });
     // @types/node's ChildProcess.stdio is a fixed 5-element tuple type — it has no index 5 to

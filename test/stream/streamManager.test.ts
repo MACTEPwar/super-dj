@@ -711,6 +711,7 @@ describe('StreamManager', () => {
     });
 
     it('an unexpected pusher exit finalizes the lifecycle via the onError hook', async () => {
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
       const { deps, destinationRepository, youtubeLifecycle, pipeSpawner } = buildDeps() as any;
       const manager = new StreamManager(withYoutubeDestination(deps as any, destinationRepository) as any);
       await manager.start('dest-1', 'playlist-1');
@@ -725,6 +726,10 @@ describe('StreamManager', () => {
       onExit(1);
 
       expect(youtubeLifecycle.finalize).toHaveBeenCalledTimes(1);
+      // Previously silent — an operator had nothing in the app's own logs pointing at which
+      // destination died or why, only ffmpeg's raw stderr to reverse-engineer it from.
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('dest-1: persistent encoder exited unexpectedly (code=1)'));
+      errorSpy.mockRestore();
     });
   });
 
