@@ -60,6 +60,21 @@ describe('MediaMtxAuthRegistry', () => {
     expect(registry.authorize({ action: 'publish', path: `live/${TOKEN}`, user: 'pub', password: 'publish-secretX' })).toBe(false);
   });
 
+  // Every case above is decided by a LENGTH mismatch before timingSafeEqual's content comparison
+  // ever runs. A same-length, wrong-content secret is the one case that actually exercises the
+  // content check — and the realistic shape (48 lowercase-hex chars) matches what
+  // LocalRelayTarget's randomBytes(24).toString('hex') actually mints, since a real wrong guess in
+  // production is always the same length as the real value.
+  it('refuses a same-length, wrong-content password against a realistic 48-char hex secret', () => {
+    const registry = new MediaMtxAuthRegistry();
+    const realSecret = '0123456789abcdef'.repeat(3);
+    const wrongSameLength = `${realSecret.slice(0, -1)}${realSecret.endsWith('f') ? 'e' : 'f'}`;
+    expect(wrongSameLength.length).toBe(realSecret.length);
+    expect(wrongSameLength).not.toBe(realSecret);
+    registry.register(session({ publishSecret: realSecret }));
+    expect(registry.authorize({ action: 'publish', path: `live/${TOKEN}`, user: 'pub', password: wrongSameLength })).toBe(false);
+  });
+
   it('refuses an unregistered path — including one that differs only in its token', () => {
     const registry = registryWithSession();
     expect(registry.authorize({ action: 'read', path: `live/${'e'.repeat(32)}`, user: 'sub', password: 'read-secret' })).toBe(false);
@@ -72,6 +87,19 @@ describe('MediaMtxAuthRegistry', () => {
     registry.unregister(`live/${TOKEN}`);
     expect(registry.authorize({ action: 'read', path: `live/${TOKEN}`, user: 'sub', password: 'read-secret' })).toBe(false);
     expect(registry.authorize({ action: 'publish', path: `live/${TOKEN}`, user: 'pub', password: 'publish-secret' })).toBe(false);
+  });
+
+  // Guards against an unregister() implemented by clearing the whole map instead of deleting one
+  // key — which would silently revoke every OTHER tenant's live stream the moment any one of them
+  // stops streaming.
+  it('unregistering one session does not revoke any other session', () => {
+    const registry = new MediaMtxAuthRegistry();
+    const other = 'a'.repeat(32);
+    registry.register(session());
+    registry.register(session({ userId: 'user-2', pathToken: other, path: `live/${other}`, readSecret: 'other-read' }));
+    registry.unregister(`live/${TOKEN}`);
+    expect(registry.authorize({ action: 'read', path: `live/${TOKEN}`, user: 'sub', password: 'read-secret' })).toBe(false);
+    expect(registry.authorize({ action: 'read', path: `live/${other}`, user: 'sub', password: 'other-read' })).toBe(true);
   });
 
   it('refuses every action other than publish and read', () => {
@@ -96,6 +124,8 @@ describe('MediaMtxAuthRegistry', () => {
     expect(registry.authorize({ action: 'read', path: `live/${other}`, user: 'sub', password: 'other-read' })).toBe(true);
     // user-1's credential must not open user-2's path.
     expect(registry.authorize({ action: 'read', path: `live/${other}`, user: 'sub', password: 'read-secret' })).toBe(false);
+    // ...and the reverse: user-2's credential must not open user-1's path either.
+    expect(registry.authorize({ action: 'read', path: `live/${TOKEN}`, user: 'sub', password: 'other-read' })).toBe(false);
   });
 });
 
@@ -121,6 +151,21 @@ describe('createMediaMtxAuthApp', () => {
     const registry = { authorize: jest.fn().mockReturnValue(true) };
     const app = createMediaMtxAuthApp(registry, SECRET);
     const res = await request(app).post('/internal/mediamtx-auth/guessed')
+      .send({ action: 'publish', path: `live/${TOKEN}`, user: 'pub', password: 'publish-secret' });
+    expect(res.status).toBe(401);
+    expect(registry.authorize).not.toHaveBeenCalled();
+  });
+
+  // 'guessed' above differs from SECRET in length, which timingSafeEqual's own length check would
+  // reject before ever comparing content. A same-length wrong guess is the one case that actually
+  // exercises the content comparison for the URL-borne shared secret too.
+  it('answers 401 for a same-length wrong shared secret without ever consulting the registry', async () => {
+    const registry = { authorize: jest.fn().mockReturnValue(true) };
+    const wrongSameLength = `${SECRET.slice(0, -1)}${SECRET.endsWith('e') ? 'f' : 'e'}`;
+    expect(wrongSameLength.length).toBe(SECRET.length);
+    expect(wrongSameLength).not.toBe(SECRET);
+    const app = createMediaMtxAuthApp(registry, SECRET);
+    const res = await request(app).post(`/internal/mediamtx-auth/${wrongSameLength}`)
       .send({ action: 'publish', path: `live/${TOKEN}`, user: 'pub', password: 'publish-secret' });
     expect(res.status).toBe(401);
     expect(registry.authorize).not.toHaveBeenCalled();
