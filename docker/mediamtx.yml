@@ -60,8 +60,8 @@ authHTTPExclude: []
 # --- Paths -------------------------------------------------------------------------------------
 pathDefaults:
   source: publisher
-  sourceOnDemand: no
-  record: no
+  sourceOnDemand: false
+  record: false
 
 paths:
   # One local stream per user; the token is 128 random bits minted per START (not per user), so a
