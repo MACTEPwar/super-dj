@@ -17,11 +17,31 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
       APP_BASE_URL: ${APP_BASE_URL}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      MEDIAMTX_RTMP_URL: rtmp://mediamtx:1935
+      MEDIAMTX_HLS_URL: http://mediamtx:8888
+      MEDIAMTX_AUTH_SECRET: ${MEDIAMTX_AUTH_SECRET}
+      MEDIAMTX_AUTH_PORT: "3001"
     volumes:
       - uploads-data:/data/uploads
     depends_on:
       postgres:
         condition: service_healthy
+      mediamtx:
+        condition: service_started
+    restart: unless-stopped
+  # SECURITY: no `ports:` entry, ever — see docker/mediamtx.yml's header and
+  # test/infra/mediamtxConfig.test.ts. Reachable only as `mediamtx` on the compose network.
+  # Pinned to an exact version: a moving tag could change auth or HLS behaviour under us, and this
+  # one container is a shared single point of failure for every tenant's local stream.
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.0
+    environment:
+      # Carries the shared secret as a path segment: MediaMTX sets no custom headers on its auth
+      # POST (verified in internal/auth/manager.go), so a header-borne secret is not possible.
+      MTX_AUTHHTTPADDRESS: http://super-dj:3001/internal/mediamtx-auth/${MEDIAMTX_AUTH_SECRET}
+    volumes:
+      - ./docker/mediamtx.yml:/mediamtx.yml:ro
+    mem_limit: 512m
     restart: unless-stopped
   postgres:
     image: postgres:16-alpine

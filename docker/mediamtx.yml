@@ -1,0 +1,70 @@
+# MediaMTX configuration for super-dj's local-first streaming pipeline.
+#
+# SECURITY — this file plus docker-compose.yml's `mediamtx` service ARE the multi-tenancy boundary.
+# See docs/superpowers/specs/2026-09-14-local-first-streaming-design.md, "Security model".
+#   Layer 0: the service publishes NO ports (docker-compose.yml) and every control/extra surface is
+#            off below. Never add a `ports:` entry "just to check if it's reachable" —
+#            test/infra/mediamtxConfig.test.ts fails if you do.
+#   Layer 1: exactly one regex path, minted fresh per local-stream start, and no all_others.
+#   Layer 2: authMethod http — the backend decides every publish/read from an in-memory map, so a
+#            stopped session is revoked instantly with no config reload.
+logLevel: info
+logDestinations: [stdout]
+
+# --- Layer 0 -----------------------------------------------------------------------------------
+# NOTE: `false`/`true`, not `no`/`yes` — js-yaml (this repo's config-invariant test, and MediaMTX's
+# own Go YAML decoder) only resolves booleans from true/false forms; `no`/`yes` parse as the plain
+# strings 'no'/'yes', which MediaMTX's typed config would reject at startup as a type mismatch.
+api: false
+metrics: false
+pprof: false
+playback: false
+rtsp: false
+webrtc: false
+srt: false
+rtmp: true
+hls: true
+
+rtmpAddress: :1935
+rtmpEncryption: "no"
+
+# --- HLS ---------------------------------------------------------------------------------------
+# mpegts (not the lowLatency default): plain HLS, widest client support, no _HLS_msn/_HLS_part
+# blocking-request query parameters for the backend proxy to forward. Real glass-to-glass latency
+# is governed by keyframe interval, not hlsSegmentDuration: buildPersistentEncoderArgs emits
+# `-g fps*2` (an IDR every 2s — see persistentEncoderArgs.ts), and HLS can only cut a segment on a
+# keyframe, so segments come out ~2s regardless of the 1s value below. ~4-6s glass-to-glass is
+# 2-3 segments of buffering at that real ~2s size. Changing hlsSegmentDuration alone will not move
+# this number — the encoder's `-g` is the actual latency knob.
+# hlsAlwaysRemux: false -> the muxer only exists while someone is actually previewing.
+# hlsAllowOrigin: '' -> nothing talks to this server from a browser; only the backend proxy does,
+# server-to-server, so no cross-origin access is ever needed here (MediaMTX's parameter is
+# singular and a string, not the list shape `hlsAllowOrigins: []` might suggest).
+hlsAddress: :8888
+hlsVariant: mpegts
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsAlwaysRemux: false
+hlsAllowOrigin: ''
+hlsMuxerCloseAfter: 60s
+
+# --- Layer 2 -----------------------------------------------------------------------------------
+# authHTTPAddress is deliberately EMPTY here: it carries a shared secret as a path segment and is
+# supplied at runtime via the MTX_AUTHHTTPADDRESS environment variable (docker-compose.yml), so the
+# secret never lands in a committed file. MediaMTX refuses to start with authMethod: http and no
+# address — which is the correct fail-closed behaviour if the variable is ever missing.
+authMethod: http
+authHTTPAddress:
+authHTTPExclude: []
+
+# --- Paths -------------------------------------------------------------------------------------
+pathDefaults:
+  source: publisher
+  sourceOnDemand: no
+  record: no
+
+paths:
+  # One local stream per user; the token is 128 random bits minted per START (not per user), so a
+  # leaked path from an earlier session is worthless once that session ends. No all_others entry:
+  # anything that is not this shape is rejected outright.
+  "~^live/[0-9a-f]{32}$": {}
