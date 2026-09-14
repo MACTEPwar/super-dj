@@ -14,8 +14,11 @@ function buildApp(localStreamManager: LocalStreamManager, userId = 'user-1') {
 }
 
 const IDLE: LocalStreamStatus = {
-  state: 'idle', currentTrack: null, nextTrack: null,
-  previewReady: false, playlistId: null, templateId: null, startedAt: null,
+  local: {
+    state: 'idle', currentTrack: null, nextTrack: null,
+    previewReady: false, playlistId: null, templateId: null, startedAt: null,
+  },
+  destinations: [],
 };
 
 describe('GET /local-stream/events (SSE)', () => {
@@ -39,8 +42,11 @@ describe('GET /local-stream/events (SSE)', () => {
   it('pushes a frame for this user\'s own events only', async () => {
     const manager = new LocalStreamManager({} as never);
     const live: LocalStreamStatus = {
-      state: 'streaming', currentTrack: 'a', nextTrack: 'b',
-      previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
+      local: {
+        state: 'streaming', currentTrack: 'a', nextTrack: 'b',
+        previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
+      },
+      destinations: [{ destinationId: 'dest-1', name: 'Twitch', desired: 'on', state: 'live' }],
     };
     const statuses = [IDLE, live];
     jest.spyOn(manager, 'status').mockImplementation(() => statuses.shift() ?? live);

@@ -7,13 +7,15 @@ import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
 
 /**
- * The whole local-stream API surface. Every route is scoped to the authenticated user and takes no
- * id of any kind: there is exactly one local stream per account (see LocalStreamManager), so there
- * is nothing to address and therefore no ownership check to get wrong.
+ * The whole local-stream API surface. Every route is scoped to the authenticated user; there is
+ * exactly one local stream per account (see LocalStreamManager), so most routes take no id of any
+ * kind and have nothing to address, hence no ownership check to get wrong. The one exception is the
+ * destination toggle below, which necessarily carries a destinationId and is ownership-checked by
+ * LocalStreamManager itself (404/403 straight through).
  *
- * Deliberately absent: title/description/privacyStatus/latencyPreference. Those configure a
- * provider's live broadcast, and Phase A has no destinations at all — accepting them here would
- * tell a caller it had configured something that does not exist.
+ * title/description/privacyStatus/latencyPreference configure a broadcast for any destination
+ * provider that creates one (YouTube); custom RTMP destinations ignore them. Phase A omitted these
+ * fields because it had no destinations at all — Phase B (this file, from here on) reinstates them.
  */
 // The session cookie is `SameSite=None; Secure` in production (sessionCookie.ts), so it rides on
 // cross-site requests. A route with no id and no ownership check to get wrong (see doc comment
@@ -42,23 +44,47 @@ export function createLocalStreamRouter(
   const auth = requireAuth(authService);
   const userId = (req: AuthenticatedRequest) => req.user!.id;
 
+  // Every field except playlistId is optional. destinationIds pre-checks destinations — exactly the
+  // same intents a later PUT /destinations/:id would set, so there is one orchestration path rather
+  // than two. title/description/privacyStatus/latencyPreference configure any broadcast a
+  // destination provider creates (YouTube); they are accepted again here because, unlike Phase A,
+  // this API now has destinations. Custom RTMP destinations ignore them.
   router.post('/start', auth, requireJsonRequest, wrapAsync(async (req, res) => {
-    const { playlistId, templateId } = req.body ?? {};
+    const { playlistId, templateId, destinationIds, title, description, privacyStatus, latencyPreference } = req.body ?? {};
     if (typeof playlistId !== 'string' || playlistId.length === 0) throw new ApiError(400, 'body.playlistId is required');
     if (templateId !== undefined && (typeof templateId !== 'string' || templateId.length === 0)) {
       throw new ApiError(400, 'body.templateId must be a non-empty string');
     }
+    if (destinationIds !== undefined) {
+      if (!Array.isArray(destinationIds) || destinationIds.some((id: unknown) => typeof id !== 'string' || id.length === 0)) {
+        throw new ApiError(400, 'body.destinationIds must be an array of non-empty strings');
+      }
+      if (new Set(destinationIds).size !== destinationIds.length) {
+        throw new ApiError(400, 'body.destinationIds must not contain duplicates');
+      }
+    }
+    if (title !== undefined && typeof title !== 'string') throw new ApiError(400, 'body.title must be a string');
+    if (description !== undefined && typeof description !== 'string') throw new ApiError(400, 'body.description must be a string');
+    if (privacyStatus !== undefined && !['public', 'unlisted', 'private'].includes(privacyStatus)) {
+      throw new ApiError(400, "body.privacyStatus must be 'public', 'unlisted', or 'private'");
+    }
+    if (latencyPreference !== undefined && !['normal', 'low', 'ultraLow'].includes(latencyPreference)) {
+      throw new ApiError(400, "body.latencyPreference must be 'normal', 'low', or 'ultraLow'");
+    }
     const id = userId(req as AuthenticatedRequest);
-    await localStreamManager.start(id, playlistId, { templateId });
+    await localStreamManager.start(id, playlistId, {
+      templateId,
+      destinationIds,
+      meta: { title, description, privacyStatus, latencyPreference },
+    });
     res.status(200).json(localStreamManager.status(id));
   }));
 
+  // Awaited: stop() now also shuts every destination forward down and waits for each provider-side
+  // finalize (a YouTube transition-to-complete takes seconds), so the response is truthful about
+  // what actually stopped.
   router.post('/stop', auth, requireJsonRequest, wrapAsync(async (req, res) => {
     const id = userId(req as AuthenticatedRequest);
-    // Awaited because stop() is async as of Phase B: it also shuts every destination forward down
-    // and waits for each provider-side finalize. Unawaited, its 409 for an inactive stream would
-    // escape wrapAsync as an unhandled rejection (fatal under Node 20's default) instead of a
-    // response. Task 7 rewrites this handler; the await must not wait for it.
     await localStreamManager.stop(id);
     res.status(200).json(localStreamManager.status(id));
   }));
@@ -93,6 +119,18 @@ export function createLocalStreamRouter(
     const id = userId(req as AuthenticatedRequest);
     localStreamManager.playByName(id, name);
     res.status(200).json(localStreamManager.status(id));
+  }));
+
+  // The checkbox. PUT rather than POST because it sets a value idempotently rather than issuing a
+  // command, and it carries the destination id in the URL — but it still goes through
+  // requireJsonRequest, because a PUT with a JSON content-type is what forces the browser preflight
+  // this app's CORS policy then has to approve.
+  router.put('/destinations/:destinationId', auth, requireJsonRequest, wrapAsync(async (req, res) => {
+    const { desired } = req.body ?? {};
+    if (desired !== 'on' && desired !== 'off') throw new ApiError(400, "body.desired must be 'on' or 'off'");
+    const id = userId(req as AuthenticatedRequest);
+    const status = await localStreamManager.setDestinationDesired(id, req.params.destinationId, desired);
+    res.status(200).json(status);
   }));
 
   router.get('/status', auth, wrapAsync(async (req, res) => {

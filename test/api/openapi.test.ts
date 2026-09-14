@@ -48,6 +48,7 @@ describe('API docs', () => {
     // false failure this repo's other assertions here (`'/tracks'`, `'/auth/register'`) never hit
     // only because those keys happen to contain no dots.
     expect(res.body.paths).toHaveProperty(['/local-stream/preview/index.m3u8']);
+    expect(res.body.paths).toHaveProperty(['/local-stream/destinations/{destinationId}']);
   });
 
   it('serves Swagger UI at /docs', async () => {

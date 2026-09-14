@@ -491,6 +491,11 @@ export const openApiSpec = {
                 properties: {
                   playlistId: { type: 'string' },
                   templateId: { type: 'string', description: 'Optional overlay template id (see /templates). Omitted -> the built-in default layout.' },
+                  destinationIds: { type: 'array', items: { type: 'string' }, description: 'Optional destinations to switch on as soon as the stream is publishing. May be omitted or empty — a local stream with nothing forwarded is a fully valid running state. No duplicates.' },
+                  title: { type: 'string', description: 'Optional broadcast title for any destination that creates a live broadcast (e.g. YouTube); defaults to the playlist name' },
+                  description: { type: 'string', description: 'Optional broadcast description (destinations that create a live broadcast)' },
+                  privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Optional broadcast privacy; defaults to private' },
+                  latencyPreference: { type: 'string', enum: ['normal', 'low', 'ultraLow'], description: "Optional YouTube broadcast latency; defaults to 'normal'" },
                 },
               },
             },
@@ -498,10 +503,10 @@ export const openApiSpec = {
         },
         responses: {
           '200': { description: 'Started', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } },
-          '400': { description: 'Missing playlistId, or an empty-string templateId' },
+          '400': { description: 'Missing playlistId, an empty-string templateId, or invalid destinationIds/broadcast fields' },
           '401': { description: 'Not authenticated' },
-          '403': { description: 'Not your playlist or not your template' },
-          '404': { description: 'Playlist not found, or templateId given but not found' },
+          '403': { description: 'Not your playlist, template or destination' },
+          '404': { description: 'Playlist, template or destination not found' },
           '409': { description: 'A local stream is already active (or starting) for this account, or the playlist is empty' },
           '429': { description: 'Too many local streams are running on this host' },
         },
@@ -527,6 +532,24 @@ export const openApiSpec = {
         summary: 'Queue one of this user\'s tracks to play next',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } },
         responses: { '200': { description: 'Queued', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '400': { description: 'Missing name' }, '401': { description: 'Not authenticated' }, '404': { description: 'Track not found in this user\'s library' }, '409': { description: 'No local stream is active' } },
+      },
+    },
+    '/local-stream/destinations/{destinationId}': {
+      put: {
+        summary: 'Switch one destination\'s forward on or off for this account\'s local stream',
+        description: 'Idempotent. Valid in every state, including with no local stream running — the forward then sits at `pending` with no external side effects until the next start. Never interrupts the local stream or any other destination.',
+        parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['desired'], properties: { desired: { type: 'string', enum: ['on', 'off'] } } } } },
+        },
+        responses: {
+          '200': { description: 'Intent recorded', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } },
+          '400': { description: 'body.desired must be on or off, or the request was not application/json' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your destination' },
+          '404': { description: 'Destination not found' },
+        },
       },
     },
     '/local-stream/status': {
@@ -754,14 +777,52 @@ export const openApiSpec = {
     schemas: {
       LocalStreamStatus: {
         type: 'object',
+        description: 'One local stream plus its 0..N independently toggleable destination forwards. An empty `destinations` array is a normal running state, not an error.',
         properties: {
-          state: { type: 'string', enum: ['idle', 'streaming', 'paused', 'error', 'reconnecting'] },
-          currentTrack: { type: 'string', nullable: true },
-          nextTrack: { type: 'string', nullable: true },
-          previewReady: { type: 'boolean', description: 'True while the encoder is publishing — including while paused, since pausing only swaps the audio' },
-          playlistId: { type: 'string', nullable: true },
-          templateId: { type: 'string', nullable: true },
-          startedAt: { type: 'string', format: 'date-time', nullable: true },
+          local: {
+            type: 'object',
+            properties: {
+              state: { type: 'string', enum: ['idle', 'starting', 'streaming', 'paused', 'error', 'reconnecting'] },
+              currentTrack: { type: 'string', nullable: true },
+              nextTrack: { type: 'string', nullable: true },
+              previewReady: { type: 'boolean', description: 'True while the encoder is publishing — including while paused, since pausing only swaps the audio' },
+              playlistId: { type: 'string', nullable: true },
+              templateId: { type: 'string', nullable: true },
+              startedAt: { type: 'string', format: 'date-time', nullable: true },
+            },
+          },
+          destinations: { type: 'array', items: { $ref: '#/components/schemas/DestinationForwardStatus' } },
+        },
+      },
+      DestinationForwardStatus: {
+        type: 'object',
+        properties: {
+          destinationId: { type: 'string' },
+          name: { type: 'string' },
+          desired: { type: 'string', enum: ['on', 'off'], description: 'What the user asked for' },
+          state: {
+            type: 'string',
+            enum: ['off', 'pending', 'preparing', 'connecting', 'live', 'stopping', 'error'],
+            description: '`pending` = wanted, but nothing is publishing locally yet (no external side effects have happened). `connecting` = a relay is running but the destination has not confirmed it; for YouTube this legitimately takes 10-40s.',
+          },
+          provider: {
+            type: 'object',
+            nullable: true,
+            description: 'Present only for a destination with a broadcast lifecycle (YouTube).',
+            properties: {
+              type: { type: 'string' },
+              phase: { type: 'string' },
+              watchUrl: { type: 'string', nullable: true, description: "The channel's stable /live link for a public broadcast (survives every toggle); a per-broadcast link, fresh on every toggle, for an unlisted/private one or when no channel id is known" },
+            },
+          },
+          error: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              reason: { type: 'string', enum: ['auth', 'provider', 'relay', 'source'] },
+              message: { type: 'string' },
+            },
+          },
         },
       },
       User: {

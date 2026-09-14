@@ -5,8 +5,11 @@ import { errorHandler } from '../../src/api/errorHandler';
 import { ApiError } from '../../src/errors';
 
 const STATUS = {
-  state: 'streaming', currentTrack: 'a', nextTrack: 'b',
-  previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
+  local: {
+    state: 'streaming', currentTrack: 'a', nextTrack: 'b',
+    previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
+  },
+  destinations: [],
 };
 
 function buildApp(localStreamManager: any, userId = 'user-1') {
@@ -31,7 +34,11 @@ describe('local stream control routes', () => {
     const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
     const res = await request(buildApp(manager, 'user-9')).post('/local-stream/start').send({ playlistId: 'p1' });
     expect(res.status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-9', 'p1', { templateId: undefined });
+    expect(manager.start).toHaveBeenCalledWith('user-9', 'p1', {
+      templateId: undefined,
+      destinationIds: undefined,
+      meta: { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined },
+    });
     expect(res.body).toEqual(STATUS);
   });
 
@@ -40,18 +47,11 @@ describe('local stream control routes', () => {
     const app = buildApp(manager);
     expect((await request(app).post('/local-stream/start').send({ playlistId: 'p1', templateId: '' })).status).toBe(400);
     expect((await request(app).post('/local-stream/start').send({ playlistId: 'p1', templateId: 'tpl-1' })).status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', { templateId: 'tpl-1' });
-  });
-
-  // Phase A has no destination, so there is no broadcast to title or set privacy on. These fields
-  // are silently ignored rather than accepted, so a client copied from the old API cannot believe
-  // it configured something that does not exist here.
-  it('POST /start ignores destination-only broadcast fields entirely', async () => {
-    const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
-    const res = await request(buildApp(manager)).post('/local-stream/start')
-      .send({ playlistId: 'p1', title: 'x', privacyStatus: 'nonsense', latencyPreference: 'nonsense' });
-    expect(res.status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', { templateId: undefined });
+    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', {
+      templateId: 'tpl-1',
+      destinationIds: undefined,
+      meta: { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined },
+    });
   });
 
   it.each([
@@ -126,5 +126,85 @@ describe('local stream control routes', () => {
       expect((await request(app).get(path)).status).toBe(401);
     }
     expect((await request(app).post('/local-stream/stop')).status).toBe(401);
+  });
+});
+
+describe('local stream destination toggles', () => {
+  it('PUT /destinations/:id turns a forward on for the authenticated user', async () => {
+    const manager: any = { setDestinationDesired: jest.fn().mockResolvedValue(STATUS) };
+    const res = await request(buildApp(manager, 'user-7'))
+      .put('/local-stream/destinations/dest-1').send({ desired: 'on' });
+    expect(res.status).toBe(200);
+    expect(manager.setDestinationDesired).toHaveBeenCalledWith('user-7', 'dest-1', 'on');
+    expect(res.body).toEqual(STATUS);
+  });
+
+  it('PUT /destinations/:id rejects a body that is not on/off', async () => {
+    const manager: any = { setDestinationDesired: jest.fn() };
+    const app = buildApp(manager);
+    for (const desired of [undefined, '', 'yes', true, 1]) {
+      const res = await request(app).put('/local-stream/destinations/dest-1').send({ desired });
+      expect(res.status).toBe(400);
+    }
+    expect(manager.setDestinationDesired).not.toHaveBeenCalled();
+  });
+
+  // Same reasoning as the POST routes: these no-id-in-the-URL routes have no accidental CSRF token,
+  // so requiring JSON is what forces a preflight the CORS policy has to approve.
+  it('PUT /destinations/:id rejects a request that is not application/json', async () => {
+    const manager: any = { setDestinationDesired: jest.fn() };
+    const res = await request(buildApp(manager))
+      .put('/local-stream/destinations/dest-1')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send('desired=on');
+    expect(res.status).toBe(400);
+    expect(manager.setDestinationDesired).not.toHaveBeenCalled();
+  });
+
+  it('passes a 404/403 from the manager straight through', async () => {
+    const manager: any = { setDestinationDesired: jest.fn().mockRejectedValue(new ApiError(403, 'not your destination')) };
+    const res = await request(buildApp(manager)).put('/local-stream/destinations/dest-1').send({ desired: 'on' });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('POST /local-stream/start options', () => {
+  it('passes pre-checked destinations and broadcast metadata through', async () => {
+    const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
+    const res = await request(buildApp(manager, 'user-2')).post('/local-stream/start').send({
+      playlistId: 'p1', templateId: 'tpl-1', destinationIds: ['d1', 'd2'],
+      title: 'Late night', description: 'chill', privacyStatus: 'unlisted', latencyPreference: 'low',
+    });
+    expect(res.status).toBe(200);
+    expect(manager.start).toHaveBeenCalledWith('user-2', 'p1', {
+      templateId: 'tpl-1',
+      destinationIds: ['d1', 'd2'],
+      meta: { title: 'Late night', description: 'chill', privacyStatus: 'unlisted', latencyPreference: 'low' },
+    });
+  });
+
+  it('starts with no destinations at all — a fully valid running state', async () => {
+    const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
+    const res = await request(buildApp(manager)).post('/local-stream/start').send({ playlistId: 'p1' });
+    expect(res.status).toBe(200);
+    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', {
+      templateId: undefined, destinationIds: undefined,
+      meta: { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined },
+    });
+  });
+
+  it.each([
+    [{ destinationIds: 'd1' }],
+    [{ destinationIds: [1] }],
+    [{ destinationIds: ['d1', 'd1'] }],
+    [{ title: 5 }],
+    [{ description: {} }],
+    [{ privacyStatus: 'semi-public' }],
+    [{ latencyPreference: 'instant' }],
+  ])('rejects invalid start option %j', async (bad) => {
+    const manager: any = { start: jest.fn() };
+    const res = await request(buildApp(manager)).post('/local-stream/start').send({ playlistId: 'p1', ...bad });
+    expect(res.status).toBe(400);
+    expect(manager.start).not.toHaveBeenCalled();
   });
 });
