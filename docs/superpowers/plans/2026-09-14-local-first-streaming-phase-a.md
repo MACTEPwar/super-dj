@@ -362,10 +362,13 @@ authHTTPAddress:
 authHTTPExclude: []
 
 # --- Paths -------------------------------------------------------------------------------------
+# sourceOnDemand/record: `false`/`false`, not `no`/`no` — same js-yaml/MediaMTX boolean pitfall as
+# the Layer 0 block above (this exact key pair was missed in an earlier pass and is exactly the
+# kind of inconsistency that pitfall predicts: fixed at the top of this file, missed further down).
 pathDefaults:
   source: publisher
-  sourceOnDemand: no
-  record: no
+  sourceOnDemand: false
+  record: false
 
 paths:
   # One local stream per user; the token is 128 random bits minted per START (not per user), so a
@@ -2491,13 +2494,16 @@ export class LocalStreamManager extends EventEmitter {
 
   // The ONLY way the preview route learns which MediaMTX path to read: resolved server-side from
   // the authenticated user. Never accept a path or token from the client — see the spec's security
-  // section. Returns null unless the stream is actually publishing, so a dead session's credential
-  // is never handed out.
+  // section. Returns null only once the session is genuinely gone ('idle'/'error'), so a dead
+  // session's credential is never handed out — but 'reconnecting' still returns the target: the
+  // MediaMTX credentials are still registered during a pending respawn (see the encoder's onError
+  // handler above — revocation only happens once reconnect gives up), so there is a real, valid
+  // target for the browser's HLS player to keep polling while the encoder respawns, not nothing.
   previewTarget(userId: string): LocalPreviewTarget | null {
     const entry = this.streams.get(userId);
     if (!entry) return null;
     const state = entry.controller.status().state;
-    if (state !== 'streaming' && state !== 'paused') return null;
+    if (state !== 'streaming' && state !== 'paused' && state !== 'reconnecting') return null;
     return { hlsBaseUrl: entry.relay.hlsBaseUrl, authorization: entry.relay.readAuthorization };
   }
 
@@ -2682,6 +2688,20 @@ describe('GET /local-stream/preview', () => {
     expect(res.text).toBe('');
   });
 
+  // A real HTTP client typically supplies a body even for an error response (e.g. a 404's error
+  // page) — and this is the EXPECTED, frequent branch (MediaMTX's on-demand muxer 404ing right
+  // after a fresh publish, polled every second or two). An undestroyed body here would leak a
+  // socket to MediaMTX on every such poll over a long session.
+  it('destroys the upstream body on a non-2xx response that still has one, instead of leaking it', async () => {
+    const body = new Readable({ read() {} });
+    const destroy = jest.spyOn(body, 'destroy');
+    const previewFetch = jest.fn().mockResolvedValue({ status: 404, contentType: null, body });
+    const { app } = buildApp({ previewFetch });
+    const res = await request(app).get('/local-stream/preview/index.m3u8');
+    expect(res.status).toBe(404);
+    expect(destroy).toHaveBeenCalled();
+  });
+
   it('never echoes the upstream URL or the read credential to the client', async () => {
     const previewFetch = jest.fn().mockRejectedValue(new Error(`connect ECONNREFUSED http://mediamtx:8888/live/${TOKEN}`));
     const { app } = buildApp({ previewFetch });
@@ -2699,14 +2719,28 @@ describe('GET /local-stream/preview', () => {
     const body = new Readable({ read() {} });
     const previewFetch = jest.fn().mockResolvedValue({ status: 200, contentType: 'video/mp2t', body });
     const { app } = buildApp({ previewFetch });
+    // supertest's request(app).get(...) is a lazy thenable (superagent Request) — nothing is sent
+    // over the socket until something calls .then()/.catch()/.end() on it. Manipulating `body`
+    // synchronously, before that dispatch, would fire body's 'error' event with ZERO listeners
+    // attached (pipeline() — which attaches one — hasn't run yet, since the route hasn't been
+    // invoked yet), which is a synchronous throw inside THIS TEST rather than anything exercising
+    // the route at all. Explicitly kick off dispatch first (the `.catch(() => {})` is what
+    // superagent's lazy `.then()` needs to actually call `.end()`), then wait for the real loopback
+    // round trip to reach the route and let pipeline() wire up `body` before touching it.
     const reqPromise = request(app).get('/local-stream/preview/segment0.ts');
+    reqPromise.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 100));
     body.push('partial-segment-bytes');
     body.emit('error', new Error('ECONNRESET'));
     body.push(null);
-    // The assertion IS that awaiting this doesn't throw / the test process doesn't crash — a
-    // regression here reintroduces the uncaught-exception hazard server.ts already documents for
-    // its own ffmpeg stderr forwarding.
-    await reqPromise;
+    // Once pipeline() correctly destroys the now-broken response (there's no valid way to finish
+    // an aborted mid-stream response gracefully), the client legitimately sees its own connection
+    // reset — superagent rejects with "socket hang up". That's expected (a real HLS player losing
+    // one segment fetch and retrying), not a process crash, so tolerate it here. The actual
+    // assertion is implicit but load-bearing: if the 'error' event above had no listener, THIS
+    // process would crash and no later test in this file (or this Jest worker) could run at all —
+    // reaching the end of this test file is the proof.
+    await reqPromise.catch(() => {});
   });
 });
 ```
@@ -2722,7 +2756,7 @@ Create `src/stream/localStreamPreviewRoutes.ts`:
 
 ```typescript
 import { Request, Response, Router } from 'express';
-import { pipeline } from 'stream';
+import { pipeline, Readable } from 'stream';
 import { ApiError } from '../errors';
 import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
@@ -2802,6 +2836,13 @@ export function createLocalStreamPreviewRouter(
     // produced a playlist yet" — pass the status through and let the player retry rather than
     // inventing a different one.
     if (upstream.status < 200 || upstream.status > 299 || !upstream.body) {
+      // A real HTTP client typically supplies a body even for an error status (e.g. a 404's error
+      // page) — and this branch is the EXPECTED, frequent one (MediaMTX's on-demand HLS muxer
+      // 404ing right after a fresh publish, presumably polled every second or two by the player).
+      // Leaving that body undrained/undestroyed on every such poll risks leaking sockets/
+      // connections to MediaMTX over a long session. Destroy it before responding; harmless no-op
+      // when body is already null.
+      (upstream.body as Readable | null)?.destroy?.();
       res.status(upstream.status).end();
       return;
     }
@@ -2820,7 +2861,10 @@ export function createLocalStreamPreviewRouter(
     // listener for us. Also destroy the upstream body on client disconnect (closing the preview
     // tab) so we don't leak a socket to MediaMTX and keep an on-demand muxer alive forever.
     const body = upstream.body;
-    res.on('close', () => { if (!res.writableEnded) body.destroy(); });
+    // Cast needed: PreviewFetchResponse.body is typed NodeJS.ReadableStream (that interface only
+    // extends EventEmitter, no destroy() in this repo's @types/node) — same runtime object either
+    // way, since the real implementation always hands back a real Node Readable.
+    res.on('close', () => { if (!res.writableEnded) (body as Readable).destroy(); });
     pipeline(body, res, (err) => {
       if (err) console.error('[local-stream] preview pipe failed', err);
     });
@@ -4859,6 +4903,269 @@ verified against a real binary, the new /local-stream API, the new env vars, and
 the follow-ups this phase knowingly leaves open.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 13: Fix the HLS read leg — forward the child-request query string
+
+> Added after the rest of this plan was implemented, reviewed, and merged: Task 12's real-binary
+> smoke test (run against a real MediaMTX 1.21.0, not a stub) found that assumption 3 — "on-demand
+> HLS muxing yields a playable multivariant playlist" — only half held. The multivariant playlist
+> *is* playable and *does* use relative child references, exactly as Tasks 6/8 assumed. But every
+> child reference carries a **required** `?session=<uuid>` query string
+> (`main_stream.m3u8?session=3c8ce9c0-...`), and `localStreamPreviewRoutes.ts` builds its upstream
+> URL from `req.params.file` alone — Express's route param never includes the query — so every
+> media-playlist/segment request after the very first `index.m3u8` reaches MediaMTX with no session
+> id and 401s. Confirmed against the real backend's own `createPreviewFetch()` logic, inside the
+> project's own Docker image: identical requests succeed with the query and fail without it. The
+> `Authorization` header the proxy so carefully forwards only authenticates the entry point (which
+> *mints* the session) — it is irrelevant for every request after that. **Symptom in production:
+> the preview's playlist loads, then every subsequent request 401s, hls.js raises a fatal network
+> error, `HlsPlayer` retries forever, and the preview never actually plays.** This is why the
+> "Real-binary verification" step exists — no unit test could have caught this, since every existing
+> preview test fakes `PreviewFetch` and none of them can see a query string Express never gave the
+> route in the first place.
+>
+> Same smoke test also found two smaller, non-blocking gaps worth closing in the same pass since
+> they touch the same two files: (a) `createPreviewFetch()` silently depends on Node's global
+> `fetch` following MediaMTX's pre-auth `cookieCheck` 302 redirect by default and re-sending
+> `Authorization` on the same-origin hop — undocumented, untested, and one client swap away from
+> breaking; make it an explicit `redirect: 'follow'` rather than an implicit default. (b) MediaMTX
+> 1.21.0 starts a MoQ listener (`:8892`/`:8893`) by default that `docker/mediamtx.yml`'s Layer-0
+> surface list never mentions — not currently exploitable (no ports are published either way), but
+> Layer 0 is explicitly a denylist, and a version bump already outran it once; add `moq: false` so
+> the list stays complete. Also fixes the config comment that (incorrectly, as of 1.21.0) asserts
+> `hlsAllowOrigin` is the "real" singular form — MediaMTX 1.21.0 logs a deprecation warning for it
+> in favour of `hlsAllowOrigins` (a list); switch to the plural form with an empty list (same "no
+> browser talks to this directly" intent).
+
+**Files:**
+- Modify: `src/stream/localStreamPreviewRoutes.ts` (forward the query string to the upstream URL)
+- Modify: `src/server.ts` (`createPreviewFetch`: explicit `redirect: 'follow'`)
+- Modify: `docker/mediamtx.yml` (`moq: false`; `hlsAllowOrigin` → `hlsAllowOrigins: []`)
+- Modify: `test/stream/localStreamPreviewRoutes.test.ts` (query-forwarding coverage)
+- Modify: `test/infra/mediamtxConfig.test.ts` (`moq`/`hlsAllowOrigins` invariants)
+- Test: same two files above (no new test files — extending existing ones)
+
+**Interfaces:**
+- Consumes: `PreviewFetch` (Task 6, unchanged signature — `(url, init) => Promise<PreviewFetchResponse>`); `Request.url`/`Request.params.file` (Express, unchanged).
+- Produces: nothing new consumed elsewhere — this is a same-shape bugfix, not a new interface.
+
+- [ ] **Step 1: Write the failing test for query forwarding**
+
+Add to `test/stream/localStreamPreviewRoutes.test.ts`, inside the existing `describe` block (reuse
+the file's existing `buildApp`/`TOKEN` helpers):
+
+```typescript
+it('forwards the request\'s query string to the upstream URL verbatim', async () => {
+  const { app, previewFetch } = buildApp();
+  await request(app).get('/local-stream/preview/main_stream.m3u8?session=3c8ce9c0-9a53-4c1c-8893-15c93c904906');
+  expect(previewFetch).toHaveBeenLastCalledWith(
+    `http://mediamtx:8888/live/${TOKEN}/main_stream.m3u8?session=3c8ce9c0-9a53-4c1c-8893-15c93c904906`,
+    expect.anything(),
+  );
+});
+
+it('does not append a query string when the request has none', async () => {
+  const { app, previewFetch } = buildApp();
+  await request(app).get('/local-stream/preview/index.m3u8');
+  expect(previewFetch).toHaveBeenLastCalledWith(
+    `http://mediamtx:8888/live/${TOKEN}/index.m3u8`,
+    expect.anything(),
+  );
+});
+
+// The ALLOWED_FILE allowlist must keep guarding only the file NAME — a query string is forwarded
+// verbatim, never validated against it. Confirms a query can't be used to sneak a traversal-like
+// value past the filename check (it never reaches that check at all — Express's :file param
+// already excludes the query, this just proves appending it back on afterwards doesn't reopen it).
+it('still rejects a disallowed file name even when a query string is present', async () => {
+  const { app, previewFetch } = buildApp();
+  const res = await request(app).get('/local-stream/preview/..%2Fmediamtx.yml?session=x');
+  expect([400, 404]).toContain(res.status);
+  expect(previewFetch).not.toHaveBeenCalled();
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npx jest test/stream/localStreamPreviewRoutes.test.ts`
+Expected: FAIL — the first two new tests see the upstream URL called *without* the query string
+(current code drops it); the third passes already (unrelated to this fix) but keep it, it's the
+regression guard for the fix below.
+
+- [ ] **Step 3: Fix `proxy()` to forward the query string**
+
+In `src/stream/localStreamPreviewRoutes.ts`, inside `proxy()`, right after the `ALLOWED_FILE` check
+(so validation still runs against the file name alone, never the query):
+
+```typescript
+    // Express's :file route param — and the literal 'index.m3u8' the other route passes — never
+    // include a query string; MediaMTX's HLS muxer appends a REQUIRED ?session=<uuid> to every
+    // child reference in the multivariant playlist (confirmed against a real MediaMTX 1.21.0 — see
+    // CLAUDE.md's known follow-ups). Forward it verbatim: it's an opaque per-session token MediaMTX
+    // itself minted and put in the playlist we already served, not something a client can forge
+    // usefully, and it never influences which file name gets validated above.
+    const queryStart = req.url.indexOf('?');
+    const queryString = queryStart === -1 ? '' : req.url.slice(queryStart);
+```
+
+Then change the `previewFetch` call from:
+```typescript
+      upstream = await previewFetch(`${target.hlsBaseUrl}/${fileName}`, {
+```
+to:
+```typescript
+      upstream = await previewFetch(`${target.hlsBaseUrl}/${fileName}${queryString}`, {
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npx jest test/stream/localStreamPreviewRoutes.test.ts`
+Expected: PASS (13 tests — the original 10, the fix-round non-2xx-body test, and these 3 new ones).
+
+- [ ] **Step 5: Make the redirect-following explicit in `createPreviewFetch`**
+
+In `src/server.ts`, change:
+```typescript
+    const res = await fetch(url, { headers: init.headers });
+```
+to:
+```typescript
+    // MediaMTX answers a fresh HLS session's first request with a 302 cookie-probe redirect before
+    // the real content — verified against a real binary. Node's global fetch follows redirects by
+    // default, but that's an implicit default this depends on, not a documented contract; say so.
+    const res = await fetch(url, { headers: init.headers, redirect: 'follow' });
+```
+
+This has no unit-testable behavior change (the default was already 'follow'), so no new test —
+`test/server.test.ts`'s existing coverage of `createPreviewFetch` is unaffected. Run
+`npx jest test/server.test.ts` to confirm it still passes unchanged.
+
+- [ ] **Step 6: Close the MediaMTX config denylist gap and the deprecated key**
+
+Edit `docker/mediamtx.yml`:
+
+```yaml
+# --- Layer 0 -----------------------------------------------------------------------------------
+# NOTE: `false`/`true`, not `no`/`yes` — js-yaml (this repo's config-invariant test, and MediaMTX's
+# own Go YAML decoder) only resolves booleans from true/false forms; `no`/`yes` parse as the plain
+# strings 'no'/'yes', which MediaMTX's typed config would reject at startup as a type mismatch.
+# This list is a DENYLIST, not an exhaustive inventory of MediaMTX's features — verified against a
+# real MediaMTX 1.21.0 that it also starts a MoQ listener (:8892/:8893) unless explicitly disabled,
+# which this file didn't account for until a real-binary smoke test caught it. Re-check this list
+# against MediaMTX's actual startup log (`INF [...] started with listener on ...` lines) whenever
+# the pinned version changes — a new default-on feature can silently outrun this file again.
+api: false
+metrics: false
+pprof: false
+playback: false
+rtsp: false
+webrtc: false
+srt: false
+moq: false
+rtmp: true
+hls: true
+```
+
+and:
+
+```yaml
+# hlsAllowOrigins: [] -> nothing talks to this server from a browser; only the backend proxy does,
+# server-to-server, so no cross-origin access is ever needed here. (Not the older singular
+# `hlsAllowOrigin` — MediaMTX 1.21.0 logs a deprecation warning for that key in favour of this
+# plural, list-shaped one; confirmed against a real binary.)
+hlsAddress: :8888
+hlsVariant: mpegts
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsAlwaysRemux: false
+hlsAllowOrigins: []
+hlsMuxerCloseAfter: 60s
+```
+
+- [ ] **Step 7: Update the config-invariant test to match**
+
+In `test/infra/mediamtxConfig.test.ts`, add `moq: boolean;` to the `MediaMtxConfig` interface and
+`hlsAllowOrigins: unknown[];` (drop the old `hlsAllowOrigin` reference if the interface ever added
+one — it didn't, the file only typed the fields it asserted on). Update the two affected tests:
+
+```typescript
+  it('disables every control and extra-protocol surface, leaving only RTMP ingest and HLS read', () => {
+    expect(config.api).toBe(false);
+    expect(config.metrics).toBe(false);
+    expect(config.pprof).toBe(false);
+    expect(config.playback).toBe(false);
+    expect(config.rtsp).toBe(false);
+    expect(config.webrtc).toBe(false);
+    expect(config.srt).toBe(false);
+    expect(config.moq).toBe(false);
+    expect(config.rtmp).toBe(true);
+    expect(config.hls).toBe(true);
+  });
+```
+
+```typescript
+  it('serves plain (not low-latency) HLS, muxed on demand, with no cross-origin browser access', () => {
+    expect(config.hlsVariant).toBe('mpegts');
+    expect(config.hlsAlwaysRemux).toBe(false);
+    expect(config.hlsAllowOrigins).toEqual([]);
+  });
+```
+
+(This second test is a rename+extension of the existing `'serves plain (not low-latency) HLS, muxed
+on demand'` test — replace it in place, don't add a duplicate.)
+
+- [ ] **Step 8: Run the full test suite and build**
+
+Run: `npx jest test/infra/mediamtxConfig.test.ts`
+Expected: PASS (9 tests — same count as before, two of them extended in place).
+
+Run: `npx jest && npm run build`
+Expected: full suite green, clean `tsc`.
+
+- [ ] **Step 9: Re-verify against the real MediaMTX from Task 12's smoke-test environment**
+
+This fix exists *because* a real-binary test caught what unit tests couldn't — closing it with only
+unit tests would repeat the same blind spot. Re-run the specific check from Task 12's Part 2,
+section 2.4 ("What did not — the bug") against a real MediaMTX: build the project's image, bring up
+the same isolated network + MediaMTX + a real published stream, and confirm a media-playlist/segment
+request **with** the query string now succeeds through the actual `localStreamPreviewRoutes.ts`
+code path (not the standalone Node repro script Task 12 used) — i.e. drive it through a real HTTP
+request to the running backend's `/local-stream/preview/*` route, not just the isolated
+`createPreviewFetch()` logic. Full teardown afterward, same rules as Task 12 (isolated network, no
+published ports, remove every container/network/temp file, never touch the host's other services).
+If this still fails, STOP and report — don't paper over a second failure the same way the first was
+correctly not papered over.
+
+- [ ] **Step 10: Update `CLAUDE.md`**
+
+Task 12's own doc commit (`a9bf37d`) already recorded this as an open bug with its fix shape under
+known follow-up (h). Update that entry to reflect that it's now fixed: replace the "open bug" framing
+with a short note that the query string is now forwarded (cite this task), and fold the MoQ/
+`hlsAllowOrigin` findings ((j)/(k) in that commit) into simple "fixed" mentions rather than open
+follow-ups, if Task 12 tracked them there.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/stream/localStreamPreviewRoutes.ts src/server.ts docker/mediamtx.yml \
+  test/stream/localStreamPreviewRoutes.test.ts test/infra/mediamtxConfig.test.ts CLAUDE.md
+git commit -m "$(cat <<'EOF'
+fix: forward the HLS child-request query string through the preview proxy
+
+A real MediaMTX 1.21.0 requires a ?session=<uuid> query on every playlist/
+segment request after the entry point, which Express's :file route param
+never carries. Confirmed against a real binary (Task 12's smoke test) that
+this broke the preview entirely past the first playlist load. Also makes
+createPreviewFetch's redirect-following explicit and closes two smaller
+config gaps (MoQ default-on, the deprecated hlsAllowOrigin key) the same
+smoke test surfaced.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF
 )"
 ```
