@@ -15,6 +15,11 @@ logDestinations: [stdout]
 # NOTE: `false`/`true`, not `no`/`yes` — js-yaml (this repo's config-invariant test, and MediaMTX's
 # own Go YAML decoder) only resolves booleans from true/false forms; `no`/`yes` parse as the plain
 # strings 'no'/'yes', which MediaMTX's typed config would reject at startup as a type mismatch.
+# This list is a DENYLIST, not an exhaustive inventory of MediaMTX's features — verified against a
+# real MediaMTX 1.21.0 that it also starts a MoQ listener (:8892/:8893) unless explicitly disabled,
+# which this file didn't account for until a real-binary smoke test caught it. Re-check this list
+# against MediaMTX's actual startup log (`INF [...] started with listener on ...` lines) whenever
+# the pinned version changes — a new default-on feature can silently outrun this file again.
 api: false
 metrics: false
 pprof: false
@@ -22,6 +27,7 @@ playback: false
 rtsp: false
 webrtc: false
 srt: false
+moq: false
 rtmp: true
 hls: true
 
@@ -37,15 +43,16 @@ rtmpEncryption: "no"
 # 2-3 segments of buffering at that real ~2s size. Changing hlsSegmentDuration alone will not move
 # this number — the encoder's `-g` is the actual latency knob.
 # hlsAlwaysRemux: false -> the muxer only exists while someone is actually previewing.
-# hlsAllowOrigin: '' -> nothing talks to this server from a browser; only the backend proxy does,
-# server-to-server, so no cross-origin access is ever needed here (MediaMTX's parameter is
-# singular and a string, not the list shape `hlsAllowOrigins: []` might suggest).
+# hlsAllowOrigins: [] -> nothing talks to this server from a browser; only the backend proxy does,
+# server-to-server, so no cross-origin access is ever needed here. (Not the older singular
+# `hlsAllowOrigin` — MediaMTX 1.21.0 logs a deprecation warning for that key in favour of this
+# plural, list-shaped one; confirmed against a real binary.)
 hlsAddress: :8888
 hlsVariant: mpegts
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
 hlsAlwaysRemux: false
-hlsAllowOrigin: ''
+hlsAllowOrigins: []
 hlsMuxerCloseAfter: 60s
 
 # --- Layer 2 -----------------------------------------------------------------------------------

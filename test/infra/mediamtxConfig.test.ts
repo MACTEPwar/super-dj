@@ -14,9 +14,9 @@ interface ComposeFile {
 
 interface MediaMtxConfig {
   api: boolean; metrics: boolean; pprof: boolean; playback: boolean;
-  rtsp: boolean; webrtc: boolean; srt: boolean; rtmp: boolean; hls: boolean;
+  rtsp: boolean; webrtc: boolean; srt: boolean; moq: boolean; rtmp: boolean; hls: boolean;
   authMethod: string; authHTTPExclude: unknown[];
-  hlsVariant: string; hlsAlwaysRemux: boolean;
+  hlsVariant: string; hlsAlwaysRemux: boolean; hlsAllowOrigins: unknown[];
   paths: Record<string, unknown>;
 }
 
@@ -56,6 +56,9 @@ describe('MediaMTX deployment invariants', () => {
     expect(config.rtsp).toBe(false);
     expect(config.webrtc).toBe(false);
     expect(config.srt).toBe(false);
+    // MediaMTX 1.21.0 starts a MoQ listener (:8892/:8893) unless this is explicitly false — a
+    // default-on surface a real-binary smoke test caught outrunning this denylist.
+    expect(config.moq).toBe(false);
     expect(config.rtmp).toBe(true);
     expect(config.hls).toBe(true);
   });
@@ -65,9 +68,11 @@ describe('MediaMTX deployment invariants', () => {
     expect(config.authHTTPExclude).toEqual([]);
   });
 
-  it('serves plain (not low-latency) HLS, muxed on demand', () => {
+  it('serves plain (not low-latency) HLS, muxed on demand, with no cross-origin browser access', () => {
     expect(config.hlsVariant).toBe('mpegts');
     expect(config.hlsAlwaysRemux).toBe(false);
+    // The plural, list-shaped key: 1.21.0 deprecates the singular `hlsAllowOrigin` string form.
+    expect(config.hlsAllowOrigins).toEqual([]);
   });
 
   // A single regex path and NO all_others catch-all: a path that is not a 32-hex-char live token

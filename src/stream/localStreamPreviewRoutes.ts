@@ -59,13 +59,22 @@ export function createLocalStreamPreviewRouter(
   async function proxy(req: Request, res: Response, fileName: string): Promise<void> {
     if (!ALLOWED_FILE.test(fileName)) throw new ApiError(400, 'invalid preview file name');
 
+    // Express's :file route param — and the literal 'index.m3u8' the other route passes — never
+    // include a query string; MediaMTX's HLS muxer appends a REQUIRED ?session=<uuid> to every
+    // child reference in the multivariant playlist (confirmed against a real MediaMTX 1.21.0 — see
+    // CLAUDE.md's known follow-ups). Forward it verbatim: it's an opaque per-session token MediaMTX
+    // itself minted and put in the playlist we already served, not something a client can forge
+    // usefully, and it never influences which file name gets validated above.
+    const queryStart = req.url.indexOf('?');
+    const queryString = queryStart === -1 ? '' : req.url.slice(queryStart);
+
     const userId = (req as AuthenticatedRequest).user!.id;
     const target = localStreamManager.previewTarget(userId);
     if (!target) throw new ApiError(409, 'local stream is not active');
 
     let upstream: PreviewFetchResponse;
     try {
-      upstream = await previewFetch(`${target.hlsBaseUrl}/${fileName}`, {
+      upstream = await previewFetch(`${target.hlsBaseUrl}/${fileName}${queryString}`, {
         headers: { Authorization: target.authorization },
       });
     } catch (err) {

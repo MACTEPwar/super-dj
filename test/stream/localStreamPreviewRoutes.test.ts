@@ -71,6 +71,39 @@ describe('GET /local-stream/preview', () => {
     expect(previewFetch).toHaveBeenLastCalledWith(`http://mediamtx:8888/live/${TOKEN}/segment7.ts`, expect.anything());
   });
 
+  // MediaMTX's HLS muxer appends a REQUIRED ?session=<uuid> to every child reference inside the
+  // multivariant playlist; without it the child request 401s (confirmed against a real MediaMTX
+  // 1.21.0). Express's :file route param never carries a query string, so the route has to put it
+  // back on explicitly.
+  it('forwards the request\'s query string to the upstream URL verbatim', async () => {
+    const { app, previewFetch } = buildApp();
+    await request(app).get('/local-stream/preview/main_stream.m3u8?session=3c8ce9c0-9a53-4c1c-8893-15c93c904906');
+    expect(previewFetch).toHaveBeenLastCalledWith(
+      `http://mediamtx:8888/live/${TOKEN}/main_stream.m3u8?session=3c8ce9c0-9a53-4c1c-8893-15c93c904906`,
+      expect.anything(),
+    );
+  });
+
+  it('does not append a query string when the request has none', async () => {
+    const { app, previewFetch } = buildApp();
+    await request(app).get('/local-stream/preview/index.m3u8');
+    expect(previewFetch).toHaveBeenLastCalledWith(
+      `http://mediamtx:8888/live/${TOKEN}/index.m3u8`,
+      expect.anything(),
+    );
+  });
+
+  // The ALLOWED_FILE allowlist must keep guarding only the file NAME — a query string is forwarded
+  // verbatim, never validated against it. Confirms a query can't be used to sneak a traversal-like
+  // value past the filename check (it never reaches that check at all — Express's :file param
+  // already excludes the query, this just proves appending it back on afterwards doesn't reopen it).
+  it('still rejects a disallowed file name even when a query string is present', async () => {
+    const { app, previewFetch } = buildApp();
+    const res = await request(app).get('/local-stream/preview/..%2Fmediamtx.yml?session=x');
+    expect([400, 404]).toContain(res.status);
+    expect(previewFetch).not.toHaveBeenCalled();
+  });
+
   it('falls back to a content type derived from the extension when upstream sends none', async () => {
     const previewFetch = jest.fn().mockResolvedValue({ status: 200, contentType: null, body: Readable.from(['x']) });
     const { app } = buildApp({ previewFetch });

@@ -98,7 +98,10 @@ export function createPipeSpawner(): PipeSpawner {
  */
 export function createPreviewFetch(): PreviewFetch {
   return async (url, init) => {
-    const res = await fetch(url, { headers: init.headers });
+    // MediaMTX answers a fresh HLS session's first request with a 302 cookie-probe redirect before
+    // the real content — verified against a real binary. Node's global fetch follows redirects by
+    // default, but that's an implicit default this depends on, not a documented contract; say so.
+    const res = await fetch(url, { headers: init.headers, redirect: 'follow' });
     return {
       status: res.status,
       contentType: res.headers.get('content-type'),
