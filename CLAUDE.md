@@ -1084,10 +1084,12 @@ stream by hand. A terminal provider phase (`error`/`complete`) now stops **that 
 nothing else** — `DestinationForward.pass()` checks for it ahead of every branch that could start or
 respawn a relay, so even a respawn that was merely *scheduled* can't fire into an ended broadcast —
 and the local encode, the preview and every sibling forward carry on untouched.
-A persistently failing `refreshAccessToken` (e.g. a revoked Google grant) still makes the
-health-check poll loop retry silently for the full 90s timeout instead of short-circuiting on an
-auth-class error. **(Closed.)** What used to follow from that — an orphaned ephemeral
-`liveStream`, because `finalize()` needs a working token too — cannot happen any more: the
+**(Closed.)** A persistently failing `refreshAccessToken` (e.g. a revoked Google grant) used to make
+the health-check poll loop retry silently for the full 90s timeout instead of short-circuiting on an
+auth-class error — `youtubeProvider.ts`'s poll loop now checks `isAuthClassError(err)` and calls
+`giveUp()` immediately instead of scheduling another poll, predating this plan (verified against
+`93ffcf9`, Phase A's own tip). What used to follow from the old behaviour — an orphaned ephemeral
+`liveStream`, because `finalize()` needs a working token too — cannot happen any more either: the
 `liveStream` is persisted on the destination row, reused across every toggle, and never deleted by
 `finalize()` at all. `OAuthState` rows for an abandoned `/oauth/start` (the user never
 completes the consent flow) are never swept — they just sit until their `expiresAt` passes,
