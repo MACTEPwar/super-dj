@@ -33,4 +33,10 @@ export interface PreparedSession {
 
 export interface StreamDestinationProvider {
   prepareSession(destination: StreamDestination, meta: BroadcastMeta): Promise<PreparedSession>;
+  // Classify a prepareSession() rejection as an auth-class failure — a revoked/expired grant that
+  // retrying will never fix — rather than a transient provider error. Absent (CustomRtmpProvider
+  // has no account to revoke) means "never auth-class". This lives on the provider because it is
+  // the only layer that knows its own API's error shapes; DestinationForward stays free of any
+  // YouTube-specific knowledge.
+  isAuthError?(err: unknown): boolean;
 }
