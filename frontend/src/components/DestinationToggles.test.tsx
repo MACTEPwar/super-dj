@@ -82,51 +82,6 @@ describe('DestinationToggles', () => {
     expect(onToggle).toHaveBeenCalledWith('d2', 'on');
   });
 
-  // Turning ON a provider with a broadcast concept (YouTube) opens a settings panel instead of
-  // toggling immediately — its own title/privacy/latency are chosen right at this moment, not once
-  // for a whole session.
-  it('opens a settings panel instead of toggling immediately when turning a YouTube destination on', async () => {
-    const onToggle = vi.fn();
-    renderWithProviders(<DestinationToggles destinations={DESTINATIONS} forwards={[]} onToggle={onToggle} />);
-    await userEvent.click(screen.getByLabelText('My channel'));
-    expect(onToggle).not.toHaveBeenCalled();
-    expect(await screen.findByPlaceholderText('Title (optional — defaults to this destination\'s name)')).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect(onToggle).toHaveBeenCalledWith('d1', 'on', {
-      title: undefined, description: undefined, privacyStatus: 'private', latencyPreference: 'normal',
-    });
-  });
-
-  it('turning a custom RTMP destination on skips the panel entirely', async () => {
-    const onToggle = vi.fn();
-    renderWithProviders(<DestinationToggles destinations={DESTINATIONS} forwards={[]} onToggle={onToggle} />);
-    await userEvent.click(screen.getByLabelText('Twitch'));
-    expect(onToggle).toHaveBeenCalledWith('d2', 'on');
-    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
-  });
-
-  it('Cancel closes the panel without toggling anything', async () => {
-    const onToggle = vi.fn();
-    renderWithProviders(<DestinationToggles destinations={DESTINATIONS} forwards={[]} onToggle={onToggle} />);
-    await userEvent.click(screen.getByLabelText('My channel'));
-    await userEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
-    expect(onToggle).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
-  });
-
-  it('passes the typed title and privacy through to onToggle', async () => {
-    const onToggle = vi.fn();
-    renderWithProviders(<DestinationToggles destinations={DESTINATIONS} forwards={[]} onToggle={onToggle} />);
-    await userEvent.click(screen.getByLabelText('My channel'));
-    await userEvent.type(await screen.findByPlaceholderText('Title (optional — defaults to this destination\'s name)'), 'Friday night set');
-    await userEvent.selectOptions(screen.getByLabelText('Privacy'), 'public');
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect(onToggle).toHaveBeenCalledWith('d1', 'on', {
-      title: 'Friday night set', description: undefined, privacyStatus: 'public', latencyPreference: 'normal',
-    });
-  });
-
   it('renders an empty state when the user owns no destinations', () => {
     renderWithProviders(<DestinationToggles destinations={[]} forwards={[]} onToggle={vi.fn()} />);
     expect(screen.getByText('No destinations yet.')).toBeInTheDocument();

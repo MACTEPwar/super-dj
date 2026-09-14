@@ -1,32 +1,48 @@
 import { FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import {
   localStreamApi, DestinationBroadcastMeta, ForwardDesiredState, LocalStreamStatus,
 } from '../api/localStream';
 import { streamPresetsApi } from '../api/streamPresets';
+import { Destination, destinationsApi } from '../api/destinations';
 import { useLocalStreamStatus, LOCAL_STREAM_STATUS_QUERY_KEY } from '../hooks/useLocalStreamStatus';
 import { playlistsApi } from '../api/playlists';
 import { templatesApi } from '../api/templates';
-import { destinationsApi } from '../api/destinations';
 import { ApiError } from '../api/client';
 import { HlsPlayer } from '../components/HlsPlayer';
 import { DestinationToggles } from '../components/DestinationToggles';
+import { DestinationSettingsDrawer } from '../components/DestinationSettingsDrawer';
 import { usePageTitle } from '../hooks/usePageTitle';
+
+// Providers whose broadcast has its own settings worth asking about before going live. A custom
+// RTMP destination has no broadcast concept at all (CustomRtmpProvider ignores every one of these
+// fields), so turning it on never needs the settings drawer.
+const PROVIDERS_WITH_BROADCAST_META = new Set(['youtube']);
+
+// Thrown when the settings drawer is dismissed without confirming — a deliberate change of mind,
+// not a failure, so it must never surface as an error toast.
+class CommitCancelled extends Error {}
+
+function sameIds(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
 
 /**
  * The one stream page. There is exactly one local stream per account, so there is no list, no id in
  * any URL and nothing to navigate between: you start it, you control it, you watch it, and you tick
  * destinations on and off underneath it without ever interrupting it.
  *
- * The destination checklist is ALWAYS driven by the real backend forward statuses, whether the
- * stream is running or not — a toggle is valid in every state (it parks at 'pending' while idle),
- * so there is no separate local-only "what I've ticked so far" state to keep in sync with it. Each
- * destination's own broadcast settings (title/privacy/latency) are collected by
- * DestinationToggles' own panel right at the moment of ticking it on — see that component — not on
- * this page, and not once for the whole session: start() itself takes only playlistId/templateId.
+ * The checklist is deliberately TWO-STEP: ticking a box only ever records local intent — it never
+ * calls the backend and never asks for that destination's settings. Settings (and the actual
+ * on/off calls) are collected only once the user commits — pressing "Start stream", or "Apply
+ * changes" once something is already running — via DestinationSettingsDrawer, one section per
+ * newly-turned-on destination that actually has a broadcast to configure. This holds identically
+ * whether the stream is idle or already running: the same local intent, the same commit step.
  */
 export default function Stream() {
   const { t } = useTranslation();
@@ -42,6 +58,24 @@ export default function Stream() {
   const [presetName, setPresetName] = useState('');
   const [playlistId, setPlaylistId] = useState('');
   const [templateId, setTemplateId] = useState('');
+  const [isCommitting, setIsCommitting] = useState(false);
+
+  // null = "mirrors the backend" (no local edits pending). Set the instant the user ticks a box,
+  // whether idle or running — turning something on or off is ALWAYS just intent until committed.
+  const [intendedOnIds, setIntendedOnIds] = useState<Set<string> | null>(null);
+  // Metadata already known for a destination about to turn on WITHOUT asking again at commit time
+  // — populated only by applying a saved preset (its one shared title/privacy/latency for every
+  // destination it lists). A manual tick always goes through the drawer instead.
+  const [presetMeta, setPresetMeta] = useState<Record<string, DestinationBroadcastMeta>>({});
+  // Drives the settings drawer: which destinations it's asking about, and what to do with the
+  // answer. Non-null exactly while the drawer is open. `onCancel` fires when the drawer is
+  // dismissed (Escape, the ✕, an overlay click) WITHOUT confirming — without it the commit's own
+  // Promise would simply hang forever and `isCommitting` would stay stuck true.
+  const [pendingSettings, setPendingSettings] = useState<{
+    destinations: Destination[];
+    onConfirm: (metaById: Record<string, DestinationBroadcastMeta>) => void;
+    onCancel: () => void;
+  } | null>(null);
 
   const status = statusQuery.data;
   const local = status?.local;
@@ -52,90 +86,158 @@ export default function Stream() {
   const isRunning = local !== undefined && local.state !== 'idle' && local.state !== 'error' && !isStarting;
 
   const destinations = destinationsQuery.data ?? [];
-  const forwards = status?.destinations ?? [];
+  const backendForwards = status?.destinations ?? [];
+  const backendOnIds = new Set(backendForwards.filter((f) => f.desired === 'on').map((f) => f.destinationId));
+  const displayOnIds = intendedOnIds ?? backendOnIds;
+  const hasPendingChanges = intendedOnIds !== null && !sameIds(intendedOnIds, backendOnIds);
+
+  // What the checklist actually shows: real forward state (phase, error, provider info) wherever
+  // the backend already has an entry, with `desired` overridden to reflect local intent; a
+  // destination the user has only ticked locally (no backend entry yet) gets a synthesized
+  // 'pending' row — exactly what the backend would report for it once committed.
+  const byId = new Map(backendForwards.map((f) => [f.destinationId, f]));
+  const displayForwards = destinations
+    .map((d) => {
+      const backend = byId.get(d.id);
+      const desired: ForwardDesiredState = displayOnIds.has(d.id) ? 'on' : 'off';
+      if (backend) return { ...backend, desired };
+      if (desired === 'on') return { destinationId: d.id, name: d.name, desired: 'on' as const, state: 'pending' as const };
+      return null;
+    })
+    .filter((f): f is NonNullable<typeof f> => f !== null);
 
   const applyStatus = (next: LocalStreamStatus) => queryClient.setQueryData(LOCAL_STREAM_STATUS_QUERY_KEY, next);
 
-  const startMutation = useMutation({
-    mutationFn: () => localStreamApi.start({ playlistId, templateId: templateId || undefined }),
-    onSuccess: applyStatus,
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.startFailed')),
-  });
-
-  function useCommand(fn: () => Promise<LocalStreamStatus>) {
-    return useMutation({
-      mutationFn: fn,
-      onSuccess: applyStatus,
-      onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.commandFailed')),
+  function handleToggle(destinationId: string, desired: ForwardDesiredState) {
+    setIntendedOnIds((current) => {
+      const next = new Set(current ?? backendOnIds);
+      if (desired === 'on') next.add(destinationId); else next.delete(destinationId);
+      return next;
+    });
+    // A manual re-tick must never silently reuse a stale preset-supplied setting.
+    setPresetMeta((current) => {
+      if (!(destinationId in current)) return current;
+      const rest = { ...current };
+      delete rest[destinationId];
+      return rest;
     });
   }
 
-  const previousMutation = useCommand(localStreamApi.previous);
-  const pauseMutation = useCommand(localStreamApi.pause);
-  const resumeMutation = useCommand(localStreamApi.resume);
-  const nextMutation = useCommand(localStreamApi.next);
-  const stopMutation = useCommand(localStreamApi.stop);
+  // The commit step: reconciles local intent against the backend. Anything newly turned off is
+  // switched off immediately (no settings to ask about); anything newly turned on with settings
+  // already known (from a preset) is switched on immediately too; anything else newly turned on
+  // that actually has a broadcast to configure opens the settings drawer FIRST and waits for it.
+  // `after` (starting the stream itself) runs only once every toggle has landed.
+  function commitDestinationChanges(after?: () => Promise<void>): Promise<void> {
+    const wantOnIds = intendedOnIds ?? backendOnIds;
+    const toTurnOff = [...backendOnIds].filter((id) => !wantOnIds.has(id));
+    const toTurnOnDestinations = [...wantOnIds]
+      .filter((id) => !backendOnIds.has(id))
+      .map((id) => destinations.find((d) => d.id === id))
+      .filter((d): d is Destination => d !== undefined);
+    const needsSettings = toTurnOnDestinations.filter((d) => PROVIDERS_WITH_BROADCAST_META.has(d.provider) && !presetMeta[d.id]);
+    const readyIds = toTurnOnDestinations.filter((d) => !needsSettings.includes(d)).map((d) => d.id);
 
-  const toggleMutation = useMutation({
-    mutationFn: ({ destinationId, desired, meta }: { destinationId: string; desired: ForwardDesiredState; meta?: DestinationBroadcastMeta }) =>
-      localStreamApi.setDestination(destinationId, desired, meta),
-    onSuccess: applyStatus,
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.toggleFailed')),
-  });
-
-  // Applying a preset ticks every one of its saved destinations on, each with that SAME preset's
-  // saved broadcast metadata (a preset only ever holds one shared copy, not a per-destination one —
-  // unlike a manual toggle's own settings panel) — valid whether the stream is running or idle, for
-  // the same reason a manual toggle is.
-  const applyPresetMutation = useMutation({
-    mutationFn: async (): Promise<LocalStreamStatus | undefined> => {
-      const preset = presetsQuery.data?.find((p) => p.id === presetId);
-      if (!preset) return undefined;
-      setPlaylistId(preset.playlistId);
-      setTemplateId(preset.templateId ?? '');
-      const meta: DestinationBroadcastMeta = {
-        title: preset.title ?? undefined,
-        description: preset.description ?? undefined,
-        privacyStatus: preset.privacyStatus ?? undefined,
-        latencyPreference: preset.latencyPreference ?? undefined,
-      };
-      let result: LocalStreamStatus | undefined;
-      for (const destinationId of preset.destinationIds) {
-        result = await localStreamApi.setDestination(destinationId, 'on', meta);
+    async function applyAll(extraMeta: Record<string, DestinationBroadcastMeta>) {
+      for (const id of toTurnOff) applyStatus(await localStreamApi.setDestination(id, 'off'));
+      for (const id of readyIds) applyStatus(await localStreamApi.setDestination(id, 'on', presetMeta[id]));
+      for (const destination of needsSettings) {
+        applyStatus(await localStreamApi.setDestination(destination.id, 'on', extraMeta[destination.id]));
       }
-      return result;
-    },
-    onSuccess: (result) => { if (result) applyStatus(result); },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.startFailed')),
-  });
+      setIntendedOnIds(null);
+      setPresetMeta({});
+      if (after) await after();
+    }
 
+    if (needsSettings.length === 0) return applyAll({});
+    return new Promise<void>((resolve, reject) => {
+      setPendingSettings({
+        destinations: needsSettings,
+        onConfirm: (metaById) => {
+          setPendingSettings(null);
+          applyAll(metaById).then(resolve, reject);
+        },
+        onCancel: () => {
+          setPendingSettings(null);
+          reject(new CommitCancelled());
+        },
+      });
+    });
+  }
+
+  async function handleApply() {
+    setIsCommitting(true);
+    try {
+      await commitDestinationChanges();
+    } catch (err) {
+      if (!(err instanceof CommitCancelled)) toast.error(err instanceof ApiError ? err.message : t('stream.toggleFailed'));
+    } finally {
+      setIsCommitting(false);
+    }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!playlistId) return;
+    setIsCommitting(true);
+    try {
+      await commitDestinationChanges(async () => {
+        applyStatus(await localStreamApi.start({ playlistId, templateId: templateId || undefined }));
+      });
+    } catch (err) {
+      if (!(err instanceof CommitCancelled)) toast.error(err instanceof ApiError ? err.message : t('stream.startFailed'));
+    } finally {
+      setIsCommitting(false);
+    }
+  }
+
+  async function useSimpleCommand(fn: () => Promise<LocalStreamStatus>, failedKey: string) {
+    try {
+      applyStatus(await fn());
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : t(failedKey));
+    }
+  }
+
+  // Applying a preset never touches the network by itself — it only sets local intent (playlist,
+  // template, which destinations, and their shared saved settings), exactly like a manual tick
+  // does. Nothing actually happens until Start/Apply commits it, same as everywhere else here.
+  function applyPreset() {
+    const preset = presetsQuery.data?.find((p) => p.id === presetId);
+    if (!preset) return;
+    setPlaylistId(preset.playlistId);
+    setTemplateId(preset.templateId ?? '');
+    setIntendedOnIds(new Set(preset.destinationIds));
+    const meta: DestinationBroadcastMeta = {
+      title: preset.title ?? undefined,
+      description: preset.description ?? undefined,
+      privacyStatus: preset.privacyStatus ?? undefined,
+      latencyPreference: preset.latencyPreference ?? undefined,
+    };
+    setPresetMeta(Object.fromEntries(preset.destinationIds.map((id) => [id, meta])));
+  }
+
+  const [isSavingPreset, setIsSavingPreset] = useState(false);
   // A saved preset can only remember ONE shared name/playlist/template/destination-list; it does
-  // not attempt to capture each destination's own broadcast settings (those live on the toggle
-  // panel, in the moment, and are gone once that moment passes) — so a preset saved here carries no
-  // broadcast metadata of its own, only the currently-selected destinations to re-tick next time.
-  const savePresetMutation = useMutation({
-    mutationFn: () => streamPresetsApi.create({
-      name: presetName.trim(),
-      playlistId,
-      templateId: templateId || null,
-      destinationIds: forwards.filter((f) => f.desired === 'on').map((f) => f.destinationId),
-    }),
-    onSuccess: () => {
+  // not attempt to capture each destination's own broadcast settings (those live and die with the
+  // commit step that chose them) — so a preset saved here carries no broadcast metadata of its own.
+  async function saveCurrentAsPreset() {
+    setIsSavingPreset(true);
+    try {
+      await streamPresetsApi.create({
+        name: presetName.trim(),
+        playlistId,
+        templateId: templateId || null,
+        destinationIds: [...displayOnIds],
+      });
       setPresetName('');
       queryClient.invalidateQueries({ queryKey: ['stream-presets'] });
       toast.success(t('stream.presetSaved'));
-    },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.presetSaveFailed')),
-  });
-
-  function handleToggle(destinationId: string, desired: ForwardDesiredState, meta?: DestinationBroadcastMeta) {
-    toggleMutation.mutate({ destinationId, desired, meta });
-  }
-
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!playlistId) return;
-    startMutation.mutate();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : t('stream.presetSaveFailed'));
+    } finally {
+      setIsSavingPreset(false);
+    }
   }
 
   return (
@@ -163,12 +265,7 @@ export default function Stream() {
                 <option value="">{t('stream.noPreset')}</option>
                 {presetsQuery.data?.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
               </select>
-              <button
-                type="button"
-                onClick={() => applyPresetMutation.mutate()}
-                disabled={!presetId || applyPresetMutation.isPending}
-                className="rounded border px-3 py-2 disabled:opacity-50"
-              >
+              <button type="button" onClick={applyPreset} disabled={!presetId} className="rounded border px-3 py-2 disabled:opacity-50">
                 {t('stream.applyPreset')}
               </button>
             </div>
@@ -206,10 +303,10 @@ export default function Stream() {
 
           <button
             type="submit"
-            disabled={!playlistId || startMutation.isPending}
+            disabled={!playlistId || isCommitting}
             className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50"
           >
-            {startMutation.isPending ? t('stream.starting') : t('stream.startButton')}
+            {isCommitting ? t('stream.starting') : t('stream.startButton')}
           </button>
 
           <div className="border-t pt-3">
@@ -223,8 +320,8 @@ export default function Stream() {
               />
               <button
                 type="button"
-                onClick={() => savePresetMutation.mutate()}
-                disabled={!playlistId || presetName.trim().length === 0 || savePresetMutation.isPending}
+                onClick={saveCurrentAsPreset}
+                disabled={!playlistId || presetName.trim().length === 0 || isSavingPreset}
                 className="rounded border px-3 py-2 disabled:opacity-50"
               >
                 {t('stream.savePreset')}
@@ -248,34 +345,54 @@ export default function Stream() {
             </span>
             <span className="text-xs text-gray-500">{t(`streamState.${local.state}`)}</span>
           </div>
-          {forwards.every((forward) => forward.desired === 'off') && (
+          {backendForwards.every((forward) => forward.desired === 'off') && (
             <p className="mt-2 text-xs text-gray-500">{t('stream.noDestinationsNotice')}</p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">
-            <button onClick={() => previousMutation.mutate()} className="rounded border px-3 py-2">{t('stream.previous')}</button>
+            <button onClick={() => useSimpleCommand(localStreamApi.previous, 'stream.commandFailed')} className="rounded border px-3 py-2">{t('stream.previous')}</button>
             {local.state === 'paused'
-              ? <button onClick={() => resumeMutation.mutate()} className="rounded border px-3 py-2">{t('stream.resume')}</button>
-              : <button onClick={() => pauseMutation.mutate()} className="rounded border px-3 py-2">{t('stream.pause')}</button>}
-            <button onClick={() => nextMutation.mutate()} className="rounded border px-3 py-2">{t('stream.next')}</button>
-            <button onClick={() => stopMutation.mutate()} className="rounded border px-3 py-2 text-red-600">{t('stream.stop')}</button>
+              ? <button onClick={() => useSimpleCommand(localStreamApi.resume, 'stream.commandFailed')} className="rounded border px-3 py-2">{t('stream.resume')}</button>
+              : <button onClick={() => useSimpleCommand(localStreamApi.pause, 'stream.commandFailed')} className="rounded border px-3 py-2">{t('stream.pause')}</button>}
+            <button onClick={() => useSimpleCommand(localStreamApi.next, 'stream.commandFailed')} className="rounded border px-3 py-2">{t('stream.next')}</button>
+            <button onClick={() => useSimpleCommand(localStreamApi.stop, 'stream.commandFailed')} className="rounded border px-3 py-2 text-red-600">{t('stream.stop')}</button>
           </div>
         </div>
       )}
 
       {/* Always visible: a destination can be ticked before the stream starts (it waits at
-          'pending' with nothing happening on the platform) and toggled freely while it runs. */}
+          'pending' with nothing happening on the platform) and toggled freely while it runs. Ticking
+          it is only ever local intent, though — nothing reaches the backend until Start/Apply. */}
       <DestinationToggles
         destinations={destinations}
-        forwards={forwards}
+        forwards={displayForwards}
         onToggle={handleToggle}
-        disabled={isStarting || toggleMutation.isPending}
+        disabled={isStarting || isCommitting}
       />
+
+      {/* Mid-stream commit step: only appears once local intent actually diverges from what's
+          really running, since the checklist above is otherwise just showing backend truth. */}
+      {isRunning && hasPendingChanges && (
+        <button
+          onClick={handleApply}
+          disabled={isCommitting}
+          className="w-full rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+        >
+          {isCommitting ? t('stream.starting') : t('stream.applyChanges')}
+        </button>
+      )}
 
       {isRunning && local && (
         local.previewReady
           ? <HlsPlayer src={localStreamApi.previewUrl()} unsupportedMessage={t('stream.previewUnsupported')} />
           : <p className="rounded-lg border p-4 text-sm text-gray-500">{t('stream.previewStarting')}</p>
       )}
+
+      <DestinationSettingsDrawer
+        open={pendingSettings !== null}
+        onOpenChange={(open) => { if (!open) pendingSettings?.onCancel(); }}
+        destinations={pendingSettings?.destinations ?? []}
+        onConfirm={(metaById) => pendingSettings?.onConfirm(metaById)}
+      />
     </div>
   );
 }

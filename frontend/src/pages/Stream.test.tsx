@@ -62,6 +62,7 @@ describe('Stream page', () => {
     vi.mocked(templatesApi.list).mockResolvedValue([{ id: 'tpl-1', name: 'Neon' }] as never);
     vi.mocked(destinationsApi.list).mockResolvedValue([
       { id: 'd1', name: 'My channel', rtmpUrl: null, provider: 'youtube' },
+      { id: 'd2', name: 'Twitch', rtmpUrl: 'rtmp://live.twitch.tv/app', provider: 'custom' },
     ]);
     vi.mocked(streamPresetsApi.list).mockResolvedValue([]);
     vi.mocked(localStreamApi.previewUrl).mockReturnValue('http://api/local-stream/preview/index.m3u8');
@@ -74,10 +75,19 @@ describe('Stream page', () => {
     expect(screen.queryByTestId('hls-player')).not.toBeInTheDocument();
   });
 
-  // The checklist is ALWAYS backend-driven now — there is no separate local "what I've ticked"
-  // state — so start() itself only ever takes playlistId/templateId, whether or not a destination
-  // happens to already be on.
-  it('starts with only the playlist and template — destinations are never named to start()', async () => {
+  // The whole point of the two-step design: ticking a box is ONLY local intent. Neither the
+  // toggle call nor the settings drawer fires just from checking a box.
+  it('ticking a destination is purely local — no API call and no settings drawer yet', async () => {
+    mockStatus(IDLE);
+    renderWithProviders(<Stream />);
+    await screen.findByText('Friday Mix');
+    await userEvent.click(screen.getByLabelText('My channel'));
+    expect(screen.getByLabelText('My channel')).toBeChecked();
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+  });
+
+  it('starts with only the playlist and template when nothing is ticked', async () => {
     mockStatus(IDLE);
     vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
@@ -85,11 +95,69 @@ describe('Stream page', () => {
     await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
     await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
     await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: undefined }));
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
   });
 
-  // A destination the backend already holds `desired:'on'` for (survived an errored session) shows
-  // ticked and carries its error message straight through the checklist — no synthesis needed, the
-  // forwards array IS the checklist.
+  // Pressing Start with a locally-ticked YouTube destination opens the settings drawer FIRST —
+  // that destination's own toggle-on call, carrying whatever was typed, only fires once the
+  // drawer is confirmed, and start() itself only runs after that.
+  it('pressing Start opens the settings drawer for a newly-ticked YouTube destination, then commits both calls', async () => {
+    mockStatus(IDLE);
+    vi.mocked(localStreamApi.setDestination).mockResolvedValue(IDLE);
+    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
+    renderWithProviders(<Stream />);
+    await screen.findByText('Friday Mix');
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByLabelText('My channel'));
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+
+    await userEvent.type(await screen.findByPlaceholderText('Title (optional — defaults to this destination\'s name)'), 'Late night');
+    await userEvent.selectOptions(screen.getByLabelText('Privacy'), 'unlisted');
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', {
+      title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'normal',
+    }));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: undefined }));
+  });
+
+  // A custom RTMP destination has no broadcast concept, so ticking it never needs the drawer even
+  // though its own toggle-on call still has to fire as part of the commit.
+  it('a newly-ticked custom RTMP destination skips the drawer entirely', async () => {
+    mockStatus(IDLE);
+    vi.mocked(localStreamApi.setDestination).mockResolvedValue(IDLE);
+    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
+    renderWithProviders(<Stream />);
+    await screen.findByText('Friday Mix');
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByLabelText('Twitch'));
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d2', 'on', undefined));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: undefined }));
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+  });
+
+  // Dismissing the drawer without confirming must not toggle anything, and must not start the
+  // stream either — a change of mind, not a failure.
+  it('dismissing the settings drawer commits nothing', async () => {
+    mockStatus(IDLE);
+    renderWithProviders(<Stream />);
+    await screen.findByText('Friday Mix');
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByLabelText('My channel'));
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+    await screen.findByPlaceholderText('Title (optional — defaults to this destination\'s name)');
+
+    await userEvent.click(screen.getByLabelText('Close'));
+
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
+    expect(localStreamApi.start).not.toHaveBeenCalled();
+  });
+
+  // A destination the backend already holds `desired:'on'` for (survived an errored session)
+  // mirrors that as the initial local intent — shown ticked, with its error message straight
+  // through the checklist, no synthesis needed.
   it('shows a leftover backend forward as ticked, with its error, while nothing is running', async () => {
     mockStatus(ERRORED_WITH_LEFTOVER);
     renderWithProviders(<Stream />);
@@ -98,33 +166,22 @@ describe('Stream page', () => {
     expect(screen.getByText('YouTube rejected the broadcast')).toBeInTheDocument();
   });
 
-  // Unlike the old local-only checklist, turning a destination OFF hits the backend immediately —
-  // there is no "intent" that could be lost or forgotten by the time Start is pressed, since Start
-  // no longer has any destination list of its own to consult at all.
-  it('turning a leftover forward off calls the backend immediately, not on start', async () => {
+  // Unticking a leftover forward is a turn-OFF, which never needs the drawer — it commits
+  // straight through as part of Start.
+  it('unticking a leftover forward before starting switches it off with no drawer', async () => {
     mockStatus(ERRORED_WITH_LEFTOVER);
     vi.mocked(localStreamApi.setDestination).mockResolvedValue({ ...ERRORED_WITH_LEFTOVER, destinations: [] });
+    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
     await screen.findByText('Friday Mix');
     await userEvent.click(screen.getByLabelText('My channel'));
-    expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'off', undefined);
-  });
+    expect(screen.getByLabelText('My channel')).not.toBeChecked();
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
 
-  // Ticking an OFF YouTube destination — whether idle or running — opens its own settings panel
-  // (DestinationToggles' own concern, exercised in full there); confirming it is what actually
-  // calls the backend, carrying that ONE destination's own title/privacy/latency.
-  it('ticking a YouTube destination opens its settings panel and confirming toggles it on with that metadata', async () => {
-    mockStatus(IDLE);
-    vi.mocked(localStreamApi.setDestination).mockResolvedValue(IDLE);
-    renderWithProviders(<Stream />);
-    await screen.findByText('Friday Mix');
-    await userEvent.click(screen.getByLabelText('My channel'));
-    await userEvent.type(await screen.findByPlaceholderText('Title (optional — defaults to this destination\'s name)'), 'Late night');
-    await userEvent.selectOptions(screen.getByLabelText('Privacy'), 'unlisted');
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', {
-      title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'normal',
-    });
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'off'));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: undefined }));
   });
 
   it('renders the transport controls and player while running', async () => {
@@ -143,16 +200,26 @@ describe('Stream page', () => {
     expect(await screen.findByText(/Nothing is being forwarded/)).toBeInTheDocument();
   });
 
-  it('toggles a destination through the API while running, without stopping the stream', async () => {
+  // Mid-stream: ticking a box is still only local intent. The commit step — and the settings
+  // drawer, if needed — only appears once "Apply changes" shows up and is pressed.
+  it('ticking a destination while running does not call the backend until Apply changes is pressed', async () => {
     mockStatus(LIVE);
     vi.mocked(localStreamApi.setDestination).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
     await userEvent.click(await screen.findByLabelText('My channel'));
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Apply changes' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
-    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', expect.objectContaining({
-      privacyStatus: 'private',
-    })));
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', expect.objectContaining({ privacyStatus: 'private' })));
     expect(localStreamApi.stop).not.toHaveBeenCalled();
+  });
+
+  it('shows no Apply changes button while local intent matches the backend', async () => {
+    mockStatus(LIVE);
+    renderWithProviders(<Stream />);
+    await screen.findByTestId('hls-player');
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -180,10 +247,10 @@ describe('Stream page', () => {
     expect(screen.queryByRole('button', { name: 'Start stream' })).not.toBeInTheDocument();
   });
 
-  // Applying a preset ticks every one of its saved destinations on with that SAME preset's saved
-  // metadata (a preset holds only one shared copy) — via the very same setDestination() call a
-  // manual toggle makes, not through start().
-  it('applies a preset by toggling its destinations on with the preset\'s saved metadata', async () => {
+  // Applying a preset never touches the network by itself — it only sets local intent (which
+  // destinations, and their known shared metadata), exactly like a manual tick does. Because that
+  // metadata is already known, committing it does not need the drawer at all.
+  it('applies a preset as local intent, and commits it without the drawer since its metadata is already known', async () => {
     mockStatus(IDLE);
     vi.mocked(streamPresetsApi.list).mockResolvedValue([{
       id: 'preset-1', name: 'Friday night', playlistId: 'p1', templateId: 'tpl-1',
@@ -200,16 +267,19 @@ describe('Stream page', () => {
     await userEvent.selectOptions(screen.getByLabelText('Start from a preset'), 'preset-1');
     await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
 
-    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', {
-      title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'low',
-    }));
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByLabelText('My channel')).toBeChecked());
     await waitFor(() => expect(screen.getByLabelText('Playlist')).toHaveValue('p1'));
 
     await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', {
+      title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'low',
+    }));
     await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: 'tpl-1' }));
   });
 
-  it('saves the currently-selected destinations as a preset, with no broadcast metadata of its own', async () => {
+  it('saves the currently-ticked destinations as a preset, with no broadcast metadata of its own', async () => {
     mockStatus(ERRORED_WITH_LEFTOVER);
     vi.mocked(streamPresetsApi.create).mockResolvedValue({
       id: 'preset-2', name: 'Saturday', playlistId: 'p1', templateId: null, destinationIds: ['d1'],

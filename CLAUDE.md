@@ -113,12 +113,13 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
     `PUT /local-stream/destinations/{destinationId}` — and a toggle-on with an idle account parks
     at `pending` and the next `start()` reconciles it into life with no extra orchestration.
     `POST /local-stream/start` itself carries no destination list or broadcast metadata of its own
-    at all: a destination's own title/description/privacy/latency are chosen right at the moment of
-    ticking it on (see `setDesired()`'s `meta` parameter below), not once for a whole session.
+    at all: a destination's own title/description/privacy/latency are supplied by whoever actually
+    calls `setDesired(desired, meta?)` below, not once for a whole session.
   - **`setDesired(desired, meta?)`'s `meta` is this ONE destination's own broadcast title/
     description/privacy/latency — remembered on the forward instance itself, not derived from the
-    local session.** Supplied by the caller at the moment of ticking a box on (the frontend's
-    settings panel — see "Frontend" below), it is stored (`this.meta`) and reused by every future
+    local session.** Supplied by the caller at the moment of switching it on for real (the
+    frontend's commit-time settings drawer — see "Frontend" below; the checkbox click itself never
+    calls this), it is stored (`this.meta`) and reused by every future
     `prepareSession()` call this same forward makes until the caller supplies a new one — a respawn
     or an internal reconcile that omits it keeps using whatever was last chosen, rather than
     silently reverting to the bare `{title: destination.name}` fallback used when a forward has
@@ -720,36 +721,61 @@ SSE frame into the query cache; nothing polls.
 `/streams`, `/streams/:id` and `/local-stream` all redirect to it) — no list, no id in any URL and
 nothing to navigate between, because there is exactly one local stream per account. It carries the
 start form (playlist, template, preset picker — no broadcast metadata of its own any more, see
-below), the transport controls, the embedded preview, and `components/DestinationToggles.tsx`, the
-destination checklist. **The checklist is ALWAYS driven by the real backend forward statuses**,
-whether the stream is running or not — every toggle is the SAME `PUT
-/local-stream/destinations/{id}` call in every state, since a toggle is valid even while idle (it
-parks at `pending`). There is no separate local-only "what I've ticked so far" state to keep in
-sync with the backend any more — that two-natured checklist, and the frontend-side fix that once
-had to switch a leftover backend-on destination off before `start()` (since `start()`'s own
-`destinationIds` only ever ADDED intent, never removed it), are both gone with the field they were
-guarding: `start()` has no destination list to omit anything from. The checklist is rendered over
-the user's **destinations**, not over the forwards: the backend prunes forwards that want nothing
-and hold nothing, so *absence is the representation of "not forwarded"*.
+below), the transport controls, the embedded preview, `components/DestinationToggles.tsx` (the
+checklist) and `components/DestinationSettingsDrawer.tsx` (the commit-time settings step).
 
-**A destination's own broadcast settings (title/description/privacy/latency) are chosen by
-`DestinationToggles`' own settings panel, right at the moment of ticking that ONE destination on —
-never once for the whole session.** Ticking a provider with a broadcast concept (currently only
-`youtube`) opens an inline panel instead of toggling immediately; confirming it is what actually
-calls `setDestination(id, 'on', meta)`, carrying that single destination's own metadata. A provider
-with none (custom RTMP) skips the panel and toggles straight away, and turning a destination OFF
-never needs one either. This holds identically whether the stream is idle or already running — the
-same panel, the same call — and it is why two YouTube destinations forwarded from one account can
-go out under two entirely different titles or privacy levels, chosen independently.
+**The checklist is deliberately TWO-STEP, and this is the load-bearing UX decision of the whole
+rework: ticking a box only ever records LOCAL intent, never a backend call and never a request for
+settings.** `Stream.tsx` holds `intendedOnIds: Set<string> | null` — `null` means "mirrors the
+backend", and becomes a real Set the instant the user ticks anything, whether the stream is idle or
+already running. Nothing reaches `PUT /local-stream/destinations/{id}` from a checkbox click at
+all. What actually commits that intent is a separate, explicit action: pressing **"Start stream"**
+(idle) or **"Apply changes"** (running — shown only once local intent genuinely diverges from what
+is really running, via `commitDestinationChanges()`). Committing does three things in order: (1)
+every destination newly turned OFF is switched off immediately, no settings involved; (2) every
+destination newly turned ON whose metadata is already known (see presets, below) is switched on
+immediately too; (3) every destination newly turned ON that actually has a broadcast to configure
+and whose metadata ISN'T already known opens `DestinationSettingsDrawer` — a slide-out panel, one
+section per such destination, each with its own title/description/privacy/latency — and only once
+that is confirmed do their own `setDestination(id, 'on', meta)` calls fire. Only after ALL of that
+lands does `start()` itself run, for the idle case. A provider with no broadcast concept (custom
+RTMP) never reaches the drawer at all — its toggle-on commits in step (2), immediately. Dismissing
+the drawer without confirming (Escape, the ✕, an overlay click) commits nothing and leaves local
+intent exactly as it was — `Stream.tsx` throws a dedicated `CommitCancelled` marker internally so
+that path is never confused with, or reported as, a real failure.
 
-**Applying a saved preset (`api/streamPresets.ts`) ticks every one of its saved destinations on
-with that SAME preset's own saved metadata**, via the very same `setDestination()` call a manual
-toggle makes — a preset only ever holds one shared title/description/privacy/latency for all of its
-destinations together (unlike a live toggle's own per-destination panel), then separately
-pre-fills the playlist/template fields for `start()`. Saving a NEW preset, symmetrically, captures
-only the currently-on destination ids and the playlist/template — no broadcast metadata, since
-there is no single value left on this page to capture (each destination's own settings live and die
-with the toggle-on moment that chose them).
+This is why the earlier, ALWAYS-backend-driven design this replaced (checklist mirrors the backend
+in real time; ticking a box calls the backend immediately, opening an inline per-checkbox settings
+panel right there for anything needing one) didn't survive contact with actual use: it meant a
+tentative click already had a real side effect — an actual toggle-on, an actual settings prompt —
+before the user had committed to anything, including while just exploring the checklist with no
+intention to start yet. The two-step version fixes that at the cost of one extra explicit action,
+and it is also what finally closes the class of bug the very first version of this checklist had to
+patch around at the frontend layer (switching a leftover backend-on destination off before
+`start()`, because `start()`'s own now-removed `destinationIds` only ever ADDED intent and never
+removed it): there is no more "local state that can silently drift from the backend's" to guard
+against, because ALL local editing is explicit now, and committing it is the one and only thing
+that ever reconciles the two.
+
+The checklist itself is rendered over the user's **destinations**, not over the forwards (the
+backend prunes forwards that want nothing and hold nothing, so *absence is the representation of
+"not forwarded"*) — `Stream.tsx` synthesizes what `DestinationToggles` displays: a real backend
+forward's own state/phase/error survives display, with only its `desired` field overridden to
+reflect local intent; a destination the user has only ticked locally (no backend entry yet at all)
+gets a synthesized `pending` row, exactly what the backend would report for it once committed. The
+"nothing is being forwarded" notice, deliberately, reads real backend truth (`status.destinations`)
+rather than local intent — it must describe what is ACTUALLY running, not what the user is
+mid-edit on.
+
+**Applying a saved preset (`api/streamPresets.ts`) sets local intent — which destinations, plus
+their SAME shared saved metadata — exactly like a manual tick does, and touches the network no more
+than a manual tick does either.** A preset only ever holds one shared title/description/privacy/
+latency for every destination it lists together (unlike the drawer's own per-destination fields),
+so committing a preset-sourced destination skips the drawer (step 2 above, not step 3) — its
+metadata is already known. Saving a NEW preset, symmetrically, captures only the currently-intended
+destination ids and the playlist/template — no broadcast metadata of its own, since there is no
+single value left on this page to capture once each destination's settings are collected
+independently at commit time.
 
 The preview is `components/HlsPlayer.tsx` — hls.js with `withCredentials` set on every request,
 because the backend resolves *which* stream to serve from the session cookie, and a fatal error
@@ -850,10 +876,11 @@ frontend/                   React + Vite SPA
                             TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
                             AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal;
-                            DestinationToggles.tsx — the per-destination checklist with its
-                            desired/actual badges, ConfirmDialog,
-                            LanguageSwitcher, HlsPlayer.tsx — hls.js preview player with
-                            credentialed requests and a destroy-and-rebuild recovery loop)
+                            DestinationToggles.tsx — the checklist, purely local intent, no
+                            backend calls of its own; DestinationSettingsDrawer.tsx — the
+                            commit-time settings step, one section per destination that needs one;
+                            ConfirmDialog, LanguageSwitcher, HlsPlayer.tsx — hls.js preview player
+                            with credentialed requests and a destroy-and-rebuild recovery loop)
     i18n/                   react-i18next setup + en/ru/uk locale files
     hooks/                  custom React hooks (incl. useLocalStreamStatus.ts — initial fetch +
                             SSE-driven query-cache updates)
@@ -1021,12 +1048,13 @@ MediaMTX 1.21.0 (see the "Local relay" section above).
 `PUT /local-stream/destinations/{destinationId}` validates its own copy), `GET /stream-presets`,
 `GET /stream-presets/{id}`, `PUT /stream-presets/{id}` (full replace, same validation),
 `DELETE /stream-presets/{id}` — all scoped to the preset's owner. A preset is a **saved choice, not
-a running thing**: it has no side effects at all, and applying one from the frontend is just that
-same client pre-filling `POST /local-stream/start`'s playlist/template fields AND separately
-toggling each of its saved destination ids on (via that same `PUT`, carrying the preset's own saved
-metadata) — a preset holds only ONE shared title/description/privacy/latency for every destination
-it lists together, unlike a live toggle's own per-destination settings panel, which is why saving a
-*new* preset from the frontend no longer captures those fields at all (see "Frontend" above). `name`
+a running thing**: it has no side effects at all, and applying one from the frontend only sets local
+intent (which destinations, plus their one shared saved metadata) exactly like a manual checklist
+tick does — nothing reaches this API, or `POST /local-stream/start`, until the user actually commits
+(see "Frontend" above for the two-step checklist this rides on). A preset holds only ONE shared
+title/description/privacy/latency for every destination it lists together, unlike the commit-time
+settings drawer's own per-destination fields, which is why saving a *new* preset from the frontend
+no longer captures those fields at all. `name`
 is deliberately separate from `title` (`title` is the YouTube *broadcast* title; overloading one
 field would make the preset picker show broadcast titles), and **`destinationIds: []` is valid** —
 a local stream forwarded nowhere is a normal way to run, where the old `StreamSession` these rows
