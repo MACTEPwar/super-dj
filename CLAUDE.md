@@ -6,24 +6,37 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 **super-dj** — a multi-tenant YouTube streamer. A Node.js/TypeScript service, running in Docker
 on Linux, where each user uploads audio tracks, arranges them into playlists, registers one or
-more stream destinations (RTMP URL + stream key), and starts/controls an independent live stream
-per destination — all via a REST API, gated behind email/password auth. Phase A of the local-first
-rework adds a second, destination-free path alongside it: a user can start one **local** stream per
-account that encodes into a co-located MediaMTX relay and is watchable only as an authenticated HLS
-preview in the app's own UI, with no platform involved (see "Local relay (MediaMTX)" below).
+more stream destinations (RTMP URL + stream key, or an OAuth-connected YouTube channel), and runs
+**exactly one live stream per account** — all via a REST API, gated behind email/password auth.
+
+That one stream is **local-first**: it always encodes into the co-located MediaMTX relay (see
+"Local relay (MediaMTX)" below) and is always watchable as an authenticated HLS preview in the
+app's own UI, whether or not any platform is involved. On top of it sit **0..N independently
+toggleable destination forwards** — each a `-c copy` ffmpeg process pulling the already-encoded
+stream back out of the relay and pushing it at one destination, tickable on and off mid-stream
+without ever interrupting the encode, the preview, or a sibling destination. Zero destinations is
+a completely ordinary running state, not a degenerate one.
+
+**There is no longer any way to stream to a destination without a local stream.** The two older
+paths — one independent encode per destination (`/destinations/{id}/stream/*`) and a
+multi-destination fan-out over N of them (`/stream-sessions/*`) — are gone, along with
+`StreamManager`, `StreamSessionManager` and `SessionOverlayCache`. What replaced them is one
+encode that MediaMTX serves to N readers, so the encode's cost no longer grows with destination
+count at all.
 
 ## Architecture (as built)
 
-**Backend streaming pipeline.** A single persistent per-destination `PersistentEncoder` process —
+**Backend streaming pipeline.** A single persistent `PersistentEncoder` process **per account** —
 spawned once in `StreamController.start()` and never restarted for the life of the session — is
 fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` itself creates via
 `stdio: [..., 'pipe', 'pipe']`, not named FIFOs — see `ChildProcessWithPipes`/`PipeSpawner` in
-`src/ffmpeg/types.ts`), one independent encoder per destination:
+`src/ffmpeg/types.ts`). It pushes into the local MediaMTX relay and nowhere else; anything a real
+platform receives is a `-c copy` `RelayProcess` reading that relay back out (below):
 
 - **`PersistentEncoder` reads raw video (`pipe:3`) and raw PCM audio (`pipe:4`), continuously
   encodes+muxes+pushes to RTMP for the whole session.** Its codec parameters (H.264/yuv420p, fixed
   fps + GOP, AAC 44.1kHz stereo) are pinned once in `src/ffmpeg/persistentEncoderArgs.ts` — since
-  there's only one encode process per destination now, there's no `-c copy` handoff between
+  there's only one encode process, there's no `-c copy` handoff between
   differently-encoded segments to keep in sync any more, which is what actually eliminates the
   continuity-counter/PTS discontinuity the earlier FIFO + two-process pipeline hit at every track
   switch (see the "Overlay templates" Stage 2 note below for a two-FIFO split-encode-from-mux
@@ -51,27 +64,27 @@ fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` 
   stdout in — the same discipline the earlier per-segment pipeline always needed: `kill('SIGTERM')` alone doesn't
   stop a still-alive process's stdout from draining into the same pipe as the next track's, and two
   decoders piped in at once interleaves their raw PCM.
-- **`StreamManager` owns one `StreamController` per active destination** (keyed by
-  `destinationId`, in an in-memory `Map`). `StreamManager.start()` loads the playlist's track
-  snapshot (used for playback and the overlay window — deliberately *not* re-read live, so
-  editing a playlist mid-stream doesn't affect the running session) plus the destination-owning
-  user's full track list (for `play`-by-name lookup, via the `LibraryLike` adapter in
-  `streamController.ts`), decrypts the destination's stream key, and wires a fresh
-  `StreamController`.
-- **`LocalStreamManager` owns one `StreamController` per *user account*** (keyed by `userId`, in an
-  in-memory `Map`) — the local-first path added by Phase A of the local-first-streaming rework. It
-  has no destination concept at all: `LocalRelayTarget` mints a fresh MediaMTX path + publish/read
-  credentials on every start, and the encoder pushes into the co-located MediaMTX relay (see "Local
-  relay (MediaMTX)" below) instead of a platform's ingest endpoint, where the only consumer is the
-  authenticated HLS preview proxy. Both managers share one scene resolver, **`buildStreamScene()`**
+- **`LocalStreamManager` owns one `StreamController` *and* one `Map<destinationId,
+  DestinationForward>` per user account** (both keyed by `userId`, both in-memory). It is the single
+  replacement for the two managers this rework deleted — the destinationId-keyed `StreamManager` and
+  the fan-out `StreamSessionManager` — and it is smaller than either was, because **there is nothing
+  to fan out any more**: `LocalRelayTarget` mints a fresh MediaMTX path + publish/read credentials on
+  every start, the one encoder pushes into the co-located MediaMTX relay, and every destination is
+  just another reader of that same path. A 3-destination session used to mean three independent
+  libx264 720p30 encodes; it is now **one**, plus three `-c copy` relays (measured against real
+  binaries at ~1.4% CPU / ~16 MiB RSS each versus the encode's ~68% / ~84 MiB — roughly 1/47th; see
+  `RelayProcess` below). The encode's cost does not grow with destination count at all.
+  `start()` resolves scene and destinations through **`buildStreamScene()`**
   (`src/stream/streamScene.ts`) — playlist/template/track resolution and their ownership checks, gif
   probing, canvas placement, the `buildOverlay` closure and the `CanvasFeeder`/`AudioRelay`/
   `PersistentEncoder`/`PulseVisualizer` factories, i.e. everything a stream needs that has no
-  destination in it — extracted out of `StreamManager.start()` (behaviour-preservingly) so the two
-  paths can never drift on fonts, dimensions, repositories or ownership rules. Its
-  `createPersistentEncoder(target: RtmpTarget)` takes the one thing it deliberately doesn't know:
-  where to push. Two host-level ceilings exist because a local stream costs a full libx264 720p30
-  `ultrafast` encode while having *no* destination and possibly no viewer at all:
+  destination in it; its `createPersistentEncoder(target: RtmpTarget)` takes the one thing it
+  deliberately doesn't know: where to push. The playlist's track snapshot is read once at start
+  (deliberately *not* re-read live, so editing a playlist mid-stream doesn't affect the running
+  session), alongside the user's full track list for `play`-by-name lookup (the `LibraryLike`
+  adapter in `streamController.ts`).
+  Two host-level ceilings exist, unchanged from Phase A, because a local stream costs a full
+  libx264 720p30 `ultrafast` encode while possibly having no destination and no viewer at all:
   `MAX_CONCURRENT_LOCAL_STREAMS` (default 10, sized against exactly that encode — an 11th `start()`
   gets a 429; the count is checked *and* a slot reserved synchronously before any `await`, or N
   concurrent starts from N different users would all observe the pre-increment size and all pass)
@@ -79,9 +92,107 @@ fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` 
   idle/viewer-count timeout instead of the duration cap: MediaMTX's control API is the only
   viewer-count signal there is, and Layer 0 below disables it on purpose — enabling it to save some
   CPU would trade the security boundary for an optimisation.
-  **`/destinations/{id}/stream/*` and `/stream-sessions/*` are unchanged by all of this, and remain
-  the only way to reach a real platform (YouTube/Twitch) until Phase B** adds toggleable
-  per-destination forwards pulled back out of the relay.
+  Two states live at *this* layer rather than in `StreamController`: **`'starting'`** (a start is in
+  flight — promoted out of what used to be a private `Set`, because a destination toggle can now
+  arrive mid-start and the UI must not read `idle` then), and **`previewReady`** (true exactly while
+  the encoder is publishing into MediaMTX, i.e. `streaming` or `paused` — pausing swaps the audio to
+  silence and never interrupts the publish).
+- **`DestinationForward` (`src/stream/destinationForward.ts`) is one destination's forward for one
+  user: policy and lifecycle only, zero knowledge of child processes beyond an injected
+  `createRelay` factory.** It holds a `desired` (`on`/`off`, set directly and idempotently by the
+  checkbox) and an `actual` (`off` → `pending` → `preparing` → `connecting` → `live`, plus
+  `stopping` and `error`), and drives one toward the other through **exactly one `reconcile()`
+  loop, re-entered on every relevant event** rather than N special-cased handlers — because every
+  edge case (double-toggle, toggle-during-prepare, toggle-during-finalize, toggle-before-start,
+  source loss, relay crash) is the same root cause: an async transition in flight when intent
+  changed. A `reconcile()` arriving while a pass is running just asks the loop to go round again.
+  The load-bearing details:
+  - **`pending` is "wanted, nothing published yet, zero external side effects."** No
+    `prepareSession()`, no YouTube broadcast, nothing. That is what makes "tick a box while nothing
+    is running" and "tick a box mid-stream" the *same* code path: a toggle-on with an idle account
+    parks at `pending` and the next `start()` reconciles it into life with no extra orchestration
+    (which is also why `POST /local-stream/start`'s `destinationIds` is implemented as "set the
+    intents, then run one reconcile", not as a second start-time path).
+  - **HARD INVARIANT: a prepared session is registered before desired-state is re-checked.**
+    `pass()` assigns `this.session = session` the instant `prepareSession()` resolves, *before* any
+    re-read of `desired`. A `desired -> off` that arrived while that call was in flight must find a
+    lifecycle to finalize; dropping it there orphans a live YouTube broadcast with nothing left in
+    the process that could ever end it. The next pass does the finalizing.
+  - **Hold, don't finalize, while the local stream is `reconnecting`.** `sourceUrl()` deliberately
+    stays non-null through `reconnecting` (it returns null only for `idle`/`error`, i.e. the session
+    is genuinely over), while `isSourcePublishing()` goes false — so a source outage parks the
+    forward without finalizing its broadcast and without spending its own retry budget. MediaMTX
+    drops every reader within ~1 s of the publisher disconnecting (measured: the publisher's
+    `closed: EOF` and the relay's `closed: terminated` land in the same second, and the relay
+    process is gone 0.242 s later), so the relay is already dead either way. Eating a few seconds of
+    ingest gap beats burning a YouTube broadcast, its quota, and every viewer's link over an encoder
+    hiccup. `ForwardErrorReason` declares a `'source'` value for completeness but nothing sets it,
+    by construction — don't add a path that does without first re-deciding this rule.
+  - **`error` is sticky, with a reason: `auth` | `provider` | `relay` | `source`.** It is set when
+    `prepareSession()` rejects (classified via the provider's own `isAuthError?()`, which is why
+    `DestinationForward` stays free of any YouTube-specific knowledge), when the provider's
+    lifecycle reaches a terminal phase (`error`/`complete` — checked *ahead* of the hold and relay
+    branches, so a terminal phase arriving while a respawn is merely scheduled can't let that timer
+    fire into a broadcast the provider already ended), or when the relay's reconnect budget runs
+    out. Only two things clear it: the user toggling off and on again, or the local session
+    disappearing entirely (so a brand-new session never inherits a stale failure).
+  - **A forward can never touch the encode or a sibling.** That is the invariant the class exists to
+    protect, and it is what a real-API smoke test confirmed end to end: a deliberately broken custom
+    destination (`rtmp://127.0.0.1:1/nope`) reached `state: "error"`, `reason: "relay"` within
+    10-20 s while the YouTube forward next to it stayed `live` and `local.state` stayed `streaming`
+    for the whole ~3-minute observation window.
+- **`RelayProcess` (`src/ffmpeg/relayProcess.ts`) is one forward's ffmpeg:**
+  `-hide_banner -nostdin -i <MediaMTX read URL> -c copy -avoid_negative_ts make_zero -f flv
+  <destination URL>` (`buildRelayProcessArgs`, `relayProcessArgs.ts`). Structurally identical to
+  `PersistentEncoder` on purpose, **including the same `stopRequested` guard** — a deliberate kill
+  (toggling off, stopping the stream) must never look like a dropped destination and trigger a
+  respawn or a broadcast finalize. It takes a plain `Spawner`, not a `PipeSpawner`: a relay owns its
+  stdio end to end and shares no pipe, so the `unpipe()`-before-`kill()` discipline the audio leg
+  needs does not apply. **It never transcodes**, and must never be given a codec, scaler, bitrate or
+  filter option — MediaMTX serves one publisher to N readers, and per-destination transcoding would
+  destroy that entire CPU-sharing premise. Also deliberately absent:
+  `-reconnect`/`-reconnect_streamed`/`-reconnect_delay_max`, which apply to HTTP(S) inputs only and
+  are ignored on an RTMP input — **input-side recovery is a Node-level respawn owned by
+  `DestinationForward`**, on its own faster schedule (0.5/1/2/5/10 s, then 10 s forever, against the
+  encoder's 2/5/10/20/30 s; `createForwardReconnectPolicy` in `reconnectPolicy.ts` shares every
+  other budget rule with the encoder's policy).
+  **Measured against real binaries** (a real Debian-bookworm `ffmpeg 5.1.9` from this repo's own
+  image, reading a real `bluenviron/mediamtx:1.21.0`, on an isolated docker network — the same
+  standard as the MediaMTX findings below):
+  - **The output timeline starts at 0 even for a relay joining a session already hours in.**
+    MediaMTX hands a new reader the source's timeline *verbatim* — an input baseline probe on a
+    121.3 s-old session read `dts_time=121.230000`, and a relay attaching 263 s in logged
+    `Duration: N/A, start: 263.801000` — yet ffprobe of the exact bytes that relay produced shows
+    `format|start_time=0.000000` and a first `dts_time=0.000000`. `-fflags +genpts` is not needed
+    and was not added. **Nuance worth keeping straight: a control run with `-avoid_negative_ts
+    make_zero` REMOVED produced 0.000000 too** — ffmpeg's default (`auto`) already re-bases for the
+    flv muxer under `-c copy`, so the flag is explicitness/portability insurance for ingest servers
+    that might not tolerate the default, not the mechanism that produces the zero.
+  - **A late-joining reader is handed a keyframe first, every time.** Three fresh readers ~8 s apart
+    (so at different phases of the 2 s GOP) each began at `flags=K_` on exactly a GOP boundary —
+    `pts_time` 186.023, 194.023, 202.023 — with the following five packets non-key. MediaMTX serves
+    from the most recent IDR, not from the live write head, so **the design's "the relay may need to
+    buffer to the first keyframe itself" contingency is closed, not deferred**, and a toggle-on does
+    not show garbage at the destination.
+  - **The relay dies 0.242 s after its publisher goes away — but exits 0, not non-zero.** Its stderr
+    ends `rtmp://…: Input/output error` plus the flv muxer's `Failed to update header` lines, and
+    ffmpeg treats a demuxer-side EOF as a successful end of stream. `handleRelayExit()` correctly
+    **does not branch on the exit code at all** (it holds if the source isn't publishing, otherwise
+    goes to `evaluateRetry`; `exitCode` is interpolated only into the give-up message) — *do not*
+    "optimise" it by treating exit 0 as a clean intentional stop, which would silently disable
+    source-loss recovery, and which no fake-based unit test could catch because the fakes choose
+    their own exit codes.
+  - **A MediaMTX bounce kills both layers, and neither ffmpeg reconnects on its own.** `docker
+    restart` on the relay container took the publisher (exit 1, `Conversion failed!` — an *encoding*
+    process whose output write failed) and the forward relay (exit 0, the same demuxer EOF as above)
+    down at ~0.4 s, both within the same poll interval. That is exactly why both Node-level respawn
+    layers are load-bearing: the local stream recovers first via `StreamController`'s reconnect, and
+    forwards then reconnect against it, holding while it is `reconnecting`. MediaMTX came back with
+    the same two listeners and re-authenticated a fresh publisher against the callback with **no
+    config reload**.
+  - **Acceptance:** a real RTMP ingest server takes `buildRelayProcessArgs`' argv unchanged
+    (`stream is available and online, 2 tracks (H264, MPEG-4 Audio)`), 1280x720@30 H.264 + 44.1 kHz
+    AAC passed through bit for bit, relay stderr free of fatal lines.
 - **Auto-advance.** `StreamController` listens for `AudioRelay`'s current decode child's `close`
   (fired once the track file naturally ends) and advances the queue. A `sessionGeneration` counter
   (renamed from the FIFO-era `segmentGeneration` — there's no more per-segment process for
@@ -100,55 +211,111 @@ fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` 
   for the template's `timer` element (ticking elapsed/total) layered on top — see "Overlay
   templates" below for the full rework this landed as part of, including Stage 2 (below), which is
   what actually produces this "one persistent encoder" shape.
-- **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`; an unexpected encoder exit sets
-  `error`, from which `start()` recovers — it tears down the errored controller's still-alive
-  collaborators (`CanvasFeeder`'s heartbeat, `AudioRelay`'s decode process) via `stop()` before
-  wiring a fresh one (`StreamManager.start()`; skipped for an already-`idle` controller, which has
-  nothing left to tear down).
+- **Session states:** `idle` → `streaming` ⇄ `paused` → `idle`, with `reconnecting` while a respawn
+  is pending; an unexpected encoder exit that reconnect gives up on sets `error`, from which
+  `start()` recovers — it tears down the errored controller's still-alive collaborators
+  (`CanvasFeeder`'s heartbeat, `AudioRelay`'s decode process) via `stop()` before wiring a fresh one
+  (`LocalStreamManager.start()`; skipped for an already-`idle` controller, which has nothing left to
+  tear down). `'starting'` is a status-layer state `LocalStreamManager` adds on top; `StreamController`
+  itself never produces it.
 - **Stream keys at rest.** `StreamDestination.streamKeyEncrypted` is AES-256-GCM-encrypted
   (`src/crypto/streamKeyCipher.ts`) with `STREAM_KEY_ENCRYPTION_KEY`; the plaintext key is never
   echoed back by the API (`toPublicDestination` omits it) and is only decrypted in-memory when a
   stream starts.
 - **`StreamDestinationProvider` / `OAuthProviderAdapter` split.** How a destination is *connected*
   (OAuth2 authorization code flow, provider-generic via `OAuthProviderAdapter` — currently just
-  `YoutubeOAuthAdapter`) is a separate concern from how a *stream session* is prepared for it
+  `YoutubeOAuthAdapter`) is a separate concern from how a *broadcast* is prepared for it
   (`StreamDestinationProvider` — `CustomRtmpProvider` for a manually-entered RTMP URL/key,
-  `YoutubeProvider` for an OAuth-connected YouTube channel). `StreamManager` picks a
-  `StreamDestinationProvider` by `destination.provider` and calls `prepareSession()`, which for
-  YouTube creates an ephemeral `liveBroadcast` + `liveStream` *per streaming session* (not
-  persisted — created fresh on `start()`, transitioned to `live` once the encoder's RTMP push is
-  healthy, and torn down/deleted on `stop()` or an unexpected encoder exit) and returns the RTMP
-  ingest URL/key StreamManager needs, plus a `DestinationLifecycle` handle for that polling/
-  teardown. `OAuthConnection` (refresh token, external account id/name) is itself
-  provider-generic — keyed by `destinationId` and a `provider` string — so a future OAuth-based
-  provider doesn't need its own connection table.
-- **Ownership checks.** Every track/playlist/destination/stream route verifies the resource
-  belongs to the authenticated user: 404 if the resource doesn't exist, 403 if it exists but
-  belongs to someone else. `StreamManager.start()` additionally checks the *playlist* belongs
-  to the destination's owner. Ids referenced from a request **body** into the caller's own
-  resource (`PUT /playlists/{id}/tracks`'s `trackIds`) are instead validated against the
-  caller's own tracks and rejected with 400 — not 403/404 — so playlist membership can't leak
-  which ids exist for other users.
+  `YoutubeProvider` for an OAuth-connected YouTube channel). **`prepareSession()` is now called by a
+  `DestinationForward` on toggle-on**, not by any stream-start path: the local encode has no
+  destination in it, so nothing else in the app has a reason to ask a provider for anything. It
+  returns the RTMP ingest URL/key the forward's `RelayProcess` pushes at, plus an optional
+  `DestinationLifecycle` handle (a custom RTMP destination has none — it has no broadcast concept at
+  all). `OAuthConnection` (refresh token, external account id/name) is itself provider-generic —
+  keyed by `destinationId` and a `provider` string — so a future OAuth-based provider doesn't need
+  its own connection table.
 
-- **Multi-destination stream sessions.** `StreamSession` (+ join table `StreamSessionDestination`)
-  groups a playlist with several destinations — e.g. a YouTube channel and a custom-RTMP Twitch
-  entry — so the frontend can start/pause/next/previous/stop all of them with one call.
-  `StreamSessionManager` is a thin fan-out orchestrator on top of `StreamManager`; it does not
-  touch `StreamController`/ffmpeg at all — every destination in a session keeps its own
-  independent pipeline exactly as a single-destination stream does, so one destination failing
-  (e.g. a YouTube API hiccup) never blocks the others from going live. Only the *definition*
-  (which destinations + which playlist) is persisted; live status is always derived at read time
-  from each destination's own in-memory `StreamController`, same as `StreamManager.status()` for
-  a lone destination — a session row never claims to be "live" on its own. Twitch has no
-  dedicated `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just
-  a `custom` destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key,
-  which already works through the existing `CustomRtmpProvider` path.
+  **For YouTube, only the `liveBroadcast` is ephemeral now; the `liveStream` is persisted and
+  reused.** `StreamDestination.youtubeLiveStreamId` remembers the destination's ingest endpoint
+  across every toggle: `prepareSession()` verifies a persisted id with `getStream` (YouTube reports
+  a stream the user deleted in Studio as an *empty result*, not an error, so this is a verify-then-
+  fall-back, never a blind reuse), creates and re-persists a fresh one only when that comes back
+  empty, then creates the per-toggle broadcast and binds it. **`finalize()` transitions the
+  broadcast to `complete` and deliberately does NOT delete the stream** — which is what closes the
+  old "the ephemeral `liveStream` is orphaned because `finalize()`'s own token refresh failed"
+  failure class outright, rather than narrowing it. It is also why `DestinationForward
+  .setDestination()` exists and why `LocalStreamManager` re-applies a freshly-read row on *every*
+  `getOrCreateForward()` and once more from `start()` (`refreshForwardRows`): `prepareSession()`
+  persists that id to the **database**, not back onto whatever row object the caller passed in, so a
+  long-lived forward reading its construction-time copy would keep seeing `null` and leak a brand-new
+  liveStream on every single toggle.
+  **`watchUrl()` returns the channel's stable `/live` link for a PUBLIC broadcast** —
+  `https://www.youtube.com/channel/{externalAccountId}/live`, one link that survives every toggle,
+  where a per-broadcast `watch?v=` URL dies the moment the destination is toggled off and nobody
+  following the old link migrates. For anything *but* public it falls back to
+  `https://www.youtube.com/watch?v={broadcast.id}`, because YouTube's channel `/live` page only ever
+  resolves a public broadcast — using the stable link for an unlisted/private one would 404 for the
+  owner's own viewers. Both behaviours were confirmed against a real channel: a public toggle-on
+  returned `.../channel/UC46DVVfzwsCsRLBrZbsiH6Q/live`, and two private toggle-ons of the same
+  destination returned two different `watch?v=` URLs (`8pqXEKOnZRM`, then `Hb35d8fAwNk`) while the DB's
+  `youtubeLiveStreamId` stayed **byte-identical** (`46DVVfzwsCsRLBrZbsiH6Q1789396296003933`) across
+  the whole off→on cycle, with `local.state` never leaving `streaming`.
+  **Measured Data API quota cost: ~7 units per full prepare→live→finalize cycle** — the Google Cloud
+  Console reported **29 of 10,000 units for a whole day** covering roughly four full cycles (plus an
+  auth-failure attempt and a delete-while-live finalize). That is **40-50x cheaper than the design
+  spec's ~330 units/cycle estimate**, which had made a per-user toggle rate limit look urgent: the
+  default quota supports on the order of **1,000+ toggle cycles/day for the entire app**, not the
+  ~30 the estimate implied. Size any future rate limit off the measured number, not the estimate.
+  **Timing, measured end to end:** toggle-on → `preparing` immediately (in the toggle response
+  itself), `connecting`/`provider.phase: waitingForYoutube` a few seconds later, `live` at
+  **~13-18 s** overall (connecting→live 5-15 s at 5 s poll granularity), within the design's 10-40 s
+  estimate and at the fast end of it. `stop()` genuinely **waits** for each forward's provider-side
+  finalize before its HTTP response returns — measured at **1.11 s**, with `destinations: []` and
+  `local.state: "idle"` already in that same response, not fire-and-forget.
+- **Ownership checks.** Every track/playlist/destination/template/preset route verifies the
+  resource belongs to the authenticated user: 404 if the resource doesn't exist, 403 if it exists
+  but belongs to someone else. The local-stream routes mostly have **no id to check** (one stream
+  per account, resolved from the session cookie); the two places an id does arrive —
+  `PUT /local-stream/destinations/{destinationId}` and `POST /local-stream/start`'s
+  `destinationIds[]` — go through `LocalStreamManager.requireOwnedDestination()`, which 404s/403s
+  the same way, **before any side effect**: a bad or foreign id must not mint a relay token,
+  register MediaMTX credentials or build a scene. Ids referenced from a request **body** into the
+  caller's own resource (`PUT /playlists/{id}/tracks`'s `trackIds`) are instead validated against
+  the caller's own tracks and rejected with 400 — not 403/404 — so playlist membership can't leak
+  which ids exist for other users. (A preset's body ids are the exception that proves the rule: a
+  preset is a private object of the caller's with no membership to leak, so they answer 404/403.)
 
-**Local relay (MediaMTX).** The local-first path publishes into a `bluenviron/mediamtx:1.21.0`
+- **Saved presets, not sessions.** The `StreamSession` (+ `StreamSessionDestination`) tables
+  survive, **repurposed**: they no longer represent "the running thing" — the running thing is the
+  one in-memory local stream per account — but a named, saved **preset** (playlist + template +
+  destination checklist + broadcast metadata) to pre-populate the next start with. Read through
+  `StreamPresetRepository`/`createStreamPresetRouter` at `/stream-presets`. The model/table names
+  were deliberately left alone so the repurposing costs no rename and no data migration; only the
+  TypeScript layer is named `StreamPreset*`. A preset has zero side effects — routes plus repository
+  with no manager in between, exactly like playlists/destinations/templates — and **zero
+  destinations is a valid preset**, where the old `StreamSession` required a non-empty list because
+  fanning out to destinations was its only reason to exist. Twitch still has no dedicated
+  `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just a `custom`
+  destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key, which works
+  through the existing `CustomRtmpProvider` path and is forwarded exactly like any other.
+
+**Local relay (MediaMTX).** Every stream publishes into a `bluenviron/mediamtx:1.21.0`
 container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in
 `docker-compose.yml` with a 512m memory limit and `restart: unless-stopped`). The image is pinned to
 an exact version, never `:latest` — every behaviour below was read out of that version's source
-tree, and this one container is shared by every tenant. Three layers make it safe:
+tree, and this one container is shared by every tenant.
+
+Since the unified rework the relay has **two classes of reader**, not one: the authenticated HLS
+preview proxy (`/local-stream/preview/*`, using the read secret as a Basic `Authorization` header),
+and **one RTMP reader per enabled destination forward** (`RelayProcess`, using the `sub` credential
+in the query string). Both present the same per-session read credential `LocalRelayTarget` has been
+minting since Phase A — the `sub` half was built then and simply had no consumer yet, so nothing
+about the credential model changed to add forwards. Publishing is still exactly one process, the
+local `PersistentEncoder`. **Layer 0's no-published-ports rule is unchanged and still enforced by
+`test/infra/mediamtxConfig.test.ts`**: forwards read the relay from *inside* the compose network,
+so adding them needed no new exposure whatsoever.
+
+Three layers make it safe:
 
 - **Layer 0 — the network.** The service has **no `ports:` entry at all**, and must never get one:
   it is reachable only as `mediamtx` on the compose network, so nothing outside the host can speak
@@ -157,8 +324,11 @@ tree, and this one container is shared by every tenant. Three layers make it saf
   list is a denylist, not an inventory**: Task 12's smoke run caught v1.21.0 also starting `[MoQ] …
   listeners on :8892 (TCP/HTTP2), :8892 (UDP/HTTP3), :8893 (UDP/QUIC)` — `moq` defaults to enabled
   and the config didn't name it (it even self-generates a TLS key at startup to do it). `moq: false`
-  is now in `docker/mediamtx.yml` and asserted by the invariant test (re-verified against a real
-  1.21.0: the MoQ listener line is gone from its startup log), but the underlying lesson stands —
+  is now in `docker/mediamtx.yml` and asserted by the invariant test. Re-audited since, against a
+  real 1.21.0 booted from this repo's committed config verbatim, on both an initial start and a
+  post-`docker restart` one: the startup log is **only** `[RTMP] started with listener on :1935
+  (TCP/RTMP)` and `[HLS] started with listener on :8888 (TCP/HTTP)` — no MoQ, API, metrics, pprof,
+  RTSP, WebRTC or SRT line. The underlying lesson still stands, though —
   a version bump can silently outrun this list again, so re-read MediaMTX's own `started with
   listener on …` lines whenever the pinned version changes. This layer's port rule is the
   actual trust boundary; everything else is defense in depth. Because it is one careless line away
@@ -412,9 +582,9 @@ lands:
   `buildPlaylistWindowLines` are all that's left there). Still one ffmpeg process per segment,
   architecture otherwise untouched. Notable decisions from this stage, since they're easy to
   second-guess without the context:
-  - **`templateId` is optional, not required**, on both `.../stream/start` and
-    `POST /stream-sessions` — deliberately, so a stream can go out with no template configured at
-    all rather than 400ing. At the time this stage landed, no visual editor existed yet (Stage 3,
+  - **`templateId` is optional, not required** (today on `POST /local-stream/start` and
+    `POST /stream-presets`; at the time, on the two now-deleted start routes) — deliberately, so a
+    stream can go out with no template configured at all rather than 400ing. At the time this stage landed, no visual editor existed yet (Stage 3,
     now done — see below) and a template could only be authored via a direct API call; the
     optionality itself remains the right default now that the editor exists too. Omitting it uses
     `DEFAULT_TEMPLATE_ELEMENTS` (`src/templates/templateTypes.ts`), a built-in layout that
@@ -428,7 +598,7 @@ lands:
     (`src/render/renderOverlay.ts`) is the one shared entry point both `/templates/{id}/preview`
     and the live pipeline call — but each owns a **different failure policy**: preview lets a
     render error propagate as a real 500 (someone testing a template needs to see it broke);
-    `StreamManager.buildOverlay` catches it and falls back to `BLANK_OVERLAY_PNG`
+    `buildStreamScene`'s `buildOverlay` closure catches it and falls back to `BLANK_OVERLAY_PNG`
     (`src/render/blankOverlay.ts` — a hand-built-via-`zlib` transparent 1×1 PNG, deliberately
     *not* generated through Satori/resvg, so the fallback still works even if that pipeline
     itself is what's broken) — keeping the RTMP connection up matters more than one segment's
@@ -446,25 +616,28 @@ lands:
     `image/png` content-type; (2) `fontData` on the way *into* `renderWorker.ts` — Satori's font
     parsing doesn't throw on a plain `Uint8Array`, it just silently produces missing-glyph boxes
     for anything outside ASCII, which only showed up when previewing real Cyrillic text.
-  - **The overlay PNG is written to a fixed per-destination path before every render**, superseded
+  - **The overlay PNG is written to a fixed per-scene path before every render** (`sceneId`, which
+    the unified model makes simply the `userId` — one pipeline per account), superseded
     at Stage 2 (below) into `CanvasFeeder.render()` — including a pause, which still calls
     `render()` (to update the frozen timer text) but composites the *same* overlay PNG, since
     pausing only changes the audio, never the picture. The file is cleaned up in `close()` (full
     teardown), not on every render.
-  - **`SessionOverlayCache`** (`src/stream/sessionOverlayCache.ts`) lets destinations in the same
-    `StreamSession` that are showing the identical `(track, template)` share one render instead of
-    each paying for their own — keyed so a destination that's drifted onto a different track
-    (the session fan-out is best-effort per destination, not atomic) always renders its own,
-    correct picture rather than inheriting another destination's. Only successful renders are
-    cached, and concurrent callers for the same not-yet-resolved key share the in-flight promise.
+  - **`SessionOverlayCache` existed here and is now deleted.** It let several destinations in one
+    `StreamSession` that were showing the identical `(track, template)` share one Satori render
+    instead of each paying for its own. The local-first rework removed the thing it optimised: there
+    is one encode per account now, so there is exactly one render of a given frame to begin with and
+    nothing to share it with. `buildStreamScene`'s `overlayCache`/`sessionId` parameters went with
+    it, replaced by the single `sceneId` above.
   - **`StreamSession.templateId`** is a nullable FK, persisted like `playlistId` (migration
-    `add_stream_session_template_id`), so a session remembers its template choice across restarts.
+    `add_stream_session_template_id`). That row is now a saved **preset** rather than a running
+    session (see "Saved presets, not sessions" above), so what it remembers across restarts is the
+    user's template *choice* for the next start.
 - **Stage 1b (done, later superseded by Stage 2's timer mechanism — see below):** a `timer`
   overlay element — position/font/color configurable like `title`/`playlist` (no `width`, unlike
   them — drawtext sizes itself to its own text) — restoring the elapsed/total counter Stage 1a
   dropped. Unlike the other element types it isn't baked into the PNG (it needs to tick every
   second, and re-rendering through Satori/resvg once a second per stream would be wasteful):
-  `StreamManager.buildOverlay` splits a `timer` element out of what gets rendered before calling
+  `buildStreamScene` splits a `timer` element out of what gets rendered before calling
   `renderTemplatePng()`. At this stage the ticking value was a *live* ffmpeg drawtext pts
   expression (`%{pts\:hms\:OFFSET}` — both colons need escaping, not just the one between `pts`
   and `hms`, found by running the generated filter string through a real local `ffmpeg` process
@@ -476,7 +649,8 @@ lands:
   bookkeeping this stage introduced, just fed through `CanvasFeeder.render()`'s one-shot re-render
   once a second instead of a live expression.
 - **Stage 2 (done):** replaced the per-segment ffmpeg pipeline with one persistent `PersistentEncoder`
-  process per destination, spawned once in `StreamController.start()` and never restarted for the
+  process per stream (per destination at the time; per account since the local-first rework),
+  spawned once in `StreamController.start()` and never restarted for the
   life of the session, fed by two Node-owned pipes (`CanvasFeeder` for video, `AudioRelay` for
   audio — see "Backend streaming pipeline" above for the full mechanism). This is what actually
   eliminates the continuity-counter/PTS discontinuity at every switch, not just papers over it.
@@ -498,7 +672,7 @@ lands:
   composited as a whole — but the template's element ORDER says which elements belong behind a gif
   and which in front of it. The canvas used to be pinned on top of every gif, so a full-frame
   opaque element listed *before* a gif (a static image, a cover, or a per-track
-  `overlayOverride.backgroundColor`) hid that gif completely. `StreamManager` now splits the baked
+  `overlayOverride.backgroundColor`) hid that gif completely. `buildStreamScene` now splits the baked
   elements at the first gif element's index and picks a placement: `top` (no gifs — the original
   single-layer graph, byte for byte), `bottom` (one canvas, composited under the gifs), or `split`
   (two canvases — `pipe:3` below the gifs, `pipe:6` above them, one extra Satori render per frame
@@ -516,25 +690,39 @@ lands:
   element's outermost pixels. The engine's own output ceiling (`MAX_VALUE`) is enforced *after*
   the `globalPulse` multiplication (`pulseEngine.ts`), so no template setting can push a value
   past what the inset was sized for — measured across the whole configurable range.
-- **Stage 4 (done):** `StartStreamDrawer` (`frontend/src/components/StartStreamDrawer.tsx`) has a
-  template picker wired to the real `POST /stream-sessions`/`.../stream/start` calls, passing the
-  selected `templateId` through — the sample scene data Stage 0's preview endpoint uses is still
-  only for the editor's own live preview, not the real stream start flow.
+- **Stage 4 (done):** a template picker on the real start flow, passing the selected `templateId`
+  through — the sample scene data Stage 0's preview endpoint uses is still only for the editor's own
+  live preview, not the real stream start flow. It landed in `StartStreamDrawer.tsx` against the two
+  now-deleted start routes; the unified rework moved it onto the start form in
+  `frontend/src/pages/Stream.tsx`, calling `POST /local-stream/start`, and deleted the drawer.
 
 **Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
-the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
-(`StreamManager` emits `statusChanged` events) are delivered to the client via Server-Sent Events
-(`GET /destinations/{destinationId}/stream/events`, `GET /stream-sessions/{id}/events` for a
-multi-destination session, or `GET /local-stream/events` for the local-first path), eliminating
-polling overhead. The local-first page (`pages/LocalStream.tsx`, routed at `/local-stream` and
-linked from the sidebar) embeds the preview itself via `components/HlsPlayer.tsx` — hls.js with
-`withCredentials` set on every request, because the backend resolves *which* stream to serve from
-the session cookie, and a fatal error there destroys and rebuilds the whole `Hls` instance rather
-than calling `startLoad()` (the only recovery that re-fetches `index.m3u8`, which is what makes
-MediaMTX mint a fresh HLS session — see "Local relay (MediaMTX)" item 3). Every add/edit form (track upload,
-playlist creation, destination connection, starting a stream) opens in a shared `Drawer`
-component (a slide-out panel built on the same Radix `Dialog` primitive) rather than being inlined
-on the page.
+the same backend API over CORS with credentialed cross-origin requests. Live status updates
+(`LocalStreamManager` emits one `statusChanged` event per userId) are delivered to the client via
+Server-Sent Events — **one endpoint, `GET /local-stream/events`**, carrying the whole combined
+`{local, destinations[]}` payload, so the destination toggles and the transport controls can never
+disagree about what is running. `useLocalStreamStatus.ts` does the initial fetch and writes every
+SSE frame into the query cache; nothing polls.
+
+**There is one stream page** (`pages/Stream.tsx`, routed at `/stream`, linked from the sidebar;
+`/streams`, `/streams/:id` and `/local-stream` all redirect to it) — no list, no id in any URL and
+nothing to navigate between, because there is exactly one local stream per account. It carries the
+start form (playlist, template, preset, broadcast metadata), the transport controls, the embedded
+preview, and `components/DestinationToggles.tsx`, the destination checklist. That checklist is
+deliberately **two-natured**: while nothing is running it is local form state (ticking a box then
+has no backend meaning yet and must not cost a round-trip — those ids go out as
+`POST /local-stream/start`'s `destinationIds`), and once something is running the same UI is driven
+by the real forward statuses and each click is a `PUT /local-stream/destinations/{id}`. The
+checklist is rendered over the user's **destinations**, not over the forwards: the backend prunes
+forwards that want nothing and hold nothing, so *absence is the representation of "not forwarded"*.
+
+The preview is `components/HlsPlayer.tsx` — hls.js with `withCredentials` set on every request,
+because the backend resolves *which* stream to serve from the session cookie, and a fatal error
+there destroys and rebuilds the whole `Hls` instance rather than calling `startLoad()` (the only
+recovery that re-fetches `index.m3u8`, which is what makes MediaMTX mint a fresh HLS session — see
+"Local relay (MediaMTX)" item 3). Every add/edit form (track upload, playlist creation, destination
+connection) opens in a shared `Drawer` component (a slide-out panel built on the same Radix `Dialog`
+primitive) rather than being inlined on the page.
 
 ## Layout
 
@@ -562,29 +750,32 @@ src/
                             (interface + DestinationLifecyclePhase), customRtmpProvider.ts /
                             youtubeProvider.ts (StreamDestinationProvider impls)
   crypto/streamKeyCipher.ts AES-256-GCM encrypt/decrypt for stream keys at rest
-  stream/                   streamManager.ts (per-destination StreamController registry),
+  stream/                   localStreamManager.ts (the one manager: per-userId StreamController +
+                            per-userId Map<destinationId, DestinationForward>; concurrency/duration
+                            caps, auth-registry lifecycle, 'starting'/previewReady),
                             streamController.ts (session state machine; LibraryLike adapter),
-                            streamRoutes.ts (mounted at /destinations/:destinationId/stream),
-                            streamSessionRepository.ts (Prisma), streamSessionManager.ts
-                            (fan-out orchestration over StreamManager), streamSessionRoutes.ts
-                            (mounted at /stream-sessions), sessionOverlayCache.ts (shared-render
-                            cache for same-session destinations), reconnectPolicy.ts (backoff +
-                            crash-loop threshold for a dropped encoder), types.ts,
+                            destinationForward.ts (one destination's desired/actual state and its
+                            single reconcile() loop), reconnectPolicy.ts (backoff + crash-loop
+                            threshold, shared by the encoder and — on a faster schedule via
+                            createForwardReconnectPolicy — a forward's relay), types.ts,
                             streamScene.ts (buildStreamScene() — the destination-free scene
-                            resolver both managers share), localRelayTarget.ts (mints one local
+                            resolver), localRelayTarget.ts (mints one local
                             stream's MediaMTX path token, publish/read credentials and every URL
                             derived from them), mediaMtxAuth.ts (MediaMtxAuthRegistry in-memory
                             allow/deny map + the unpublished Express app MediaMTX POSTs to),
-                            localStreamManager.ts (per-userId local StreamController registry;
-                            concurrency/duration caps, auth-registry lifecycle),
                             localStreamRoutes.ts (mounted at /local-stream),
                             localStreamPreviewRoutes.ts (the authenticated HLS proxy, mounted at
-                            /local-stream/preview)
+                            /local-stream/preview), streamPresetRepository.ts (Prisma; reads the
+                            repurposed StreamSession tables) / streamPresetRoutes.ts (mounted at
+                            /stream-presets)
   playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
   ffmpeg/                   canvasFeeder.ts (video leg: one-shot renders + heartbeat resend),
                             audioRelay.ts / audioRelayArgs.ts (audio leg: per-track decode-only
                             process), persistentEncoder.ts / persistentEncoderArgs.ts (the one
-                            long-lived encoder process per destination), segmentArgs.ts (canvas-
+                            long-lived encoder process per local stream),
+                            relayProcess.ts / relayProcessArgs.ts (one -c copy ffmpeg per enabled
+                            destination forward: MediaMTX in, destination RTMP out, never
+                            transcoding), segmentArgs.ts (canvas-
                             frame render args + overlay/timer types), duration.ts (ffprobe),
                             overlayText.ts (formatDuration, playlist-window text),
                             types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes
@@ -602,8 +793,10 @@ src/
                             pipeline call), blankOverlay.ts (hand-built transparent-PNG fallback,
                             independent of satori/resvg)
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
-                            StreamDestination, OAuthConnection, OAuthState, StreamSession,
-                            StreamSessionDestination, StreamTemplate) + migrations/
+                            StreamDestination — incl. the reused youtubeLiveStreamId,
+                            OAuthConnection, OAuthState, StreamSession +
+                            StreamSessionDestination — kept under their old names, now read as
+                            saved PRESETS, StreamTemplate) + migrations/
 docker/mediamtx.yml         the local relay's config: every non-RTMP/HLS surface off,
                             authMethod: http, one regex path, no all_others (see "Local relay")
 test/                       mirrors src/; unit tests only — plus infra/mediamtxConfig.test.ts,
@@ -613,15 +806,17 @@ assets/                     default cover + background images
 frontend/                   React + Vite SPA
   src/
     api/                    typed API client (fetch wrappers + type definitions; localStream.ts
-                            covers /local-stream/* plus the SSE and preview URLs)
-    pages/                  route page components (incl. Streams.tsx list, StreamSessionPanel.tsx
-                            multi-destination dashboard, Templates.tsx list/create/delete,
-                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor,
-                            LocalStream.tsx the local-first page: start form, transport controls,
-                            embedded preview)
+                            covers /local-stream/* — start, transport, the destination toggle, the
+                            combined status/SSE payload and the preview URLs;
+                            streamPresets.ts covers /stream-presets)
+    pages/                  route page components (incl. Stream.tsx — THE stream page: start form,
+                            preset picker, transport controls, destination checklist, embedded
+                            preview; Templates.tsx list/create/delete,
+                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
-                            AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal,
-                            StartStreamDrawer — has the Stage 4 template picker, ConfirmDialog,
+                            AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal;
+                            DestinationToggles.tsx — the per-destination checklist with its
+                            desired/actual badges, ConfirmDialog,
                             LanguageSwitcher, HlsPlayer.tsx — hls.js preview player with
                             credentialed requests and a destroy-and-rebuild recovery loop)
     i18n/                   react-i18next setup + en/ru/uk locale files
@@ -652,11 +847,21 @@ diff — always include the migration history. Never hand-write migration SQL.
 `node -e` only to prove stderr is drained). Prisma-backed repositories (`userRepository.ts`,
 `sessionRepository.ts`, `trackRepository.ts`, `playlistRepository.ts`,
 `destinationRepository.ts`, `oauthConnectionRepository.ts`, `oauthStateRepository.ts`,
-`streamSessionRepository.ts`) are thin wrappers verified by manual smoke test with a real Postgres
-(`docker compose up`), not unit tests — services that consume them (`StreamManager`,
+`streamPresetRepository.ts`) are thin wrappers verified by manual smoke test with a real Postgres
+(`docker compose up`), not unit tests — services that consume them (`LocalStreamManager`,
 `TrackUploadService`, route handlers) take `Pick<...>` structural subsets so they can be
-unit-tested with plain-object fakes instead. Follow the existing fake-child / fake-repository
-pattern rather than introducing a new mocking style.
+unit-tested with plain-object fakes instead. `DestinationForward` additionally takes injected
+`now`/`setTimer`/`clearTimer`, so its reconcile loop's timing can be driven deterministically
+without jest fake timers leaking across its `await` points. Follow the existing fake-child /
+fake-repository pattern rather than introducing a new mocking style.
+
+Two classes of defect this repo has repeatedly proven unit tests **cannot** catch, both with
+scars in this file: values crossing a `worker_threads` boundary (see the `Buffer` rewrapping note
+under "Overlay templates" Stage 1a) and anything about how a real ffmpeg or a real MediaMTX
+actually behaves — generated filter strings, query-string carriage, exit codes, keyframe
+alignment, timestamp origin. Every finding in "Local relay (MediaMTX)" and in the `RelayProcess`
+bullet came from running the real binaries, not from a test, and several contradicted what the
+design predicted. Run the real thing once before trusting a change in either class.
 
 ## HTTP API
 
@@ -676,47 +881,82 @@ returned), `GET /destinations`, `DELETE /destinations/{id}`.
 and creates the destination) — the OAuth2 connect flow for a provider-backed destination (e.g.
 `youtube`), as an alternative to `POST /destinations` for manually-entered RTMP destinations.
 
-`POST /destinations/{id}/stream/{start,stop,pause,resume,next,previous,play}`,
-`GET /destinations/{id}/stream/status`, `GET /destinations/{id}/stream/events` — all scoped to the
-destination's owner.
-`POST .../stream/start` also accepts optional `templateId`/`title`/`description`/`privacyStatus`/
-`latencyPreference` fields, used by providers that create a live broadcast (e.g. YouTube) —
-ignored by `custom` destinations; it 400s on a missing/invalid `body.playlistId`, an empty-string
-`body.templateId`, a non-string `title`/`description`, a `privacyStatus` outside
-`'public'`/`'unlisted'`/`'private'`, or a `latencyPreference` outside `'normal'`/`'low'`/
-`'ultraLow'`. `templateId` is optional — a stream can start with no overlay template selected
-(falls back to a built-in default layout; see the "Overlay templates" Stage 1a notes above for
-why it isn't required) — but 404s/403s if given and not found/not owned by the caller.
-`latencyPreference` maps straight to YouTube's own broadcast `contentDetails.latencyPreference`
-and defaults to `'normal'` when omitted — YouTube's own default, and its highest end-to-end
-latency (its ingest→transcode→CDN→player pipeline typically adds ~20-40s regardless of how fast
-this app reacts to a command); `'low'`/`'ultraLow'` trade some playback-buffering resilience for
-viewers on slow connections for a much snappier feel.
-
-`POST /stream-sessions` (`playlistId`, `destinationIds[]`, plus optional `templateId` — shared by
-every destination in the session and persisted on the session row — and `title`/`description`/
-`privacyStatus`/`latencyPreference` — same semantics as `.../stream/start`) creates a session and starts every listed
-destination independently; a per-destination `error` field on the response means only that one
-destination failed, not the whole call. `GET /stream-sessions`,
-`POST /stream-sessions/{id}/{pause,resume,next,previous,stop}` (fanned out to every destination
-in the session, best-effort per destination), `GET /stream-sessions/{id}/status`,
-`GET /stream-sessions/{id}/events` (SSE, aggregated), `DELETE /stream-sessions/{id}` (stops every
-destination, then deletes the session row) — all scoped to the session's owner.
-
 `POST /local-stream/{start,stop,pause,resume,next,previous,play}`, `GET /local-stream/status`,
-`GET /local-stream/events` (SSE) — the local-first path (see "Local relay (MediaMTX)" above).
-**None of these routes takes an id of any kind**: there is exactly one local stream per account,
-resolved from the session cookie, so there is nothing to address and therefore no ownership check
-to get wrong. `start` takes `playlistId` (400 if missing or not a string) and an optional
-`templateId` (400 on an empty string; 404/403 if given and not found/not owned) and nothing else —
-no `title`/`description`/`privacyStatus`/`latencyPreference`, because Phase A has no destinations at
-all and accepting them would tell a caller it had configured something that doesn't exist. 409 if a
-stream is already active (or already starting) for the account, 429 once the host is at
-`MAX_CONCURRENT_LOCAL_STREAMS`. Every *mutating* route additionally requires
+`GET /local-stream/events` (SSE), `PUT /local-stream/destinations/{destinationId}` — **the whole
+streaming API.** `/destinations/{id}/stream/*` and `/stream-sessions/*` no longer exist (both 404);
+`GET /openapi.json` no longer lists them, and `test/api/openapi.test.ts` and `test/server.test.ts`
+assert that as a regression check.
+
+**Apart from the destination toggle, none of these routes takes an id of any kind**: there is
+exactly one local stream per account, resolved from the session cookie, so there is nothing to
+address and therefore no ownership check to get wrong.
+
+`start` takes `playlistId` (400 if missing or not a string), and optionally: `templateId` (400 on an
+empty string; 404/403 if given and not found/not owned — a stream can start with no overlay template
+selected and fall back to a built-in default layout, see the "Overlay templates" Stage 1a notes for
+why it isn't required), `destinationIds[]` (400 if not an array of non-empty strings or if it
+contains duplicates; each id 404/403-checked **before any side effect**, so a bad id never mints a
+relay token or builds a scene — the ids are then applied as intents and reconciled, deliberately the
+*same* code path a later `PUT` takes rather than a second start-time orchestration), and the
+broadcast metadata `title`/`description`/`privacyStatus`/`latencyPreference` (400 on a non-string
+`title`/`description`, a `privacyStatus` outside `'public'`/`'unlisted'`/`'private'`, or a
+`latencyPreference` outside `'normal'`/`'low'`/`'ultraLow'`). The metadata is used by any provider
+that creates a live broadcast (YouTube) and ignored by `custom` destinations — Phase A omitted these
+fields precisely because it had no destinations at all; they are back because it now does.
+`title` defaults to the playlist's name. `latencyPreference` maps straight to YouTube's own
+broadcast `contentDetails.latencyPreference` and defaults to `'normal'` when omitted — YouTube's own
+default, and its highest end-to-end latency (its ingest→transcode→CDN→player pipeline typically adds
+~20-40s regardless of how fast this app reacts to a command); `'low'`/`'ultraLow'` trade some
+playback-buffering resilience for viewers on slow connections for a much snappier feel.
+`start` 409s if a stream is already active **or already starting** for the account, and 429s once
+the host is at `MAX_CONCURRENT_LOCAL_STREAMS`. `play` takes `name` (400 if missing or not a string)
+and jumps to that track by name out of the user's whole library; `pause`/`resume`/`next`/`previous`
+take no body. Everything but `start` 409s when no local stream is active.
+
+`PUT /local-stream/destinations/{destinationId}` takes `{desired: 'on' | 'off'}` (400 on anything
+else) and is **the checkbox**: idempotent, valid in *every* local-stream state including `idle` (a
+toggle with nothing running parks the forward at `pending` rather than 409ing), never blocking on
+the work it triggers, and answering with the same combined status payload every other route does.
+It is a `PUT` because it sets a value rather than issuing a command. 404/403 if the destination
+isn't the caller's; 400 for a destination whose `provider` has no registered
+`StreamDestinationProvider`.
+
+`stop` is **awaited**: it forces every forward's desired to `off`, tears the encode down, and waits
+for each provider-side finalize (a YouTube transition-to-complete takes seconds) before responding,
+so the response is truthful about what actually stopped — measured at 1.11 s against a real channel,
+with `destinations: []` and `local.state: "idle"` already in that same response.
+
+**Every route answers with one combined payload**, `{local, destinations[]}` — and `GET
+/local-stream/events` streams exactly that same object on every change, so the transport controls
+and the destination checklist can never disagree. `local` is
+`{state, currentTrack, nextTrack, previewReady, playlistId, templateId, startedAt}`, where `state`
+adds **`'starting'`** to `StreamController`'s own `idle`/`streaming`/`paused`/`reconnecting`/`error`
+— a start is in flight, so a client must show neither the start form (it would offer to start a
+second one) nor the transport controls (there is nothing to control yet). `previewReady` is true
+exactly while the encoder is publishing into MediaMTX (`streaming` or `paused`). Each entry of
+`destinations[]` is `{destinationId, name, desired, state, provider?, error?}` —
+`state` being the forward's actual
+`off`/`pending`/`preparing`/`connecting`/`live`/`stopping`/`error`, `provider` present only while a
+provider lifecycle exists (i.e. YouTube: `{type, phase, watchUrl}`), and `error` carrying
+`{reason, message}` with `reason` one of `auth`/`provider`/`relay`/`source`. A forward that wants
+nothing and holds nothing is **pruned**, so absence is the representation of "not forwarded" — a
+client renders the checklist over the user's destinations and treats a missing entry as off.
+**`destinations: []` alongside a `streaming` local state is a completely normal payload**, confirmed
+live, not just in a unit test.
+
+Every *mutating* route (the `PUT` included) requires
 `Content-Type: application/json` (400 otherwise) — not decoration: with no id in the URL these
 routes have no accidental CSRF token either, and requiring JSON is what forces a browser preflight
 that the CORS policy then has to approve, which a plain cross-site HTML form POST (a CORS "simple
-request", whose side effect lands even though its response is blocked) could never get.
+request", whose side effect lands even though its response is blocked) could never get. The `PUT`
+does carry an id, but it is one of the caller's own destination ids, not an unguessable per-request
+token, so it buys no CSRF protection on its own and gets exactly the same treatment.
+
+`DELETE /destinations/{id}` additionally drops that destination's forward and finalizes its
+lifecycle **without touching the local stream** (confirmed live: the entry disappeared from
+`status.destinations` immediately and `local.state` stayed `streaming`). The pre-rework code stopped
+the whole per-destination stream here, which in this model would tear down the user's entire encode
+to delete one checkbox.
 
 `GET /local-stream/preview/index.m3u8` and `GET /local-stream/preview/{file}` proxy the relay's HLS
 output to the browser behind `requireAuth`. **The client never names a MediaMTX path, token or
@@ -734,6 +974,21 @@ The **inbound query string is forwarded upstream verbatim**, because MediaMTX's 
 their children with a required `?session=<uuid>` and answer 401 without it — the `{file}` allowlist
 deliberately applies to the file name only, never to the query. Verified end to end against a real
 MediaMTX 1.21.0 (see the "Local relay" section above).
+
+`POST /stream-presets` (`name` + `playlistId` required, optional `templateId`/`destinationIds[]`/
+`title`/`description`/`privacyStatus`/`latencyPreference` — every field validated exactly as
+`POST /local-stream/start` validates its own copy), `GET /stream-presets`,
+`GET /stream-presets/{id}`, `PUT /stream-presets/{id}` (full replace, same validation),
+`DELETE /stream-presets/{id}` — all scoped to the preset's owner. A preset is a **saved choice, not
+a running thing**: it has no side effects at all and starting a stream from one is just the client
+pre-filling `POST /local-stream/start` from it. `name` is deliberately separate from `title`
+(`title` is the YouTube *broadcast* title; overloading one field would make the preset picker show
+broadcast titles), and **`destinationIds: []` is valid** — a local stream forwarded nowhere is a
+normal way to run, where the old `StreamSession` these rows used to back required a non-empty list.
+Every referenced id is checked against the caller's own resources and answered 404/403 (not 400, as
+`PUT /playlists/{id}/tracks` has to: a preset is a private object of the caller's with no membership
+to leak). Backed by the repurposed `StreamSession`/`StreamSessionDestination` tables — same tables,
+no rename, no data migration.
 
 `POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
 `PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout
@@ -816,15 +1071,25 @@ removes the DB row but not `{UPLOADS_DIR}/{userId}/{trackId}/`); no per-user sto
 ffmpeg smoke testing of segment concatenation has not been run in CI. A YouTube-connected
 destination's access token is refreshed on every API call rather than cached against its
 `expiresIn` (deliberate — avoids a whole class of expiry-timing bugs for streams that can run far
-longer than a token's ~1 hour lifetime, at the cost of a few extra token-endpoint calls). Real
-end-to-end YouTube API smoke testing (an actual channel going live via this app) has not been run,
-matching the real-ffmpeg-smoke-testing caveat above. A YouTube destination's health-check timeout
-(in `youtubeProvider.ts`) stops the YouTube-side broadcast but doesn't stop the local ffmpeg
-pipeline, which keeps pushing to a dead ingest endpoint until the user calls `/stream/stop`
-manually. A persistently failing `refreshAccessToken` (e.g. a revoked Google grant) makes the
+longer than a token's ~1 hour lifetime, at the cost of a few extra token-endpoint calls).
+**(Closed.)** Real end-to-end YouTube API smoke testing has now been run: a real channel went live
+through this app, the toggle-on/off/on cycle and the failure paths were exercised against the real
+Data API, and the numbers recorded above (quota, timings, `youtubeLiveStreamId` reuse, watch-URL
+behaviour) come from that run. The real-ffmpeg-smoke-testing caveat is likewise closed for the
+relay leg — see the `RelayProcess` bullet — though not for the *encoder* leg, whose own real-binary
+coverage is still only what the persistent-encoder rework did.
+**(Closed.)** A YouTube destination's health-check timeout used to stop the YouTube-side broadcast
+while leaving the local ffmpeg pipeline pushing at a dead ingest endpoint until the user stopped the
+stream by hand. A terminal provider phase (`error`/`complete`) now stops **that forward's relay and
+nothing else** — `DestinationForward.pass()` checks for it ahead of every branch that could start or
+respawn a relay, so even a respawn that was merely *scheduled* can't fire into an ended broadcast —
+and the local encode, the preview and every sibling forward carry on untouched.
+A persistently failing `refreshAccessToken` (e.g. a revoked Google grant) still makes the
 health-check poll loop retry silently for the full 90s timeout instead of short-circuiting on an
-auth-class error, and — since `finalize()` also needs a working token — can leave the ephemeral
-YouTube `liveStream` undeleted. `OAuthState` rows for an abandoned `/oauth/start` (the user never
+auth-class error. **(Closed.)** What used to follow from that — an orphaned ephemeral
+`liveStream`, because `finalize()` needs a working token too — cannot happen any more: the
+`liveStream` is persisted on the destination row, reused across every toggle, and never deleted by
+`finalize()` at all. `OAuthState` rows for an abandoned `/oauth/start` (the user never
 completes the consent flow) are never swept — they just sit until their `expiresAt` passes,
 matching the pre-existing `Session` table's same lack of a sweep job. The OAuth callback's
 state-row lookup-then-delete (`oauthStateRepository.findValid` then `deleteById`) isn't atomic —
@@ -833,15 +1098,28 @@ destinations before either delete lands. Narrow (requires already holding a vali
 state), but a compare-and-delete-returning-count check would close it. `OAuthConnection` has no
 uniqueness constraint on `(provider, externalAccountId)` — a user can connect the same YouTube
 channel to multiple `StreamDestination`s, which would then compete over the same channel's
-broadcasts if both were streamed to at once. `onError` (the encoder-crash-triggers-finalize hook)
-resolves the destination's lifecycle to finalize by `destinationId` alone. In the narrow case where
-a crashed session's exit event is processed after a subsequent `start()` for the same destination
-has already completed and registered a new lifecycle, this could finalize the new (healthy)
-session's YouTube broadcast instead of the crashed one's. `PersistentEncoder.stop()`'s existing
-`stopRequested` guard makes the ordinary stop path safe; this only matters for a genuine crash
-racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow. A `StreamSession`'s destination list is fixed at creation — there's no add/remove-destination-from-a-live-session endpoint; adding a destination mid-stream means starting a new session for it instead. `StreamSessionManager.deleteById()`'s per-destination `stop()` calls aren't atomic with each other (same class of narrow race as the rest of this list) — a crash between two of them could leave the session row deleted while one destination is still streaming, orphaned exactly like a single-destination stream would be if its owning destination were deleted mid-stream. **(Fixed.)** Segment switches used to be able to kill the RTMP connection outright (confirmed by live testing, worse under rapid manual switching), because each track/pause segment was muxed to MPEG-TS by its own short-lived ffmpeg process, resetting the container's continuity counter and ADTS bitstream-filter state at every switch. The fix landed as the persistent-encoder rework described under "Overlay templates" Stage 2 below — one long-lived `PersistentEncoder` per destination, never restarted for the session, fed by two Node-owned pipes instead of independent per-segment processes handed off through a FIFO, so there is no more continuity-counter/PTS discontinuity to begin with. Getting there took two rejected intermediate designs (a concat-demuxer MVP, then a two-FIFO split-encode-from-mux design that deadlocked against real ffmpeg binaries) before landing on this shape — see `docs/superpowers/specs/2026-09-03-obs-style-persistent-canvas-design.md` for the full story.
+broadcasts if both were streamed to at once — and, now that the `liveStream` is persisted per
+destination row, two such destinations would also hold two separate reusable ingest endpoints on the
+same channel. Observed in practice during the real-API smoke test, though from a different cause:
+**one consent click produced two `StreamDestination` rows**, which is the non-atomic state-row
+consumption above firing for real. Worth knowing alongside it: the second row's refresh token came
+back already revoked (`invalid_grant: Token has been expired or revoked`), plausibly Google
+invalidating an earlier refresh token when the same client re-authorizes the same user in quick
+succession — unconfirmed against Google's docs, but it is what organically exercised the
+`reason: "auth"` forward-error path. **(Closed.)** `onError` used to resolve a destination's
+lifecycle to finalize **by `destinationId` alone**, so a crashed session's exit event arriving after
+a fast restart could finalize the *new*, healthy broadcast. There is no destinationId-keyed
+lifecycle registry any more: a lifecycle is owned by the one `DestinationForward` that prepared it,
+and `onProviderPhaseChanged` additionally ignores any callback whose session is not that forward's
+current one. Also **(Closed.)** with the entity itself: "a `StreamSession`'s destination list is
+fixed at creation" (destinations are toggleable mid-stream now, which was the whole point) and
+`StreamSessionManager.deleteById()`'s non-atomic per-destination `stop()` calls (there is no fan-out
+to be non-atomic about; `stop()` awaits every forward's shutdown in one `Promise.all` and the
+encode is one process).
+The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The **10-minute `OAuthState` TTL** (`oauthRoutes.ts`) is tight enough to genuinely expire during a human-in-the-loop connect: it did, during the real-API smoke test, when an `authUrl` was handed over and clicked a few minutes later. Working exactly as designed (fail closed on state reuse/expiry), but a real friction point for manual testing and demos. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow. **(Fixed.)** Segment switches used to be able to kill the RTMP connection outright (confirmed by live testing, worse under rapid manual switching), because each track/pause segment was muxed to MPEG-TS by its own short-lived ffmpeg process, resetting the container's continuity counter and ADTS bitstream-filter state at every switch. The fix landed as the persistent-encoder rework described under "Overlay templates" Stage 2 below — one long-lived `PersistentEncoder` per stream (per destination at the time; per account since the local-first rework), never restarted for the session, fed by two Node-owned pipes instead of independent per-segment processes handed off through a FIFO, so there is no more continuity-counter/PTS discontinuity to begin with. Getting there took two rejected intermediate designs (a concat-demuxer MVP, then a two-FIFO split-encode-from-mux design that deadlocked against real ffmpeg binaries) before landing on this shape — see `docs/superpowers/specs/2026-09-03-obs-style-persistent-canvas-design.md` for the full story.
 
-**Local-first streaming (Phase A)** knowingly leaves these open:
+**Local-first streaming** knowingly leaves these open. (a)-(d) and (f)-(g) date from Phase A and are
+unchanged by the unified rework; (n)-(q) at the end are what the rework itself opens:
 (a) **MediaMTX is now a shared single point of failure** — one container relays every tenant's local
 stream, so its crash takes them all down at once, and nothing re-publishes the sessions that were up
 when it died. Mitigated only by `restart: unless-stopped`, the 512m memory limit and the exact
@@ -856,21 +1134,29 @@ disabled by Layer 0, so nothing can kick an already-established RTMP connection 
 re-authorise one. Mitigate later with MediaMTX read/write timeouts.
 (d) **Local-stream state is in-memory**, so a backend restart drops every local stream — matching
 this app's existing choice for stream state rather than a new regression.
-(e) `buildStreamScene`'s `overlayCache`/`sessionId` parameters exist only for the legacy
-multi-destination path, and are deleted together with `SessionOverlayCache` in Phase C.
-(f) **The per-session publish secret lands in plaintext in `docker logs` for the backend
-container**, because `createPipeSpawner` forwards ffmpeg's stderr verbatim and ffmpeg logs its own
-output URL on startup (`Output #0, flv, to
-'rtmp://mediamtx:1935/live/<token>?user=pub&pass=<secret>'`) — the same class of leak the design's
-"why not let MediaMTX forward" section rejected `runOnReady` for, now happening one hop over.
+(e) **(Closed.)** `buildStreamScene`'s `overlayCache`/`sessionId` parameters existed only for the
+legacy multi-destination path; they are gone, together with `SessionOverlayCache`, replaced by a
+single `sceneId` (which is simply the `userId` — one pipeline per account).
+(f) **Stream secrets land in plaintext in `docker logs` for the backend container**, because
+`createPipeSpawner` **and `createSpawner`** both forward ffmpeg's stderr verbatim and ffmpeg logs
+its own output URL on startup. That is two leaks now, not one: the encoder logs
+`Output #0, flv, to 'rtmp://mediamtx:1935/live/<token>?user=pub&pass=<secret>'`, exposing the
+per-session MediaMTX **publish** secret (the same class of leak the design's "why not let MediaMTX
+forward" section rejected `runOnReady` for, now happening one hop over), and **each
+`RelayProcess` logs its own output URL too** — which for a custom RTMP destination contains that
+destination's **decrypted stream key**, the very value `streamKeyCipher.ts` exists to keep
+encrypted at rest. (The relay's *input* URL carries the MediaMTX read secret as well.) A relay's
+stderr is deliberately drained through the same forwarder as everything else, so fixing this means
+fixing the forwarder, not the relay.
 (g) **The shared `MEDIAMTX_AUTH_SECRET` lands in MediaMTX's own logs** on any connection failure to
 the auth endpoint (`Post "http://super-dj:3001/internal/mediamtx-auth/<SECRET>": dial tcp …:
 connection refused`), which routine backend restarts will trigger — a consequence of carrying it as
-a path segment rather than a header, which MediaMTX leaves no room for. Neither (f) nor (g) is fixed
-in Phase A; both are acceptable for now on the same footing as this app's existing
+a path segment rather than a header, which MediaMTX leaves no room for. Neither (f) nor (g) is
+fixed; both are still tolerated on the same footing as this app's existing
 secrets-in-process-args tolerance (destination stream keys are already visible to `ps` inside their
-own container), but should be revisited — e.g. redacting the trailing URL in the stderr forwarder —
-before this leaves a single trusted deployment.
+own container), but (f) got strictly worse when forwards landed — it now leaks a *destination's*
+decrypted key, not just a session-scoped MediaMTX secret — and should be revisited first, e.g. by
+redacting the trailing URL in the stderr forwarder, before this leaves a single trusted deployment.
 (h) **(Fixed.)** Task 12's real-binary smoke test found the HLS preview could not play at all:
 MediaMTX 1.21.0's playlists reference their children with a required `?session=<uuid>` query string,
 and `localStreamPreviewRoutes.ts` built its upstream URL from Express's `req.params.file`, which
@@ -897,12 +1183,16 @@ whole scene closure: the resolved playlist's `tracks` array, the user's **full**
 configs. For a user with a large library this is real memory, not a small record, and nothing
 reaps it except that same user calling `start`/`stop` again. Consider evicting the entry after
 an interval, or replacing the retained live controller with a small terminal-status snapshot.
-(k) **Two independent, separately-uncapped encode pools can run on the same host during Phase
-A.** `MAX_CONCURRENT_LOCAL_STREAMS` (default 10) bounds local streams only —
-`/stream-sessions/*`/`/destinations/{id}/stream/*` has and always had no cap on concurrent
-per-destination encodes. A host can therefore run up to `10 + N` simultaneous libx264 720p30
-encodes, not just the 10 the "two host-level ceilings" language above might suggest on its
-own — size deployment capacity off the sum, not off the local cap alone.
+(It no longer pins a **concurrency slot**, at least: `start()`'s `active` count excludes entries in
+`error`, since an errored encoder has already stopped costing CPU. Only the memory is retained.)
+(k) **(Closed.)** Phase A could run two independent, separately-uncapped encode pools on one host:
+`MAX_CONCURRENT_LOCAL_STREAMS` (default 10) bounded local streams only, while
+`/stream-sessions/*`/`/destinations/{id}/stream/*` had and always had no cap on concurrent
+per-destination encodes, so a host could reach `10 + N`. Those route families are gone, and with
+them the second pool: **`MAX_CONCURRENT_LOCAL_STREAMS` is now the only encode ceiling and it is
+the real one.** What it does not bound is `RelayProcess` count — a user's N destinations are N more
+ffmpeg processes — but each is a `-c copy` costing ~1.4% CPU / ~16 MiB against the encode's ~68% /
+~84 MiB, so capacity is still sized off encodes.
 (l) **(Fixed.)** The HLS preview could hang forever — no video, no network activity, until a manual
 page reload — whenever its first read landed in MediaMTX's on-demand 404 window (the common case:
 the page mounts the player the instant `previewReady` flips true, ~2 s before the encoder's publish
@@ -930,6 +1220,38 @@ evidence. **Carry forward: browser automation that drives a background window re
 100% of the time**, so a stall observed only through such a tool must have `document.visibilityState`
 checked before anything server-side is suspected. The native-HLS fallback path (iOS Safari,
 follow-up (b)) again gets none of this, for the same reason as in (l).
+(n) **Destination forwards are in-memory, like everything else — but now with a platform-visible
+consequence.** A backend restart drops every `DestinationForward` along with the local stream it
+read from ((d) above), which is the same tradeoff this app has always made for stream state. What
+is new is what it leaves behind *outside* the process: a YouTube `liveBroadcast` a forward had
+created is never transitioned to `complete`, because the only object that could finalize it is
+gone. The channel is left showing a broadcast that will never end until the user toggles that
+destination on and off again (the next toggle-on creates a *new* broadcast; it does not adopt the
+orphan). The reusable `liveStream` is unaffected — it is persisted, and it is supposed to survive.
+(o) **There is no per-user toggle rate limit.** A user clicking a checkbox repeatedly drives a full
+`prepareSession` → broadcast → `finalize` cycle each time, against the app's **shared** daily
+YouTube Data API quota — one quota for every tenant, since all of them go through one Google Cloud
+project. The measured cost is **~7 units per full cycle** (29 units observed for a whole day of
+roughly four cycles), so the default 10,000/day supports on the order of **1,000+ cycles/day for
+the entire app**. That is 40-50x more headroom than the design spec's ~330 units/cycle estimate
+implied (~30 cycles/day), which is what had made a rate limit look urgent — at the measured cost it
+is a safety margin against a pathological client rather than a capacity requirement. If one is
+added, size it off ~7 units/cycle, not off the old estimate.
+(p) **A forward's `error` is sticky until the user toggles it off and on again.** Deliberate — a
+forward that gave up must never silently re-arm itself on an unrelated `reconcile()`, of which
+there is one per local status change — and the local session ending also clears it, so a fresh
+session never inherits a stale failure. But it does mean a *transient* platform outage leaves that
+destination sitting in `error` with a reason, needing a manual re-toggle, while the local stream
+and every sibling forward carry on. There is no automatic retry after the relay's own reconnect
+budget is spent.
+(q) **Added relay latency — the local-preview-vs-destination-player delta — has NOT been measured.**
+The design's estimate is **0.5-2 s** for the `-c copy` hop, and it remains exactly that: an
+estimate. The real-API smoke test deliberately skipped it (it needs a side-by-side view of the
+cookie-authenticated local preview and the destination's own player at the same visible change),
+so do not quote a number here as measured. What *was* measured about the relay's timing is in the
+`RelayProcess` bullet above; latency is not among it. For context on the scale: YouTube's own
+ingest→transcode→CDN→player pipeline typically adds ~20-40 s at `latencyPreference: 'normal'`
+regardless, so this hop is unlikely to be the dominant term either way.
 
 ## Tooling
 
