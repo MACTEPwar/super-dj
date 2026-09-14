@@ -7,7 +7,10 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 **super-dj** — a multi-tenant YouTube streamer. A Node.js/TypeScript service, running in Docker
 on Linux, where each user uploads audio tracks, arranges them into playlists, registers one or
 more stream destinations (RTMP URL + stream key), and starts/controls an independent live stream
-per destination — all via a REST API, gated behind email/password auth.
+per destination — all via a REST API, gated behind email/password auth. Phase A of the local-first
+rework adds a second, destination-free path alongside it: a user can start one **local** stream per
+account that encodes into a co-located MediaMTX relay and is watchable only as an authenticated HLS
+preview in the app's own UI, with no platform involved (see "Local relay (MediaMTX)" below).
 
 ## Architecture (as built)
 
@@ -55,6 +58,30 @@ fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` 
   user's full track list (for `play`-by-name lookup, via the `LibraryLike` adapter in
   `streamController.ts`), decrypts the destination's stream key, and wires a fresh
   `StreamController`.
+- **`LocalStreamManager` owns one `StreamController` per *user account*** (keyed by `userId`, in an
+  in-memory `Map`) — the local-first path added by Phase A of the local-first-streaming rework. It
+  has no destination concept at all: `LocalRelayTarget` mints a fresh MediaMTX path + publish/read
+  credentials on every start, and the encoder pushes into the co-located MediaMTX relay (see "Local
+  relay (MediaMTX)" below) instead of a platform's ingest endpoint, where the only consumer is the
+  authenticated HLS preview proxy. Both managers share one scene resolver, **`buildStreamScene()`**
+  (`src/stream/streamScene.ts`) — playlist/template/track resolution and their ownership checks, gif
+  probing, canvas placement, the `buildOverlay` closure and the `CanvasFeeder`/`AudioRelay`/
+  `PersistentEncoder`/`PulseVisualizer` factories, i.e. everything a stream needs that has no
+  destination in it — extracted out of `StreamManager.start()` (behaviour-preservingly) so the two
+  paths can never drift on fonts, dimensions, repositories or ownership rules. Its
+  `createPersistentEncoder(target: RtmpTarget)` takes the one thing it deliberately doesn't know:
+  where to push. Two host-level ceilings exist because a local stream costs a full libx264 720p30
+  `ultrafast` encode while having *no* destination and possibly no viewer at all:
+  `MAX_CONCURRENT_LOCAL_STREAMS` (default 10, sized against exactly that encode — an 11th `start()`
+  gets a 429; the count is checked *and* a slot reserved synchronously before any `await`, or N
+  concurrent starts from N different users would all observe the pre-increment size and all pass)
+  and `MAX_LOCAL_STREAM_HOURS` (default 12, after which the stream auto-stops). Deliberately no
+  idle/viewer-count timeout instead of the duration cap: MediaMTX's control API is the only
+  viewer-count signal there is, and Layer 0 below disables it on purpose — enabling it to save some
+  CPU would trade the security boundary for an optimisation.
+  **`/destinations/{id}/stream/*` and `/stream-sessions/*` are unchanged by all of this, and remain
+  the only way to reach a real platform (YouTube/Twitch) until Phase B** adds toggleable
+  per-destination forwards pulled back out of the relay.
 - **Auto-advance.** `StreamController` listens for `AudioRelay`'s current decode child's `close`
   (fired once the track file naturally ends) and advances the queue. A `sessionGeneration` counter
   (renamed from the FIFO-era `segmentGeneration` — there's no more per-segment process for
@@ -116,6 +143,74 @@ fed by two Node-owned pipes (anonymous pipe file descriptors 3/4 that `spawn()` 
   dedicated `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just
   a `custom` destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key,
   which already works through the existing `CustomRtmpProvider` path.
+
+**Local relay (MediaMTX).** The local-first path publishes into a `bluenviron/mediamtx:1.21.0`
+container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in
+`docker-compose.yml` with a 512m memory limit and `restart: unless-stopped`). The image is pinned to
+an exact version, never `:latest` — every behaviour below was read out of that version's source
+tree, and this one container is shared by every tenant. Three layers make it safe:
+
+- **Layer 0 — the network.** The service has **no `ports:` entry at all**, and must never get one:
+  it is reachable only as `mediamtx` on the compose network, so nothing outside the host can speak
+  RTMP or HLS to it even holding a valid credential — and every non-RTMP/HLS surface (`api`,
+  `metrics`, `pprof`, `playback`, `rtsp`, `webrtc`, `srt`) is `false` in the config. This is the
+  actual trust boundary; everything else is defense in depth. Because it is one careless line away
+  from being undone, it's enforced by an automated test — **`test/infra/mediamtxConfig.test.ts`**
+  parses both YAML files and fails the build if a `ports:` entry, an enabled control surface, or a
+  catch-all path reappears. Don't weaken it "just to check whether it's reachable".
+- **Layer 1 — the path.** Exactly one regex path, `~^live/[0-9a-f]{32}$`, and **no `all_others`
+  entry**: anything that isn't a 128-bit lowercase-hex token is rejected by MediaMTX outright,
+  before the auth callback is consulted at all. The token is minted per *start* (not per user, never
+  persisted, never returned by any API), so a path leaked from an earlier session is worthless once
+  that session ends.
+- **Layer 2 — the callback.** `authMethod: http`: MediaMTX POSTs every publish/read attempt to the
+  backend's `MediaMtxAuthRegistry` (`src/stream/mediaMtxAuth.ts`), an in-memory `path → {publish
+  secret, read secret}` map. In memory on purpose — stopping a stream revokes its credentials
+  instantly (unlike a JWT, which stays valid until it expires) and neither adding nor removing a
+  session ever needs a MediaMTX config reload. Fail-closed by construction: MediaMTX allows only on
+  a 2xx, so an unregistered path, an unknown action, a malformed body, an unexpected throw, or a
+  backend that is simply down all deny. It listens on its **own** unpublished port
+  (`MEDIAMTX_AUTH_PORT`, default 3001 — a second `listen()` in `main.ts` over a separate Express app)
+  rather than being mounted on the public API, because MediaMTX is not a browser and cannot present
+  the session cookie `requireAuth` needs.
+
+Two carrier shapes here were read out of the pinned v1.21.0 source rather than assumed, and each
+overrode what the design spec originally called for:
+
+- **RTMP credentials travel as query parameters, not as URL userinfo.**
+  `internal/servers/rtmp/conn.go` does `query := c.rconn.URL.Query()` then `User: query.Get("user"),
+  Pass: query.Get("pass")` in both `runPublish()` and `runRead()`; the `rtmp://user:pass@host/...`
+  userinfo form is documented for RTSP, **not** RTMP. So `LocalRelayTarget`
+  (`src/stream/localRelayTarget.ts`) splits one credentialed URL across the two fields
+  `buildPersistentEncoderArgs` already takes — `rtmpUrl = rtmp://mediamtx:1935/live`,
+  `streamKey = <token>?user=pub&pass=<publishSecret>` — so its existing `` `${rtmpUrl}/${streamKey}` ``
+  concatenation yields `rtmp://mediamtx:1935/live/<token>?user=pub&pass=<secret>` and
+  **`persistentEncoderArgs.ts`/`persistentEncoder.ts` are not modified by the local-first path at
+  all**. Publish and read use different usernames (`pub`/`sub`) *and* different secrets, so a leaked
+  read credential can never publish over the path. HLS reads instead present the read secret as a
+  Basic `Authorization` header, since HTTP-based protocols don't take the query-string form.
+- **The auth callback's shared secret travels as a URL path segment, not a header.**
+  `internal/auth/manager.go` does `httpClient.Post(m.HTTPAddress, "application/json", ...)` — it
+  sets **no custom headers** and substitutes no placeholders in `authHTTPAddress` — so the spec's
+  "shared-secret header" is impossible. `MTX_AUTHHTTPADDRESS` is therefore
+  `http://super-dj:3001/internal/mediamtx-auth/<MEDIAMTX_AUTH_SECRET>`, compared with
+  `timingSafeEqual`, and supplied by environment so the secret never lands in the committed
+  `mediamtx.yml` — which leaves `authHTTPAddress:` empty on purpose, since MediaMTX refuses to start
+  with `authMethod: http` and no address, exactly the fail-closed behaviour wanted if the variable
+  ever goes missing.
+
+The request body `MediaMtxAuthRegistry.authorize` is written against comes from the same source
+read (`internal/auth/manager.go`): `path` arrives as `live/<token>` with **no leading slash**, and
+`action` as the literal string `publish` or `read` —
+`{"user":"pub","password":"<secret>","token":"","ip":"…","action":"publish","path":"live/<32 hex>",`
+`"protocol":"rtmp","id":"…","query":"user=pub&pass=<secret>"}`.
+⚠️ **None of this has been confirmed against a real MediaMTX binary yet.** The Phase A plan's
+Task 12 smoke test — publish a real ffmpeg `testsrc2` into a real `bluenviron/mediamtx:1.21.0` on an
+isolated docker network, with a throwaway auth stub logging the exact body it receives, then read
+the HLS playlist and a segment back with the read credential — could not be run, because the remote
+docker host was unreachable from this workstation. Until it is run, the query-string credential
+form, the `path`/`action` shape above, and the on-demand HLS behaviour the preview player assumes
+all rest on source reading alone. See "Known follow-ups".
 
 **Overlay templates (in progress).** Rework driven by two goals at once: fix the recurring
 segment-switch corruption (see "Known follow-ups" below) *and* lay the foundation for a
@@ -252,8 +347,12 @@ lands:
 **Frontend.** A separately-deployed React + Vite SPA (`frontend/`) served to browsers, talking to
 the same backend API over CORS with credentialed cross-origin requests. Live stream status updates
 (`StreamManager` emits `statusChanged` events) are delivered to the client via Server-Sent Events
-(`GET /destinations/{destinationId}/stream/events`, or `GET /stream-sessions/{id}/events` for a
-multi-destination session), eliminating polling overhead. Every add/edit form (track upload,
+(`GET /destinations/{destinationId}/stream/events`, `GET /stream-sessions/{id}/events` for a
+multi-destination session, or `GET /local-stream/events` for the local-first path), eliminating
+polling overhead. The local-first page (`pages/LocalStream.tsx`, routed at `/local-stream` and
+linked from the sidebar) embeds the preview itself via `components/HlsPlayer.tsx` — hls.js with
+`withCredentials` set on every request, because the backend resolves *which* stream to serve from
+the session cookie. Every add/edit form (track upload,
 playlist creation, destination connection, starting a stream) opens in a shared `Drawer`
 component (a slide-out panel built on the same Radix `Dialog` primitive) rather than being inlined
 on the page.
@@ -290,7 +389,18 @@ src/
                             streamSessionRepository.ts (Prisma), streamSessionManager.ts
                             (fan-out orchestration over StreamManager), streamSessionRoutes.ts
                             (mounted at /stream-sessions), sessionOverlayCache.ts (shared-render
-                            cache for same-session destinations), types.ts
+                            cache for same-session destinations), reconnectPolicy.ts (backoff +
+                            crash-loop threshold for a dropped encoder), types.ts,
+                            streamScene.ts (buildStreamScene() — the destination-free scene
+                            resolver both managers share), localRelayTarget.ts (mints one local
+                            stream's MediaMTX path token, publish/read credentials and every URL
+                            derived from them), mediaMtxAuth.ts (MediaMtxAuthRegistry in-memory
+                            allow/deny map + the unpublished Express app MediaMTX POSTs to),
+                            localStreamManager.ts (per-userId local StreamController registry;
+                            concurrency/duration caps, auth-registry lifecycle),
+                            localStreamRoutes.ts (mounted at /local-stream),
+                            localStreamPreviewRoutes.ts (the authenticated HLS proxy, mounted at
+                            /local-stream/preview)
   playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
   ffmpeg/                   canvasFeeder.ts (video leg: one-shot renders + heartbeat resend),
                             audioRelay.ts / audioRelayArgs.ts (audio leg: per-track decode-only
@@ -315,20 +425,29 @@ src/
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
                             StreamDestination, OAuthConnection, OAuthState, StreamSession,
                             StreamSessionDestination, StreamTemplate) + migrations/
-test/                       mirrors src/; unit tests only
+docker/mediamtx.yml         the local relay's config: every non-RTMP/HLS surface off,
+                            authMethod: http, one regex path, no all_others (see "Local relay")
+test/                       mirrors src/; unit tests only — plus infra/mediamtxConfig.test.ts,
+                            which asserts the compose/MediaMTX security invariants (no published
+                            ports, control surfaces off, regex path, no catch-all)
 assets/                     default cover + background images
 frontend/                   React + Vite SPA
   src/
-    api/                    typed API client (fetch wrappers + type definitions)
+    api/                    typed API client (fetch wrappers + type definitions; localStream.ts
+                            covers /local-stream/* plus the SSE and preview URLs)
     pages/                  route page components (incl. Streams.tsx list, StreamSessionPanel.tsx
                             multi-destination dashboard, Templates.tsx list/create/delete,
-                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor)
+                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor,
+                            LocalStream.tsx the local-first page: start form, transport controls,
+                            embedded preview)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
                             AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal,
                             StartStreamDrawer — has the Stage 4 template picker, ConfirmDialog,
-                            LanguageSwitcher)
+                            LanguageSwitcher, HlsPlayer.tsx — hls.js preview player with
+                            credentialed requests and network-error retry)
     i18n/                   react-i18next setup + en/ru/uk locale files
-    hooks/                  custom React hooks
+    hooks/                  custom React hooks (incl. useLocalStreamStatus.ts — initial fetch +
+                            SSE-driven query-cache updates)
 ```
 
 **Persistence:** PostgreSQL via Prisma. `main.ts` calls `prisma.$connect()` at boot (fail fast)
@@ -405,6 +524,32 @@ in the session, best-effort per destination), `GET /stream-sessions/{id}/status`
 `GET /stream-sessions/{id}/events` (SSE, aggregated), `DELETE /stream-sessions/{id}` (stops every
 destination, then deletes the session row) — all scoped to the session's owner.
 
+`POST /local-stream/{start,stop,pause,resume,next,previous,play}`, `GET /local-stream/status`,
+`GET /local-stream/events` (SSE) — the local-first path (see "Local relay (MediaMTX)" above).
+**None of these routes takes an id of any kind**: there is exactly one local stream per account,
+resolved from the session cookie, so there is nothing to address and therefore no ownership check
+to get wrong. `start` takes `playlistId` (400 if missing or not a string) and an optional
+`templateId` (400 on an empty string; 404/403 if given and not found/not owned) and nothing else —
+no `title`/`description`/`privacyStatus`/`latencyPreference`, because Phase A has no destinations at
+all and accepting them would tell a caller it had configured something that doesn't exist. 409 if a
+stream is already active (or already starting) for the account, 429 once the host is at
+`MAX_CONCURRENT_LOCAL_STREAMS`. Every *mutating* route additionally requires
+`Content-Type: application/json` (400 otherwise) — not decoration: with no id in the URL these
+routes have no accidental CSRF token either, and requiring JSON is what forces a browser preflight
+that the CORS policy then has to approve, which a plain cross-site HTML form POST (a CORS "simple
+request", whose side effect lands even though its response is blocked) could never get.
+
+`GET /local-stream/preview/index.m3u8` and `GET /local-stream/preview/{file}` proxy the relay's HLS
+output to the browser behind `requireAuth`. **The client never names a MediaMTX path, token or
+credential** — the path is resolved server-side from `req.user.id`, and the proxy still presents
+that session's read credential upstream so `authHTTP` applies even to our own traffic. A variant
+that accepted a path or token parameter would be one IDOR away from cross-tenant viewing. `{file}`
+is checked against an anchored allowlist regex (`name.m3u8|ts|mp4|m4s`, no separators, no traversal)
+and every response is `no-store`. A non-2xx upstream status is passed straight through rather than
+remapped: MediaMTX muxes HLS on demand, so the first playlist request after a start legitimately
+404s until the muxer has cut a segment — which is exactly what `HlsPlayer`'s network-error retry
+exists for.
+
 `POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
 `PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout
 (positioned `cover`/`title`/`playlist` elements), selected by id when starting a stream (see
@@ -444,9 +589,18 @@ never commit these), `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `AP
 (the app's own externally-reachable base URL, used to build the YouTube OAuth redirect URI —
 `GOOGLE_OAUTH_CLIENT_ID`/`_SECRET` come from a Google Cloud Console OAuth client with the YouTube
 Data API v3 enabled, an external, manual, one-time setup step), `FRONTEND_ORIGIN` (the frontend's
-externally-reachable origin, used for CORS policy).
+externally-reachable origin, used for CORS policy), `MEDIAMTX_AUTH_SECRET` (guards the unpublished
+`authHTTP` endpoint MediaMTX calls; it is also interpolated into the `mediamtx` service's
+`MTX_AUTHHTTPADDRESS`, so both containers read the same value from the environment — required and
+never defaulted, because a defaulted shared secret is a backdoor).
 Optional: `PORT` (3000), `SESSION_TTL_DAYS` (30), `UPLOADS_DIR` (`/data/uploads`), `FIFO_DIR`
-(`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`.
+(`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`, `MEDIAMTX_RTMP_URL`
+(`rtmp://mediamtx:1935`), `MEDIAMTX_HLS_URL` (`http://mediamtx:8888`), `MEDIAMTX_AUTH_PORT` (3001),
+`MAX_CONCURRENT_LOCAL_STREAMS` (10), `MAX_LOCAL_STREAM_HOURS` (12). The last three, plus
+`MEDIAMTX_AUTH_PORT`, go through `parsePositiveInt` rather than a bare `parseInt`: a typo'd value
+would otherwise become `NaN`, which silently *disables* the concurrency cap (`size >= NaN` is always
+false) or makes `setTimeout(fn, NaN)` fire on the next tick and auto-stop every local stream the
+instant it starts.
 
 RTMP URL and stream key are no longer global config — they're per-`StreamDestination`, supplied
 by each user via `POST /destinations`. The frontend's `VITE_API_BASE_URL` is a build-time
@@ -501,6 +655,51 @@ has already completed and registered a new lifecycle, this could finalize the ne
 session's YouTube broadcast instead of the crashed one's. `PersistentEncoder.stop()`'s existing
 `stopRequested` guard makes the ordinary stop path safe; this only matters for a genuine crash
 racing a fast restart. The OAuth-connect popup's `postMessage` fallback (polling `popup.closed`) means a connect can take up to 500ms to be detected if the message itself is lost — a timing-dependent edge case. The playlist editor's drag-and-drop reordering has no automated test coverage (documented test-scope decision — see Task 11 brief). No e2e/Playwright coverage exists for any frontend flow. A `StreamSession`'s destination list is fixed at creation — there's no add/remove-destination-from-a-live-session endpoint; adding a destination mid-stream means starting a new session for it instead. `StreamSessionManager.deleteById()`'s per-destination `stop()` calls aren't atomic with each other (same class of narrow race as the rest of this list) — a crash between two of them could leave the session row deleted while one destination is still streaming, orphaned exactly like a single-destination stream would be if its owning destination were deleted mid-stream. **(Fixed.)** Segment switches used to be able to kill the RTMP connection outright (confirmed by live testing, worse under rapid manual switching), because each track/pause segment was muxed to MPEG-TS by its own short-lived ffmpeg process, resetting the container's continuity counter and ADTS bitstream-filter state at every switch. The fix landed as the persistent-encoder rework described under "Overlay templates" Stage 2 below — one long-lived `PersistentEncoder` per destination, never restarted for the session, fed by two Node-owned pipes instead of independent per-segment processes handed off through a FIFO, so there is no more continuity-counter/PTS discontinuity to begin with. Getting there took two rejected intermediate designs (a concat-demuxer MVP, then a two-FIFO split-encode-from-mux design that deadlocked against real ffmpeg binaries) before landing on this shape — see `docs/superpowers/specs/2026-09-03-obs-style-persistent-canvas-design.md` for the full story.
+
+**Local-first streaming (Phase A)** knowingly leaves these open:
+(a) **MediaMTX is now a shared single point of failure** — one container relays every tenant's local
+stream, so its crash takes them all down at once, and nothing re-publishes the sessions that were up
+when it died. Mitigated only by `restart: unless-stopped`, the 512m memory limit and the exact
+version pin; there is no per-tenant isolation.
+(b) **iOS Safari cannot play the preview.** `Hls.isSupported()` is false there, so the `<video>`
+element fetches the playlist with its native player, which will not attach the cross-site session
+cookie the proxy authenticates with — the preview silently fails. A short-lived signed query token
+on the preview URL would fix it; deliberately not built in this phase.
+(c) **A publisher that survives a Node *crash* (not a container restart) keeps its connection.**
+Revocation lives in the in-memory `MediaMtxAuthRegistry`, and MediaMTX's control API is deliberately
+disabled by Layer 0, so nothing can kick an already-established RTMP connection — MediaMTX does not
+re-authorise one. Mitigate later with MediaMTX read/write timeouts.
+(d) **Local-stream state is in-memory**, so a backend restart drops every local stream — matching
+this app's existing choice for stream state rather than a new regression.
+(e) `buildStreamScene`'s `overlayCache`/`sessionId` parameters exist only for the legacy
+multi-destination path, and are deleted together with `SessionOverlayCache` in Phase C.
+(f) **The per-session publish secret lands in plaintext in `docker logs` for the backend
+container**, because `createPipeSpawner` forwards ffmpeg's stderr verbatim and ffmpeg logs its own
+output URL on startup (`Output #0, flv, to
+'rtmp://mediamtx:1935/live/<token>?user=pub&pass=<secret>'`) — the same class of leak the design's
+"why not let MediaMTX forward" section rejected `runOnReady` for, now happening one hop over.
+(g) **The shared `MEDIAMTX_AUTH_SECRET` lands in MediaMTX's own logs** on any connection failure to
+the auth endpoint (`Post "http://super-dj:3001/internal/mediamtx-auth/<SECRET>": dial tcp …:
+connection refused`), which routine backend restarts will trigger — a consequence of carrying it as
+a path segment rather than a header, which MediaMTX leaves no room for. Neither (f) nor (g) is fixed
+in Phase A; both are acceptable for now on the same footing as this app's existing
+secrets-in-process-args tolerance (destination stream keys are already visible to `ps` inside their
+own container), but should be revisited — e.g. redacting the trailing URL in the stderr forwarder —
+before this leaves a single trusted deployment.
+(h) **The Phase A real-binary smoke test has not been run**, so three assumptions the whole
+local-first design rests on are still only source-read, never executed: that a real ffmpeg accepts
+and forwards the query-string RTMP credential (`?user=pub&pass=…`), that MediaMTX's `authHTTP`
+callback body really carries `path` as `live/<token>` (no leading slash) with a literal
+`publish`/`read` `action`, and that its on-demand HLS muxing produces a playable multivariant
+playlist with **relative** child references (the proxy does no playlist rewriting, so an absolute
+reference would break the preview and would need fixing in `localStreamPreviewRoutes.ts`). The test
+itself is fully specified in the Phase A plan's Task 12 (isolated docker network, throwaway auth
+stub, the project's own image so the ffmpeg under test is the Debian-bookworm build this app
+actually ships, no published ports, full teardown); it needs a reachable docker host, which this
+workstation did not have when the phase was written. Run it before this reaches production — this
+codebase's whole track record (the two-FIFO deadlock, the `Buffer`/`Uint8Array` piscina corruption,
+the `-stream_loop` gif freeze) is that this is exactly the class of assumption unit tests cannot
+check.
 
 ## Tooling
 
