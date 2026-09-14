@@ -51,57 +51,86 @@ export default function Stream() {
   // a second one) nor the transport controls (there is nothing to control yet).
   const isStarting = local?.state === 'starting';
   const isRunning = local !== undefined && local.state !== 'idle' && local.state !== 'error' && !isStarting;
-  // Once anything is happening server-side, the checklist reflects real forward statuses; before
-  // that it is local form state.
+  // Whether a TOGGLE goes to the backend or into local form state. Only while something is actually
+  // running server-side does a click have an immediate backend meaning; while idle it is form state
+  // (and `startMutation` below is what reconciles that intent against the backend).
   const usesBackendForwards = isRunning || isStarting;
 
   const destinations = destinationsQuery.data ?? [];
-  // Before the stream runs, synthesise the same shape DestinationToggles reads from real forwards:
-  // ticked destinations are exactly "pending" — wanted, with nothing having happened on any
-  // platform yet, which is precisely what the backend would report for them.
-  const forwards: DestinationForwardStatus[] = usesBackendForwards
-    ? status!.destinations
-    : selectedDestinationIds.map((destinationId) => ({
-      destinationId,
-      name: destinations.find((d) => d.id === destinationId)?.name ?? destinationId,
-      desired: 'on',
-      state: 'pending',
-    }));
+  // The backend holds forward state even while NOTHING is running, and it must never be discarded:
+  //  - `localStreamManager.stop()` is the only thing that clears the forwards map, so a session that
+  //    ended in `error` keeps every forward it had — including its `error` message and provider
+  //    phase, which a synthesized placeholder would silently replace with a blank 'pending' row.
+  //  - `setDestination` is explicitly valid with nothing running; it parks the forward at 'pending'.
+  const backendForwards = status?.destinations ?? [];
+  const backendSelectedIds = backendForwards
+    .filter((forward) => forward.desired === 'on')
+    .map((forward) => forward.destinationId);
 
-  const selectedIds = usesBackendForwards
-    ? forwards.filter((forward) => forward.desired === 'on').map((forward) => forward.destinationId)
-    : selectedDestinationIds;
-  const hasYoutubeSelected = destinations.some((d) => d.provider === 'youtube' && selectedIds.includes(d.id));
-
-  // `selectedDestinationIds` only matters while idle (see its own comment above), but nothing kept
-  // it in sync with destinations toggled ON mid-stream — a user who checked a box while running
-  // would see it silently vanish from the checklist the moment the stream stopped, since the local
-  // state variable was never written to during the run at all. `lastBackendSelectedIds` mirrors the
-  // backend-derived `selectedIds` on every render WHILE running — captured in a ref, not read at
-  // the moment of the transition, because by the render where `usesBackendForwards` has already
-  // flipped to false, `selectedIds` has ALREADY switched its own source back to the (still-stale)
-  // `selectedDestinationIds`; there is no later point at which the backend-derived value is still
-  // reachable through `selectedIds` itself.
-  const lastBackendSelectedIds = useRef<string[]>([]);
-  if (usesBackendForwards) lastBackendSelectedIds.current = selectedIds;
-  const wasRunning = useRef(false);
+  // Adopt whatever selection the backend actually holds: on first load, on every change while the
+  // stream runs, and while nothing is running at all. Guarded on non-empty precisely so that
+  // `stop()` emptying the forwards map does NOT wipe the checklist — keeping the boxes ticked
+  // across a stop is the behaviour the old `wasRunning`/`lastBackendSelectedIds` pair existed to
+  // provide, and this subsumes it. Keyed on the joined ids rather than the array so a re-fetch that
+  // changes nothing does not clobber a tick the user just made; a genuine backend change does win.
+  const backendSelectionKey = backendSelectedIds.join(',');
+  const adoptedSelectionKey = useRef<string | null>(null);
   useEffect(() => {
-    if (wasRunning.current && !usesBackendForwards) setSelectedDestinationIds(lastBackendSelectedIds.current);
-    wasRunning.current = usesBackendForwards;
-  }, [usesBackendForwards]);
+    if (backendSelectionKey.length === 0 || adoptedSelectionKey.current === backendSelectionKey) return;
+    adoptedSelectionKey.current = backendSelectionKey;
+    setSelectedDestinationIds(backendSelectionKey.split(','));
+  }, [backendSelectionKey]);
+
+  // Display. A real backend entry always wins over a synthesized one — it is the only thing that
+  // carries the true state, the provider phase and any error message. While idle, two things are
+  // layered on top: a destination the user has only ticked locally gets a synthesized 'pending' row
+  // (wanted, nothing having happened on any platform yet — exactly what the backend would report),
+  // and a LOCAL untick wins over a backend `desired:'on'`, because the box has to show what
+  // pressing Start will actually do — which `startMutation` then makes true.
+  const forwards: DestinationForwardStatus[] = usesBackendForwards
+    ? backendForwards
+    : [
+      ...backendForwards.map((forward) => (forward.desired === 'on' && !selectedDestinationIds.includes(forward.destinationId)
+        ? { ...forward, desired: 'off' as const }
+        : forward)),
+      ...selectedDestinationIds
+        .filter((id) => !backendForwards.some((forward) => forward.destinationId === id))
+        .map((destinationId) => ({
+          destinationId,
+          name: destinations.find((d) => d.id === destinationId)?.name ?? destinationId,
+          desired: 'on' as const,
+          state: 'pending' as const,
+        })),
+    ];
+
+  const selectedIds = usesBackendForwards ? backendSelectedIds : selectedDestinationIds;
+  const hasYoutubeSelected = destinations.some((d) => d.provider === 'youtube' && selectedIds.includes(d.id));
 
   const applyStatus = (next: LocalStreamStatus) => queryClient.setQueryData(LOCAL_STREAM_STATUS_QUERY_KEY, next);
 
   const startMutation = useMutation({
-    mutationFn: () => localStreamApi.start({
-      playlistId,
-      templateId: templateId || undefined,
-      destinationIds: selectedDestinationIds,
-      title: title || undefined,
-      description: description || undefined,
-      privacyStatus: hasYoutubeSelected ? privacyStatus : undefined,
-      latencyPreference: hasYoutubeSelected ? latencyPreference : undefined,
-    }),
+    // `localStreamManager.start()` only ever ADDS `desired:'on'` for the ids it is handed — it never
+    // turns off a forward that is already on but absent from the list (see the comment above its own
+    // `refreshForwardRows` call). A destination the user unticked here would therefore go live from
+    // a Start the user believed excluded it; on YouTube that is a real broadcast appearing on their
+    // real channel. So switch those off first, sequentially, and only then start: what the checklist
+    // showed is exactly what goes live.
+    mutationFn: async () => {
+      for (const forward of backendForwards) {
+        if (forward.desired === 'on' && !selectedDestinationIds.includes(forward.destinationId)) {
+          await localStreamApi.setDestination(forward.destinationId, 'off');
+        }
+      }
+      return localStreamApi.start({
+        playlistId,
+        templateId: templateId || undefined,
+        destinationIds: selectedDestinationIds,
+        title: title || undefined,
+        description: description || undefined,
+        privacyStatus: hasYoutubeSelected ? privacyStatus : undefined,
+        latencyPreference: hasYoutubeSelected ? latencyPreference : undefined,
+      });
+    },
     onSuccess: applyStatus,
     onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.startFailed')),
   });

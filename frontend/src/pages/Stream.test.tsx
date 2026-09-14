@@ -3,7 +3,7 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Stream from './Stream';
 import { useLocalStreamStatus } from '../hooks/useLocalStreamStatus';
-import { localStreamApi, LocalStreamStatus } from '../api/localStream';
+import { localStreamApi, DestinationForwardStatus, LocalStreamStatus } from '../api/localStream';
 import { streamPresetsApi } from '../api/streamPresets';
 import { playlistsApi } from '../api/playlists';
 import { templatesApi } from '../api/templates';
@@ -34,6 +34,21 @@ const LIVE: LocalStreamStatus = {
     previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
   },
   destinations: [],
+};
+
+// A forward the backend still holds with nothing running: localStreamManager only drops the
+// forwards map in stop(), so a session that died leaves its forwards behind, errors and all.
+const LEFTOVER_ON_FORWARD: DestinationForwardStatus = {
+  destinationId: 'd1',
+  name: 'My channel',
+  desired: 'on',
+  state: 'error',
+  error: { reason: 'provider', message: 'YouTube rejected the broadcast' },
+};
+
+const ERRORED_WITH_LEFTOVER: LocalStreamStatus = {
+  local: { ...IDLE.local, state: 'error' },
+  destinations: [LEFTOVER_ON_FORWARD],
 };
 
 function mockStatus(data: LocalStreamStatus) {
@@ -85,6 +100,44 @@ describe('Stream page', () => {
     await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
       playlistId: 'p1', destinationIds: [],
     })));
+  });
+
+  // The forwards the backend already holds are real state, not decoration: they outlive an errored
+  // session, they carry the error message, and start() only ever ADDS the ids it is passed — so a
+  // leftover `desired:'on'` forward that the checklist showed as unticked would go live anyway.
+  it('shows a leftover backend forward as ticked, with its error, while nothing is running', async () => {
+    mockStatus(ERRORED_WITH_LEFTOVER);
+    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
+    renderWithProviders(<Stream />);
+    await screen.findByText('Friday Mix');
+    await waitFor(() => expect(screen.getByLabelText('My channel')).toBeChecked());
+    expect(screen.getByText('YouTube rejected the broadcast')).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
+      playlistId: 'p1', destinationIds: ['d1'],
+    })));
+  });
+
+  // The other half of that invariant. Unticking stays local while idle (no round-trip for a box the
+  // backend has no opinion on yet), so the backend still says `desired:'on'` — and start() would
+  // never turn it off. Starting has to switch it off explicitly, or the UI lied.
+  it('switches off a leftover forward the user unticked before starting', async () => {
+    mockStatus(ERRORED_WITH_LEFTOVER);
+    vi.mocked(localStreamApi.setDestination).mockResolvedValue(ERRORED_WITH_LEFTOVER);
+    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
+    renderWithProviders(<Stream />);
+    await screen.findByText('Friday Mix');
+    await waitFor(() => expect(screen.getByLabelText('My channel')).toBeChecked());
+    await userEvent.click(screen.getByLabelText('My channel'));
+    expect(screen.getByLabelText('My channel')).not.toBeChecked();
+    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
+    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
+      destinationIds: [],
+    })));
+    expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'off');
   });
 
   it('only offers the YouTube broadcast fields when a YouTube destination is ticked', async () => {
