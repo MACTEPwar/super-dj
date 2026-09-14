@@ -313,6 +313,23 @@
     "previewUnsupported": "Your browser cannot play this preview.",
     "localOnlyNotice": "This stream is local only — nothing is being sent to any platform."
   },
+  "forwardState": {
+    "off": "not forwarded",
+    "pending": "will start with the stream",
+    "preparing": "preparing…",
+    "connecting": "connecting…",
+    "live": "live",
+    "stopping": "stopping…",
+    "error": "error"
+  },
+  "stream": {
+    "destinationsTitle": "Destinations",
+    "destinationsHelp": "Toggle a destination on or off at any time. The stream itself never stops.",
+    "noDestinations": "No destinations yet.",
+    "watchLink": "Open watch page",
+    "connectingHelp": "Going live on a platform takes 10-40 seconds. Toggling again will not make it faster.",
+    "youtubeToggleWarning": "Each time you switch this on, YouTube starts a brand-new broadcast: chat, viewer count and likes reset, and switching off leaves another recording on your channel. The link above always points at whatever you are broadcasting now."
+  },
   "drawer": {
     "close": "Close"
   }
