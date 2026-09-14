@@ -152,8 +152,14 @@ tree, and this one container is shared by every tenant. Three layers make it saf
 
 - **Layer 0 — the network.** The service has **no `ports:` entry at all**, and must never get one:
   it is reachable only as `mediamtx` on the compose network, so nothing outside the host can speak
-  RTMP or HLS to it even holding a valid credential — and every non-RTMP/HLS surface (`api`,
-  `metrics`, `pprof`, `playback`, `rtsp`, `webrtc`, `srt`) is `false` in the config. This is the
+  RTMP or HLS to it even holding a valid credential — and every non-RTMP/HLS surface the config
+  names (`api`, `metrics`, `pprof`, `playback`, `rtsp`, `webrtc`, `srt`) is `false`. **Not every
+  surface is named, though**: the Task 12 smoke run showed v1.21.0 also starting `[MoQ] … listeners
+  on :8892 (TCP/HTTP2), :8892 (UDP/HTTP3), :8893 (UDP/QUIC)`, because `moq` defaults to enabled and
+  `docker/mediamtx.yml` never turns it off (it also self-generates a TLS key at startup to do it).
+  Nothing is exposed by this — no ports are published — but it is a live reminder that the "every
+  extra surface is off" half of this layer is a *denylist* that a version bump can silently outrun,
+  and `moq: false` is not yet in the config or the invariant test. This layer's port rule is the
   actual trust boundary; everything else is defense in depth. Because it is one careless line away
   from being undone, it's enforced by an automated test — **`test/infra/mediamtxConfig.test.ts`**
   parses both YAML files and fails the build if a `ports:` entry, an enabled control surface, or a
@@ -199,18 +205,62 @@ overrode what the design spec originally called for:
   with `authMethod: http` and no address, exactly the fail-closed behaviour wanted if the variable
   ever goes missing.
 
-The request body `MediaMtxAuthRegistry.authorize` is written against comes from the same source
-read (`internal/auth/manager.go`): `path` arrives as `live/<token>` with **no leading slash**, and
-`action` as the literal string `publish` or `read` —
-`{"user":"pub","password":"<secret>","token":"","ip":"…","action":"publish","path":"live/<32 hex>",`
-`"protocol":"rtmp","id":"…","query":"user=pub&pass=<secret>"}`.
-⚠️ **None of this has been confirmed against a real MediaMTX binary yet.** The Phase A plan's
-Task 12 smoke test — publish a real ffmpeg `testsrc2` into a real `bluenviron/mediamtx:1.21.0` on an
-isolated docker network, with a throwaway auth stub logging the exact body it receives, then read
-the HLS playlist and a segment back with the read credential — could not be run, because the remote
-docker host was unreachable from this workstation. Until it is run, the query-string credential
-form, the `path`/`action` shape above, and the on-demand HLS behaviour the preview player assumes
-all rest on source reading alone. See "Known follow-ups".
+**Verified against a real binary** (Task 12's smoke test: a real Debian-bookworm `ffmpeg 5.1.9`
+from this repo's own image publishing into a real `bluenviron/mediamtx:1.21.0`, on an isolated
+docker network with a throwaway auth stub). The exact body the auth endpoint receives, copied from
+that stub's log:
+
+```
+AUTH /internal/mediamtx-auth/smoke-secret {"ip":"172.26.0.4","user":"pub","password":"pubsecret",
+"token":"pubsecret","action":"publish","path":"live/abcdef0123456789abcdef0123456789",
+"protocol":"rtmp","id":"0ef094e9-06b9-499e-8d66-5a394be00186","query":"user=pub&pass=pubsecret",
+"userAgent":"FMLE/3.0 (compatible; Lavf59.27.100)"}
+```
+
+`path` really does arrive as `live/<token>` with **no leading slash** and `action` as the literal
+`publish`/`read`, so `MediaMtxAuthRegistry` matches it as written. One detail that was *not*
+predicted: **`token` carries a copy of the password**, so the publish secret appears three times in
+the body (`password`, `token`, `query`). `authorize()` ignores `token` and compares `user` +
+`password` only, which is still correct — but do not start trusting `token` as if it were a
+separate credential. Also confirmed on that run: `-f flv "rtmp://…/live/<token>?user=pub&pass=…"`
+is accepted by that ffmpeg build unchanged, MediaMTX logs `is publishing to path
+'live/abcdef…'`; a wrong password is denied (`[rtmp] Server error: authentication failed`, ffmpeg
+exit 1, MediaMTX `failed to authenticate: server replied with code 401`); and a path that does not
+match the Layer 1 regex is rejected as `path 'live/short' is not configured` **without the auth
+endpoint being called at all** — Layer 1 really does short-circuit ahead of Layer 2.
+
+⚠️ **The HLS read leg did NOT behave as the preview proxy assumes — `localStreamPreviewRoutes.ts`
+cannot serve a real MediaMTX 1.21.0 stream as currently written.** Two real behaviours the design
+did not account for:
+
+1. **Playlist child references carry a required `?session=<uuid>` query string**, and the proxy
+   drops it. Real output: `index.m3u8` (200) references `main_stream.m3u8?session=46f70a71-…`, whose
+   own playlist references `a37a29d6097c_main_seg14.ts?session=46f70a71-…`. The references *are*
+   relative (so no playlist rewriting is needed, as assumed), and the bare file names do pass the
+   route's `ALLOWED_FILE` regex — but the route builds its upstream URL as
+   `` `${target.hlsBaseUrl}/${fileName}` `` from `req.params.file`, which in Express excludes the
+   query string. Fetched without `?session=`, MediaMTX answers **401**
+   `{"status":"error","error":"authentication error"}` for both the media playlist and every
+   segment — and does not even consult the auth endpoint, because for child files the session id,
+   not the `Authorization` header, is the credential (the header only authenticates the
+   `index.m3u8` entry point, which is what mints the session). With the query forwarded, the same
+   requests return 200 (`application/vnd.apple.mpegurl`, 1069 bytes; `video/mp2t`, ~1.9 MB). Net
+   effect today: the playlist loads and every child request 401s, so hls.js retries forever and the
+   preview never plays. **Not fixed here** — see "Known follow-ups".
+2. **The first request of every HLS session is answered with a `cookieCheck` 302**, before any
+   authentication: `302 Found`, `Location: /live/<token>/index.m3u8?cookieCheck=1`,
+   `Set-Cookie: cookieCheck=1; HttpOnly; Secure; SameSite=None; Partitioned`. The proxy survives
+   this only because `createPreviewFetch()` uses Node's global `fetch`, which follows redirects by
+   default and re-sends the `Authorization` header on the same-origin hop (confirmed:
+   `redirected: true`, final 200). That is an implicit, untested dependency — anything that sets
+   `redirect: 'manual'`, or an HTTP client without redirect following, turns every preview request
+   into a bare 302 the route would pass through to the browser with no `Location`.
+
+What *did* hold on the read leg: on-demand muxing behaves exactly as `HlsPlayer`'s retry logic
+assumes — from a fresh publish, `index.m3u8` 404s (`{"status":"error","error":"no stream is
+available on path 'live/…'"}`) for ~2.4 s and then returns 200 with a segment already available.
+And the credential split works: no credentials → 401, wrong read secret → 401, and the **publish**
+credential used for a read → 401.
 
 **Overlay templates (in progress).** Rework driven by two goals at once: fix the recurring
 segment-switch corruption (see "Known follow-ups" below) *and* lay the foundation for a
@@ -548,7 +598,9 @@ is checked against an anchored allowlist regex (`name.m3u8|ts|mp4|m4s`, no separ
 and every response is `no-store`. A non-2xx upstream status is passed straight through rather than
 remapped: MediaMTX muxes HLS on demand, so the first playlist request after a start legitimately
 404s until the muxer has cut a segment — which is exactly what `HlsPlayer`'s network-error retry
-exists for.
+exists for (measured against a real relay: ~2.4 s of 404 from a fresh publish, then 200).
+⚠️ **These two routes do not work against a real MediaMTX yet** — they drop the `?session=` query
+the playlists reference, and every child request 401s. See known follow-up (h).
 
 `POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
 `PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout
@@ -686,20 +738,36 @@ in Phase A; both are acceptable for now on the same footing as this app's existi
 secrets-in-process-args tolerance (destination stream keys are already visible to `ps` inside their
 own container), but should be revisited — e.g. redacting the trailing URL in the stderr forwarder —
 before this leaves a single trusted deployment.
-(h) **The Phase A real-binary smoke test has not been run**, so three assumptions the whole
-local-first design rests on are still only source-read, never executed: that a real ffmpeg accepts
-and forwards the query-string RTMP credential (`?user=pub&pass=…`), that MediaMTX's `authHTTP`
-callback body really carries `path` as `live/<token>` (no leading slash) with a literal
-`publish`/`read` `action`, and that its on-demand HLS muxing produces a playable multivariant
-playlist with **relative** child references (the proxy does no playlist rewriting, so an absolute
-reference would break the preview and would need fixing in `localStreamPreviewRoutes.ts`). The test
-itself is fully specified in the Phase A plan's Task 12 (isolated docker network, throwaway auth
-stub, the project's own image so the ffmpeg under test is the Debian-bookworm build this app
-actually ships, no published ports, full teardown); it needs a reachable docker host, which this
-workstation did not have when the phase was written. Run it before this reaches production — this
-codebase's whole track record (the two-FIFO deadlock, the `Buffer`/`Uint8Array` piscina corruption,
-the `-stream_loop` gif freeze) is that this is exactly the class of assumption unit tests cannot
-check.
+(h) **OPEN BUG, found by Task 12's real-binary smoke test: the HLS preview cannot actually play.**
+The RTMP publish half of Phase A is confirmed working against real binaries (see "Local relay
+(MediaMTX)" above), but the read half is not. MediaMTX 1.21.0's playlists reference their children
+with a **required `?session=<uuid>` query string** (`main_stream.m3u8?session=…`, then
+`<hash>_main_seg14.ts?session=…`), and `localStreamPreviewRoutes.ts` builds its upstream URL from
+Express's `req.params.file`, which excludes the query — so every media-playlist and segment request
+reaches MediaMTX without the session and is answered **401**
+`{"status":"error","error":"authentication error"}` (the `Authorization` header authenticates only
+the `index.m3u8` entry point, which is what mints the session; for child files the session id *is*
+the credential, and the auth endpoint is not even consulted). The visible symptom is a preview that
+loads its playlist and then never plays, with hls.js retrying forever. The fix is to forward the
+inbound query string upstream — verified in the same run: identical requests with `?session=…`
+return 200 `application/vnd.apple.mpegurl` and 200 `video/mp2t`. Deliberately **not** fixed as part
+of the documentation task that found it; it needs its own change plus a test, and the route's
+`ALLOWED_FILE` sanitising must keep applying to the file name only, never to the forwarded query.
+(i) **The preview proxy depends, untested and undocumented until now, on redirect following.**
+Every HLS session's first request is answered `302 Found` → `…/index.m3u8?cookieCheck=1` with a
+`Set-Cookie: cookieCheck=1` probe, *before* authentication. `createPreviewFetch()` happens to
+survive it because Node's global `fetch` follows redirects by default and re-sends `Authorization`
+on the same-origin hop. Any client swap that does not (`redirect: 'manual'`, a different HTTP
+library) breaks the preview, and the route would pass a bare 302 with no `Location` to the browser.
+Worth an explicit `redirect: 'follow'` and a test.
+(j) **`docker/mediamtx.yml` does not disable MoQ**, which v1.21.0 starts by default on :8892/:8893
+(see the Layer 0 note above), and `test/infra/mediamtxConfig.test.ts` does not assert it off. Not
+exposed — no published ports — but the surface denylist is now demonstrably incomplete.
+(k) **`hlsAllowOrigin` is deprecated in v1.21.0**, which logs `parameter 'hlsAllowOrigin' is
+deprecated and has been replaced with 'hlsAllowOrigins'` at every startup. It still works, so this
+is cosmetic — but the config comment claiming the parameter "is singular and a string, not the list
+shape `hlsAllowOrigins: []` might suggest" is now backwards for this version and will become wrong
+outright when the deprecated form is removed.
 
 ## Tooling
 
