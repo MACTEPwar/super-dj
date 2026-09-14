@@ -17,6 +17,12 @@ export class DestinationRepository {
     return this.prisma.streamDestination.findUnique({ where: { id } });
   }
 
+  // Records (or clears) the reusable YouTube liveStream this destination pushes into. Cleared back
+  // to null when YouTube no longer has that stream, so the next toggle-on creates a fresh one.
+  async setYoutubeLiveStreamId(id: string, youtubeLiveStreamId: string | null): Promise<void> {
+    await this.prisma.streamDestination.update({ where: { id }, data: { youtubeLiveStreamId } });
+  }
+
   async deleteById(id: string): Promise<void> {
     await this.prisma.streamDestination.deleteMany({ where: { id } });
   }

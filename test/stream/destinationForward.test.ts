@@ -10,7 +10,7 @@ function destination(overrides: Partial<StreamDestination> = {}): StreamDestinat
     id: 'dest-1', userId: 'user-1', name: 'My channel', rtmpUrl: 'rtmp://dest.example/app',
     streamKeyEncrypted: null, provider: 'custom', youtubeLiveStreamId: null, createdAt: new Date(),
     ...overrides,
-  } as StreamDestination;
+  };
 }
 
 function fakeLifecycle(): DestinationLifecycle & { setPhase: (p: string) => void; finalized: jest.Mock } {

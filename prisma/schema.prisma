@@ -69,6 +69,13 @@ model StreamDestination {
   rtmpUrl            String?
   streamKeyEncrypted String?
   provider           String            @default("custom")
+  // YouTube only. The liveStream (ingest endpoint) is REUSED across every toggle-on of this
+  // destination; only the liveBroadcast is ephemeral. That removes liveStreams.insert/delete from
+  // every toggle cycle (~30% of its ~330 Data API units against a shared 10,000/day quota) and
+  // removes the "ephemeral liveStream orphaned because finalize's token call failed" failure class
+  // entirely. Null until the first successful toggle-on, and re-created automatically if YouTube
+  // no longer has it.
+  youtubeLiveStreamId String?
   createdAt          DateTime          @default(now())
   oauthConnection    OAuthConnection?
   streamSessionLinks StreamSessionDestination[]
@@ -94,26 +101,31 @@ model OAuthState {
   createdAt DateTime @default(now())
 }
 
-// A saved (playlist, destinations[]) grouping so the frontend can start/pause/next/stop
-// several destinations — e.g. YouTube + a custom RTMP target — as one fan-out command.
-// Live status is never persisted here; it's derived at read-time from each destination's
-// own in-memory StreamController (same as single-destination streaming today), since a
-// server restart already kills the underlying ffmpeg processes regardless of this row.
+// A saved PRESET: a name plus the playlist, overlay template, destination checklist and broadcast
+// metadata to pre-populate the next local-stream start with. It used to represent "the running
+// thing" (a fan-out to N destinations); since the local-first rework the running thing is the one
+// in-memory local stream per account, and this row is purely a saved choice.
+//
+// The model and table names are still StreamSession/StreamSessionDestination so that repurposing
+// them costs no table rename and no data migration; the TypeScript layer that reads them is named
+// StreamPreset* (see src/stream/streamPresetRepository.ts).
 model StreamSession {
   id            String                     @id @default(uuid())
   userId        String
   user          User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // What the user picks this preset by. Separate from `title`, which is the YouTube BROADCAST
+  // title — overloading one field for both would make the preset picker show broadcast titles.
+  name          String                     @default("Untitled preset")
   playlistId    String
   playlist      Playlist                   @relation(fields: [playlistId], references: [id], onDelete: Cascade)
-  // Optional — a session can start with no template selected (falls back to a built-in default
-  // layout, see StreamManager.start()). SetNull rather than Cascade: deleting a template that's
-  // referenced by a past/running session should not take the session down with it, just make it
-  // fall back to that same default the next time it (re)starts.
+  // Optional — a preset can carry no template (the built-in default layout is used instead).
+  // SetNull rather than Cascade: deleting a template should not delete presets that referenced it.
   templateId    String?
   template      StreamTemplate?            @relation(fields: [templateId], references: [id], onDelete: SetNull)
   title         String?
   description   String?
   privacyStatus String?
+  latencyPreference String?
   createdAt     DateTime                   @default(now())
   destinations  StreamSessionDestination[]
 }
