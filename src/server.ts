@@ -17,9 +17,6 @@ import { OAuthProviderAdapter } from './destinations/oauthProviderAdapter';
 import { CustomRtmpProvider } from './destinations/customRtmpProvider';
 import { YoutubeProvider } from './destinations/youtubeProvider';
 import { StreamDestinationProvider } from './destinations/streamDestinationProvider';
-import { StreamManager } from './stream/streamManager';
-import { StreamSessionRepository } from './stream/streamSessionRepository';
-import { StreamSessionManager } from './stream/streamSessionManager';
 import { LocalRelayTarget } from './stream/localRelayTarget';
 import { MediaMtxAuthRegistry, createMediaMtxAuthApp } from './stream/mediaMtxAuth';
 import { LocalStreamManager } from './stream/localStreamManager';
@@ -141,10 +138,10 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const templateRepository = new TemplateRepository(prisma);
 
-  // The destination-free half of the pipeline. sceneDeps IS the object StreamManager's own deps
-  // extend (StreamManagerDeps extends StreamSceneDeps) — StreamManager below is constructed by
-  // spreading this same value, not a second hand-written literal, so the two paths cannot drift
-  // on fonts, dimensions, uploads or repositories: there is only one literal to edit.
+  // The destination-free half of the pipeline — everything a stream needs that has no destination
+  // concept in it. LocalStreamManager below is constructed by spreading this same value, not a
+  // second hand-written literal, so it can never drift on fonts, dimensions, uploads or
+  // repositories: there is only one literal to edit.
   const sceneDeps: StreamSceneDeps = {
     spawner,
     pipeSpawner: createPipeSpawner(),
@@ -158,21 +155,6 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     templateRepository,
     templateImageService,
   };
-
-  const streamManager = new StreamManager({
-    ...sceneDeps,
-    destinationRepository,
-    providers: streamDestinationProviders,
-  });
-
-  const streamSessionRepository = new StreamSessionRepository(prisma);
-  const streamSessionManager = new StreamSessionManager({
-    streamManager,
-    streamSessionRepository,
-    destinationRepository,
-    playlistRepository,
-    templateRepository,
-  });
 
   const mediaMtxAuthRegistry = new MediaMtxAuthRegistry();
   const localStreamManager = new LocalStreamManager({
@@ -202,8 +184,6 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     playlistRepository,
     destinationRepository,
     destinationEncryptionKey: config.streamKeyEncryptionKey,
-    streamManager,
-    streamSessionManager,
     localStreamManager,
     previewFetch: createPreviewFetch(),
     oauthProviderAdapters,

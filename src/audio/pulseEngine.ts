@@ -14,7 +14,8 @@ export interface PulseEngineOptions {
   // detected broadband beat, layered on top of the per-band picture; up to
   // MAX_GLOBAL_PULSE_STRENGTH. On the engine's OWN scale, not the template's 0-20 `globalPulse`
   // field — templateTypes.ts's globalPulseStrength() is the one place the two are related (10
-  // template steps per 1.0 here), and StreamManager applies it before constructing PulseVisualizer.
+  // template steps per 1.0 here), and buildStreamScene() (streamScene.ts) applies it before
+  // constructing PulseVisualizer.
   globalPulse?: number;
   // How fast each band's "floor" (recent-loudness baseline) decays back down between hits — lower
   // is slower. Tuned so a sustained loud note doesn't retrigger every tick, but a real transient

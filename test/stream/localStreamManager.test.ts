@@ -115,14 +115,6 @@ describe('LocalStreamManager.start', () => {
     expect(authRegistry.register.mock.invocationCallOrder[0]).toBeLessThan(encoder.start.mock.invocationCallOrder[0]);
   });
 
-  it('passes no overlay cache or session id — one queue drives one encode, so there is nothing to share', async () => {
-    const { manager, buildScene } = buildManager();
-    await manager.start('user-1', 'playlist-1');
-    const params = buildScene.mock.calls[0][1];
-    expect(params.overlayCache).toBeUndefined();
-    expect(params.sessionId).toBeUndefined();
-  });
-
   it('rejects with 409 when this user already has an active stream', async () => {
     const { manager } = buildManager();
     await manager.start('user-1', 'playlist-1');

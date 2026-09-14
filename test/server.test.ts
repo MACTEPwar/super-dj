@@ -56,6 +56,12 @@ describe('buildServer', () => {
     expect((await request(app).get('/local-stream/status')).status).toBe(401);
     expect((await request(app).get('/local-stream/preview/index.m3u8')).status).toBe(401);
   });
+
+  it('does not serve the removed per-destination or session stream routes', async () => {
+    const { app } = buildServer(config, fakeSpawner());
+    expect((await request(app).post('/destinations/d1/stream/start').send({ playlistId: 'p1' })).status).toBe(404);
+    expect((await request(app).get('/stream-sessions')).status).toBe(404);
+  });
 });
 
 describe('createSpawner', () => {

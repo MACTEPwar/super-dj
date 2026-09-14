@@ -21,7 +21,6 @@ import {
 } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
-import { SessionOverlayCache } from './sessionOverlayCache';
 import { LibraryLike } from './streamController';
 
 // Also declared (as '1280x720'/'30fps'-shaped strings) in src/destinations/youtubeApiClient.ts's
@@ -37,9 +36,8 @@ const PLAYLIST_WINDOW_BEFORE = 2;
 const PLAYLIST_WINDOW_AFTER = 7;
 
 // Where the encoder pushes. Supplied by the caller because that is the ONE thing this module
-// deliberately knows nothing about: StreamManager passes a destination's real ingest URL,
-// LocalStreamManager passes a minted MediaMTX publish URL, and a Phase B forward pushes from
-// MediaMTX rather than through here at all.
+// deliberately knows nothing about: LocalStreamManager passes a minted MediaMTX publish URL, and
+// a DestinationForward pushes from MediaMTX rather than through here at all.
 export interface RtmpTarget {
   rtmpUrl: string;
   streamKey: string;
@@ -60,21 +58,14 @@ export interface StreamSceneDeps {
 }
 
 export interface BuildStreamSceneParams {
-  // The owner every resource below must belong to. StreamManager passes the destination's owner;
-  // LocalStreamManager passes the authenticated caller.
+  // The owner every resource below must belong to.
   userId: string;
   playlistId: string;
   // Absent -> DEFAULT_TEMPLATE_ELEMENTS, not an error. See CLAUDE.md's overlay-templates notes.
   templateId?: string;
-  // Namespaces this scene's on-disk overlay PNGs. A destinationId for StreamManager, a userId for
-  // LocalStreamManager — both are unique per concurrently-running pipeline, which is all this
-  // needs to be.
+  // Namespaces this scene's on-disk overlay PNGs. The userId today — one pipeline per account —
+  // which is all this needs to be.
   sceneId: string;
-  // Legacy multi-destination session sharing. Only StreamSessionManager-driven starts pass these;
-  // Phase C deletes SessionOverlayCache and both of these parameters with it, since one queue
-  // driving one encode makes the drift this cache guards against structurally impossible.
-  overlayCache?: SessionOverlayCache;
-  sessionId?: string;
 }
 
 export interface StreamScene {
@@ -125,10 +116,11 @@ function resolveImageAssets(
 
 /**
  * Everything a stream needs that has no destination concept in it: which tracks play, what the
- * picture looks like, and how to build the three/four ffmpeg-facing collaborators. Extracted out
- * of StreamManager.start(), which used to interleave all of this with provider lookup,
- * prepareSession() and lifecycle wiring — see the Phase A plan for why that separation is the
- * point rather than a side effect.
+ * picture looks like, and how to build the three/four ffmpeg-facing collaborators. Originally
+ * extracted out of the old, now-deleted per-destination stream manager's start() method (see
+ * CLAUDE.md's "Overlay templates"/local-first notes), which used to interleave all of this with
+ * provider lookup, prepareSession() and lifecycle wiring. LocalStreamManager.start() is the one
+ * remaining caller.
  */
 export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStreamSceneParams): Promise<StreamScene> {
   const { userId, playlistId, templateId, sceneId } = params;
@@ -255,22 +247,12 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
       background: layer === 'below' ? track.overlayOverride?.backgroundColor : undefined,
     });
 
-    // The cache key carries the layer too: the two layers of one (track, template) are different
-    // pictures and must never be served for each other.
-    const renderShared = (elements: TemplateElement[], layer: 'below' | 'above') =>
-      (params.overlayCache && params.sessionId
-        ? params.overlayCache.getOrRender(
-          { sessionId: params.sessionId, trackName: track.name, templateId: templateId ?? null, layer },
-          () => renderLayer(elements, layer),
-        )
-        : renderLayer(elements, layer));
-
     let overlayPng: Buffer;
     let overlayPngAbove: Buffer | undefined;
     try {
       [overlayPng, overlayPngAbove] = await Promise.all([
-        renderShared(belowElements, 'below'),
-        splitCanvas ? renderShared(aboveElements, 'above') : Promise.resolve(undefined),
+        renderLayer(belowElements, 'below'),
+        splitCanvas ? renderLayer(aboveElements, 'above') : Promise.resolve(undefined),
       ]);
     } catch (err) {
       // The RTMP connection staying up matters more than any one segment's picture — see

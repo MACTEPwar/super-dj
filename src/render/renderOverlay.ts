@@ -25,9 +25,10 @@ export interface RenderOverlayParams {
 // POST /templates/{id}/preview endpoint (which lets a render error propagate as a real HTTP
 // error, so someone testing a template layout can see what broke) and the live stream
 // pipeline (which instead catches a failure here and falls back to a blank overlay — see
-// StreamManager's buildOverlay — because keeping the RTMP connection alive matters more than
-// one segment's picture). Keeping this function happy-path-only, with each caller owning its
-// own failure policy, is what makes that split possible without duplicating the render call.
+// buildStreamScene()'s buildOverlay in streamScene.ts — because keeping the RTMP connection alive
+// matters more than one segment's picture). Keeping this function happy-path-only, with each
+// caller owning its own failure policy, is what makes that split possible without duplicating
+// the render call.
 export async function renderTemplatePng(params: RenderOverlayParams): Promise<Buffer> {
   const imageAssetEntries = Object.entries(params.imageAssets ?? {});
   const [coverDataUri, imageResults] = await Promise.all([
@@ -47,7 +48,7 @@ export async function renderTemplatePng(params: RenderOverlayParams): Promise<Bu
     if (result.status === 'fulfilled') {
       imageDataUris[assetId] = result.value;
     } else {
-      // Matches StreamManager.buildOverlay's "falling back to a blank overlay" logging
+      // Matches buildStreamScene()'s buildOverlay "falling back to a blank overlay" logging
       // convention for this same class of non-fatal render degradation.
       console.error(`image asset '${assetId}' (${filePath}) failed to read, rendering its element as a placeholder instead`, result.reason);
     }

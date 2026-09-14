@@ -7,8 +7,6 @@ function buildApp() {
   const trackUploadService: any = {};
   const playlistRepository: any = {};
   const destinationRepository: any = {};
-  const streamManager: any = {};
-  const streamSessionManager: any = {};
   return createApp({
     authService,
     trackRepository,
@@ -16,8 +14,6 @@ function buildApp() {
     playlistRepository,
     destinationRepository,
     destinationEncryptionKey: 'a'.repeat(64),
-    streamManager,
-    streamSessionManager,
     localStreamManager: {} as any,
     previewFetch: jest.fn() as any,
     oauthProviderAdapters: {},
@@ -49,6 +45,14 @@ describe('API docs', () => {
     // only because those keys happen to contain no dots.
     expect(res.body.paths).toHaveProperty(['/local-stream/preview/index.m3u8']);
     expect(res.body.paths).toHaveProperty(['/local-stream/destinations/{destinationId}']);
+  });
+
+  // Full cutover: leaving these reachable would let a caller start a destination-bound encode that
+  // bypasses the local stream, which is exactly the invariant the local-first rework establishes.
+  it('no longer documents the removed per-destination and session stream APIs', async () => {
+    const res = await request(buildApp()).get('/openapi.json');
+    expect(res.body.paths).not.toHaveProperty(['/destinations/{destinationId}/stream/start']);
+    expect(res.body.paths).not.toHaveProperty('/stream-sessions');
   });
 
   it('serves Swagger UI at /docs', async () => {

@@ -37,8 +37,8 @@ const GIF_OVERLAY_FORMAT = 'format=rgb';
  *
  * Every non-gif element is baked into one flat PNG, so the canvas can only be composited as a
  * whole — but a template's element ORDER says which of those elements belong behind a gif and
- * which in front of it. StreamManager splits the baked elements around the first gif element's
- * position and picks the placement that reproduces that order:
+ * which in front of it. buildStreamScene() (streamScene.ts) splits the baked elements around the
+ * first gif element's position and picks the placement that reproduces that order:
  *
  * - `top` — the canvas goes over every gif. The only possibility when there are no gifs at all,
  *   and also correct when every baked element is listed after the first gif. This is exactly the

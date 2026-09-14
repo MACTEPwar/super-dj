@@ -66,7 +66,8 @@ describe('StreamController', () => {
 
     expect(encoder.start).toHaveBeenCalled();
     // The second canvas pipe is handed over unconditionally, exactly like pulsePipe — CanvasFeeder
-    // only writes to it when StreamManager configured it with an above layer (see CanvasPlacement).
+    // only writes to it when buildStreamScene() (src/stream/streamScene.ts) configured it with an
+    // above layer (see CanvasPlacement).
     expect(canvasFeeder.attach).toHaveBeenCalledWith(encoderChild.videoPipe, encoderChild.aboveCanvasPipe);
     expect(audioRelay.attach).toHaveBeenCalledWith(encoderChild.audioPipe);
     expect(audioRelay.switchTrack).toHaveBeenCalledWith('/music/a.mp3', 0);

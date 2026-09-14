@@ -85,9 +85,10 @@ export function createTemplateRouter(
   // Renders the template (either the saved one, or a draft passed in the body — so the editor
   // can preview unsaved changes) against sample scene data and returns the PNG directly, so the
   // frontend can point an <img> straight at this endpoint. Unlike the live stream pipeline
-  // (StreamManager.buildOverlay), a render failure here is NOT caught — it propagates as a real
-  // HTTP error, because this is an interactive request from someone testing a template layout,
-  // who needs to see that something broke rather than a silently blank picture.
+  // (buildStreamScene()'s buildOverlay in streamScene.ts), a render failure here is NOT caught —
+  // it propagates as a real HTTP error, because this is an interactive request from someone
+  // testing a template layout, who needs to see that something broke rather than a silently
+  // blank picture.
   router.post('/:id/preview', auth, wrapAsync(async (req, res) => {
     const owner = userId(req as AuthenticatedRequest);
     const template = await requireOwnedTemplate(req.params.id, owner);
@@ -115,11 +116,11 @@ export function createTemplateRouter(
     // The preview endpoint's only feedback mechanism for a template's 'image' elements
     // (TemplateEditor.tsx's live preview) — without resolving these, an image element would
     // always render its black-rect fallback in the editor even though the live stream pipeline
-    // (StreamManager.buildOverlay) resolves it correctly.
+    // (buildStreamScene()'s buildOverlay in streamScene.ts) resolves it correctly.
     const imageAssets: Record<string, string> = {};
     for (const el of previewElements) {
       if (el.type !== 'image') continue;
-      // Same defense in depth as StreamManager.resolveImageAssets: a malformed assetId is
+      // Same defense in depth as streamScene.ts's resolveImageAssets: a malformed assetId is
       // rejected at save time now, but one saved before that validation landed must degrade to
       // this element's black-rect placeholder rather than 500ing the whole preview.
       try {

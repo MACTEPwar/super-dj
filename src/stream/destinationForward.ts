@@ -373,7 +373,8 @@ export class DestinationForward {
 
   private onProviderPhaseChanged(session: PreparedSession): void {
     // A stale callback from a PREVIOUS toggle cycle's lifecycle must never move this forward's
-    // state — the same stale-async-result hazard StreamManager's own phase-change hook had.
+    // state — the same stale-async-result hazard the old, now-deleted per-destination stream
+    // manager's own phase-change hook had.
     if (this.session !== session) return;
     this.deps.onStatusChanged();
     this.again();

@@ -190,9 +190,9 @@ describe('buildPersistentEncoderArgs', () => {
   // template's gif elements are listed before everything else. A full-frame opaque element listed
   // BEFORE a gif (a static image, a cover, or a per-track overlayOverride background) hid the gif
   // completely — reproduced against a real ffmpeg binary: the gif's region showed zero
-  // frame-to-frame change at a flat luma matching the canvas background. StreamManager now splits
-  // the baked elements around the first gif's position and tells this builder where the canvas
-  // (or canvases) belong.
+  // frame-to-frame change at a flat luma matching the canvas background. buildStreamScene() (see
+  // src/stream/streamScene.ts) now splits the baked elements around the first gif's position and
+  // tells this builder where the canvas (or canvases) belong.
   describe('canvasPlacement', () => {
     const gifs = [
       { x: 10, y: 10, width: 100, height: 100, filePath: '/a.gif', frameCount: 5 },

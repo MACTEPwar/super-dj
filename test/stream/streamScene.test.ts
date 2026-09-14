@@ -7,7 +7,6 @@ import { renderTemplatePng } from '../../src/render/renderOverlay';
 import { getImageFrameCount } from '../../src/ffmpeg/imageFrameCount';
 import { BLANK_OVERLAY_PNG } from '../../src/render/blankOverlay';
 import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
-import { SessionOverlayCache } from '../../src/stream/sessionOverlayCache';
 
 function buildDeps() {
   const playlistRepository = {
@@ -202,60 +201,5 @@ describe('buildStreamScene — encoder wiring', () => {
     const filter: string = pipeSpawner.mock.calls[0][1][pipeSpawner.mock.calls[0][1].indexOf('-filter_complex') + 1];
     expect(filter).toContain('[vcanvas_below]');
     expect(filter).not.toContain('[vcanvas_top]');
-  });
-});
-
-// The extraction moves renderShared's four-part cache key (sessionId/trackName/templateId/layer)
-// out of streamManager.ts along with everything else — nothing in the EXISTING suite exercises it:
-// streamManager.test.ts never passes overlayCache/sessionId at all, and
-// streamSessionManager.test.ts only asserts a SessionOverlayCache instance was constructed,
-// against a fully faked StreamManager. Without these, dropping `layer` from the key (the subtle
-// bit — see SessionOverlayCache's own doc comment: "must never be served for each other") would be
-// caught by nothing, on the blast radius of the still-live /stream-sessions/* path.
-describe('buildStreamScene — overlay cache integration (SessionOverlayCache)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    (renderTemplatePng as jest.Mock).mockResolvedValue(Buffer.from('fake-png'));
-    (getImageFrameCount as jest.Mock).mockResolvedValue(1);
-  });
-
-  it('renders once and reuses the cached buffer for a second buildOverlay call sharing the same session, track and template', async () => {
-    const { deps } = buildDeps();
-    const overlayCache = new SessionOverlayCache();
-    const scene = await buildStreamScene(deps, { ...params, sessionId: 'session-1', overlayCache });
-    const track = { name: 'a', audioPath: '/music/a.mp3', coverPath: null };
-
-    await scene.buildOverlay(track);
-    await scene.buildOverlay(track);
-
-    expect(renderTemplatePng).toHaveBeenCalledTimes(1);
-  });
-
-  // Asserts the KEY itself, not just the end-to-end caching behaviour above — a fake standing in
-  // for SessionOverlayCache so the exact argument getOrRender receives is inspectable.
-  it('includes sessionId, the track name, the templateId and the layer in every cache key', async () => {
-    const { deps } = buildDeps();
-    const getOrRender = jest.fn((_key: unknown, render: () => Promise<Buffer>) => render());
-    const overlayCache = { getOrRender } as unknown as SessionOverlayCache;
-    const scene = await buildStreamScene(deps, { ...params, sessionId: 'session-1', overlayCache });
-    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
-
-    expect(getOrRender).toHaveBeenCalledWith(
-      { sessionId: 'session-1', trackName: 'a', templateId: null, layer: 'below' },
-      expect.any(Function),
-    );
-  });
-
-  it('never shares a cache entry between two destinations that have drifted onto different tracks or templates', async () => {
-    const { deps, templateRepository } = buildDeps();
-    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [] });
-    const overlayCache = new SessionOverlayCache();
-    const sceneA = await buildStreamScene(deps, { ...params, sessionId: 'session-1', overlayCache });
-    const sceneB = await buildStreamScene(deps, { ...params, sessionId: 'session-1', overlayCache, templateId: 'tpl-1' });
-
-    await sceneA.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
-    await sceneB.buildOverlay({ name: 'b', audioPath: '/music/b.mp3', coverPath: null });
-
-    expect(renderTemplatePng).toHaveBeenCalledTimes(2);
   });
 });

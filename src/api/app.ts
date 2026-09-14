@@ -14,10 +14,6 @@ import { createOAuthRouter } from '../destinations/oauthRoutes';
 import { OAuthProviderAdapter } from '../destinations/oauthProviderAdapter';
 import { OAuthStateRepository } from '../destinations/oauthStateRepository';
 import { OAuthConnectionRepository } from '../destinations/oauthConnectionRepository';
-import { StreamManager } from '../stream/streamManager';
-import { createStreamRouter } from '../stream/streamRoutes';
-import { StreamSessionManager } from '../stream/streamSessionManager';
-import { createStreamSessionRouter } from '../stream/streamSessionRoutes';
 import { LocalStreamManager } from '../stream/localStreamManager';
 import { createLocalStreamRouter } from '../stream/localStreamRoutes';
 import { PreviewFetch } from '../stream/localStreamPreviewRoutes';
@@ -34,8 +30,6 @@ export interface AppDeps {
   playlistRepository: PlaylistRepository;
   destinationRepository: DestinationRepository;
   destinationEncryptionKey: string;
-  streamManager: StreamManager;
-  streamSessionManager: StreamSessionManager;
   localStreamManager: LocalStreamManager;
   previewFetch: PreviewFetch;
   oauthProviderAdapters: Record<string, OAuthProviderAdapter>;
@@ -59,8 +53,6 @@ export function createApp(deps: AppDeps): Express {
   // in mind if that route is ever added.
   app.use('/destinations', createDestinationRouter(deps.authService, deps.destinationRepository, deps.destinationEncryptionKey, deps.localStreamManager, deps.oauthProviderAdapters, deps.oauthConnectionRepository));
   app.use('/destinations', createOAuthRouter(deps.authService, deps.oauthProviderAdapters, deps.oauthStateRepository, deps.oauthConnectionRepository, deps.destinationRepository, deps.destinationEncryptionKey));
-  app.use('/destinations/:destinationId/stream', createStreamRouter(deps.authService, deps.streamManager, deps.destinationRepository));
-  app.use('/stream-sessions', createStreamSessionRouter(deps.authService, deps.streamSessionManager, deps.streamManager));
   app.use('/local-stream', createLocalStreamRouter(deps.authService, deps.localStreamManager, deps.previewFetch));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));

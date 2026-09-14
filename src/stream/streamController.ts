@@ -24,10 +24,11 @@ export interface StreamControllerDeps {
   createPulseVisualizer?: () => PulseVisualizer;
   buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
   // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
-  // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so StreamManager
-  // can fold in provider-specific knowledge (e.g. a YouTube destination's lifecycle being in a
-  // terminal phase, or having seen an auth-class failure) without StreamController itself having
-  // to know anything YouTube-specific — see reconnectPolicy.ts.
+  // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so the caller
+  // (LocalStreamManager — the only constructor of a StreamController now) can fold in
+  // provider-specific knowledge (e.g. a YouTube destination's lifecycle being in a terminal phase,
+  // or having seen an auth-class failure) without StreamController itself having to know anything
+  // YouTube-specific — see reconnectPolicy.ts.
   reconnectPolicy?: ReconnectPolicy;
   onError?: (exitCode: number | null) => void;
   onStatusChanged?: () => void;
@@ -240,9 +241,10 @@ export class StreamController {
     this.encoder = this.deps.createPersistentEncoder();
     const child = this.encoder.start((exitCode) => this.handleUnexpectedExit(exitCode));
     this.canvasFeeder = this.deps.createCanvasFeeder();
-    // The second pipe is only written to when StreamManager configured this feeder with an above
-    // layer (a template whose baked elements straddle its first animated gif) — passing it
-    // unconditionally keeps the wiring identical for every session, exactly like pulsePipe.
+    // The second pipe is only written to when buildStreamScene() (streamScene.ts) configured this
+    // feeder with an above layer (a template whose baked elements straddle its first animated
+    // gif) — passing it unconditionally keeps the wiring identical for every session, exactly
+    // like pulsePipe.
     this.canvasFeeder.attach(child.videoPipe, child.aboveCanvasPipe);
     this.audioRelay = this.deps.createAudioRelay();
     this.audioRelay.attach(child.audioPipe);

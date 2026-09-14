@@ -90,10 +90,11 @@ const IDLE_LOCAL_STATE: LocalStreamState = {
 
 /**
  * Owns exactly one local stream per user account plus that account's destination forwards — the
- * replacement for BOTH StreamManager (destinationId-keyed controllers) and StreamSessionManager
- * (fan-out over N of them). There is one encode now, so there is nothing to fan out: destinations
- * are readers of the same local relay, toggled independently, and none of them can ever
- * desynchronise from another or take the encode down with it.
+ * replacement for BOTH the old, now-deleted per-destination stream manager (destinationId-keyed
+ * controllers) and the old, now-deleted multi-destination session manager (fan-out over N of
+ * them). There is one encode now, so there is nothing to fan out: destinations are readers of the
+ * same local relay, toggled independently, and none of them can ever desynchronise from another
+ * or take the encode down with it.
  */
 export class LocalStreamManager extends EventEmitter {
   private readonly streams = new Map<string, LocalStreamEntry>();

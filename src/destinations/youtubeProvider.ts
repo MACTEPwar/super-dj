@@ -76,9 +76,9 @@ export class YoutubeProvider implements StreamDestinationProvider {
     // mean "this destination is done, stop polling and don't let anything (including a reconnect
     // attempt) try to keep using it." finalize() itself sets phase to 'complete' and notifies
     // (that's the right outcome for a normal user-initiated stop) — this overwrites it with
-    // 'error' afterward and notifies again, so a listener reacting to the phase (StreamManager
-    // stopping the owning StreamController — see point 6a) observes the terminal-failure phase,
-    // not the "user stopped it on purpose" one.
+    // 'error' afterward and notifies again, so a listener reacting to the phase (DestinationForward
+    // stopping the owning relay — see its onProviderPhaseChanged) observes the terminal-failure
+    // phase, not the "user stopped it on purpose" one.
     const giveUp = async (): Promise<void> => {
       await lifecycle.finalize();
       phase = 'error';

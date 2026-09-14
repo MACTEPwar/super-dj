@@ -1,5 +1,5 @@
 // The canvas coordinate space every template's elements are positioned in — matches the pinned
-// video params in src/stream/streamManager.ts (VIDEO_WIDTH/VIDEO_HEIGHT).
+// video params in src/stream/streamScene.ts (VIDEO_WIDTH/VIDEO_HEIGHT).
 export const CANVAS_WIDTH = 1280;
 export const CANVAS_HEIGHT = 720;
 
@@ -24,8 +24,8 @@ export type ColorValue =
       // `gradientType` is deliberately only 'linear' | 'radial': verified against the installed
       // satori (0.33.4) that both render — as a text fill and as an element background — while
       // `conic-gradient` THROWS ("Invalid background image"), which in the live pipeline means
-      // StreamManager.buildOverlay blanks the WHOLE overlay layer, and on the preview endpoint a
-      // 500. See the design spec's Satori capability matrix.
+      // buildStreamScene()'s buildOverlay (streamScene.ts) blanks the WHOLE overlay layer, and on
+      // the preview endpoint a 500. See the design spec's Satori capability matrix.
       mode: 'gradient';
       gradientType: GradientType;
       stops: GradientStop[]; // MIN_GRADIENT_STOPS..MAX_GRADIENT_STOPS
@@ -273,7 +273,7 @@ const EQUALIZER_STYLE_VALIDATORS: Record<EqualizerStyleField, (value: unknown) =
 // Just the style/reactivity fields — split out from isValidTemplateElement's equalizer branch
 // so normalizeEqualizerElement (below) can check them independently of position/size, which it
 // deliberately does NOT re-validate the same strict (integer) way: a fractional x/y/width/height
-// is StreamManager's concern to round, not this function's to reject.
+// is buildStreamScene()'s (streamScene.ts) concern to round, not this function's to reject.
 function isValidEqualizerStyle(el: Record<string, unknown>): boolean {
   return (Object.keys(EQUALIZER_STYLE_VALIDATORS) as EqualizerStyleField[])
     .every((field) => EQUALIZER_STYLE_VALIDATORS[field](el[field]));
@@ -410,18 +410,18 @@ export function isValidTemplateElements(value: unknown): value is TemplateElemen
 // A template's equalizer element saved before a style field existed can still sit in the
 // database exactly as saved — nothing re-validates a stored template's elements on read, only on
 // write (see templateRoutes.ts). Two real generations of that: the old {color: string}
-// showfreqs-MVP shape with no colors[] at all, which used as-is crashes StreamManager's whole
-// process on the element's first render tick (PulseVisualizer's buildPulseSvg does
+// showfreqs-MVP shape with no colors[] at all, which used as-is crashes the whole backend process
+// on the element's first render tick (PulseVisualizer's buildPulseSvg does
 // colors.map(...) on undefined, inside a bare setInterval callback with nothing to catch it —
 // reproduced against a real deployed template); and neon-pulse templates saved before the
 // sensitivity/smoothing/beatBoost/bandCount reactivity fields landed (and, one generation later,
 // before globalPulse did), whose own colors/glow must survive. So each missing/invalid style
 // field is patched with its default INDIVIDUALLY, never
-// the whole style at once. Position/size stay exactly as saved (still StreamManager's job to
-// round to integers — see its own EqualizerConfig comment — not re-validated the strict way
-// here); the element is dropped entirely only when even the position/size is unusable (e.g.
-// negative or out-of-canvas), the same "skip just the broken element" policy StreamManager's own
-// resolveImageAssets already uses for a malformed image element.
+// the whole style at once. Position/size stay exactly as saved (still buildStreamScene()'s job —
+// streamScene.ts — to round to integers, see its own EqualizerConfig comment — not re-validated
+// the strict way here); the element is dropped entirely only when even the position/size is
+// unusable (e.g. negative or out-of-canvas), the same "skip just the broken element" policy
+// streamScene.ts's own resolveImageAssets already uses for a malformed image element.
 export function normalizeEqualizerElement(element: EqualizerElement): EqualizerElement | null {
   if (!isValidPosition(element.x, element.y)
     || !isValidSize(element.width, CANVAS_WIDTH) || !isValidSize(element.height, CANVAS_HEIGHT)) {
@@ -441,8 +441,8 @@ export function normalizeEqualizerElement(element: EqualizerElement): EqualizerE
 }
 
 // Used whenever a stream starts without an explicit templateId (it's optional — see
-// StreamManager.start()) — approximates the layout the hand-built drawtext overlay used to
-// produce, so a user who never configures a template doesn't lose cover/title/playlist
+// buildStreamScene() in streamScene.ts) — approximates the layout the hand-built drawtext overlay
+// used to produce, so a user who never configures a template doesn't lose cover/title/playlist
 // entirely, just the ability to reposition them.
 export const DEFAULT_TEMPLATE_ELEMENTS: TemplateElement[] = [
   { type: 'cover', x: 40, y: 40, width: 432, height: 432 },

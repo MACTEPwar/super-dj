@@ -166,10 +166,12 @@ export function createYoutubeApiClient(config: { clientId: string; clientSecret:
         headers: { ...authHeader(accessToken), 'Content-Type': 'application/json' },
         body: JSON.stringify({
           snippet: { title: meta.title },
-          // Must match the pinned video params in src/stream/streamManager.ts (VIDEO_WIDTH/
-          // VIDEO_HEIGHT/VIDEO_FPS) and src/ffmpeg/segmentArgs.ts — the RTMP pusher uses -c copy,
-          // so YouTube's declared ingest resolution/framerate must agree with what's actually
-          // being pushed.
+          // Must match the pinned video params in src/stream/streamScene.ts (VIDEO_WIDTH/
+          // VIDEO_HEIGHT/VIDEO_FPS), which is what the local encoder actually produces. A
+          // DestinationForward's relay to YouTube (src/ffmpeg/relayProcessArgs.ts) is `-c copy`
+          // — it re-muxes rather than re-encodes — so YouTube's declared ingest
+          // resolution/framerate must agree with what was actually encoded upstream, not with
+          // anything the relay itself could adjust.
           cdn: { frameRate: '30fps', resolution: '720p', ingestionType: 'rtmp' },
         }),
       });

@@ -146,15 +146,16 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
     }
     case 'timer':
       // Native element (a ticking value ffmpeg draws per-frame, not a static picture) — the
-      // caller (StreamManager.buildOverlay) filters these out before calling renderScene at
-      // all; this is a defensive no-op, not the expected path. See StreamController.timerText()
-      // and src/ffmpeg/canvasFeeder.ts for how the timer's text is actually produced/drawn.
+      // caller (buildStreamScene()'s buildOverlay in streamScene.ts) filters these out before
+      // calling renderScene at all; this is a defensive no-op, not the expected path. See
+      // StreamController.timerText() and src/ffmpeg/canvasFeeder.ts for how the timer's text is
+      // actually produced/drawn.
       return null;
     case 'equalizer':
       // Native element (audio-reactive visualization drawn by ffmpeg's showfreqs filter, not a
-      // static picture) — the caller (StreamManager.buildOverlay/start) filters these out before
-      // calling renderScene at all; this is a defensive no-op, not the expected path. See
-      // StreamManager's equalizerElement handling and src/ffmpeg/persistentEncoderArgs.ts's
+      // static picture) — the caller (buildStreamScene() in streamScene.ts) filters these out
+      // before calling renderScene at all; this is a defensive no-op, not the expected path. See
+      // buildStreamScene()'s equalizerElement handling and src/ffmpeg/persistentEncoderArgs.ts's
       // showfreqs/asplit/overlay filter_complex for how it's actually rendered.
       return null;
   }
@@ -189,9 +190,9 @@ async function defaultLoadFont(family: string, bold: boolean, italic: boolean): 
 export interface SceneRendererOptions {
   width: number;
   height: number;
-  // The per-track overlayOverride's backgroundColor (see StreamManager.buildOverlay), applied
-  // behind every element. Absent means "use the template's own background" — today's existing
-  // behavior, unchanged.
+  // The per-track overlayOverride's backgroundColor (see buildStreamScene()'s buildOverlay in
+  // streamScene.ts), applied behind every element. Absent means "use the template's own
+  // background" — today's existing behavior, unchanged.
   background?: ColorValue;
 }
 

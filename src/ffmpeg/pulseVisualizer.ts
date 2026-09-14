@@ -20,8 +20,8 @@ export interface PulseVisualizerOptions {
   smoothing?: number;
   beatBoost?: number;
   // On PulseEngine's own strength scale (0..MAX_GLOBAL_PULSE_STRENGTH, 0 = off, the default) —
-  // NOT the template's 0-20 field; StreamManager converts via templateTypes.ts's
-  // globalPulseStrength() before constructing this.
+  // NOT the template's 0-20 field; buildStreamScene() (streamScene.ts) converts via
+  // templateTypes.ts's globalPulseStrength() before constructing this.
   globalPulse?: number;
   renderFrame?: (svg: string) => Promise<{ pixels: Buffer; width: number; height: number }>;
   now?: () => number; // seconds, injectable for tests

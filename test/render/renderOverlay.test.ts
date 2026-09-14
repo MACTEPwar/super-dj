@@ -45,7 +45,7 @@ describe('renderTemplatePng', () => {
     expect(scene.coverDataUri).toBe('data:image/png;base64,cover');
 
     // Debuggable, not silently wrong — matches the "falling back to a blank overlay" logging
-    // convention in StreamManager.buildOverlay.
+    // convention in buildStreamScene()'s buildOverlay (src/stream/streamScene.ts).
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('imgBad'),
       expect.any(Error),
