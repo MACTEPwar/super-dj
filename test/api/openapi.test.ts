@@ -22,6 +22,7 @@ function buildApp() {
     templateRepository: {} as any,
     templateRendererDeps: { fontPath: '/fonts/test.ttf', fontFamily: 'Test', defaultCoverPath: '/assets/default-cover.png' },
     templateImageService: {} as any,
+    streamPresetRepository: {} as any,
     frontendOrigin: 'https://web.example.com',
   });
 }

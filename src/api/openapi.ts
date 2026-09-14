@@ -297,6 +297,74 @@ export const openApiSpec = {
         responses: { '200': { description: 'The playlist or segment' }, '400': { description: 'Invalid preview file name' }, '401': { description: 'Not authenticated' }, '404': { description: 'Not produced by the relay' }, '409': { description: 'No local stream is active' }, '502': { description: 'The relay could not be reached' } },
       },
     },
+    '/stream-presets': {
+      post: {
+        summary: 'Save a named preset — playlist, overlay template, destination checklist and broadcast metadata — to pre-populate a future local-stream start with',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name', 'playlistId'],
+                properties: {
+                  name: { type: 'string' },
+                  playlistId: { type: 'string' },
+                  templateId: { type: 'string', nullable: true },
+                  destinationIds: { type: 'array', items: { type: 'string' }, description: 'May be empty: a preset that forwards nowhere is valid' },
+                  title: { type: 'string', nullable: true },
+                  description: { type: 'string', nullable: true },
+                  privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], nullable: true },
+                  latencyPreference: { type: 'string', enum: ['normal', 'low', 'ultraLow'], nullable: true },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Preset created', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamPreset' } } } },
+          '400': { description: 'Missing/invalid name, playlistId, destinationIds or broadcast fields' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your playlist, template or destination' },
+          '404': { description: 'Playlist, template or destination not found' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s saved presets',
+        responses: {
+          '200': { description: 'Preset list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/StreamPreset' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/stream-presets/{id}': {
+      get: {
+        summary: 'Get one saved preset',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Preset', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamPreset' } } } },
+          '401': { description: 'Not authenticated' }, '403': { description: 'Not your stream preset' }, '404': { description: 'Not found' },
+        },
+      },
+      put: {
+        summary: 'Replace a saved preset (the destination checklist is replaced, not merged)',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamPreset' } } } },
+        responses: {
+          '200': { description: 'Preset updated', content: { 'application/json': { schema: { $ref: '#/components/schemas/StreamPreset' } } } },
+          '400': { description: 'Missing/invalid fields' }, '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream preset' }, '404': { description: 'Not found' },
+        },
+      },
+      delete: {
+        summary: 'Delete a saved preset',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Preset deleted' }, '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your stream preset' }, '404': { description: 'Not found' },
+        },
+      },
+    },
     '/templates': {
       post: {
         summary: 'Create a named, reusable overlay template ("theme") — a positioned list of elements (cover art, title text, playlist window, elapsed timer, literal text, uploaded images) rendered onto the stream video',
@@ -589,6 +657,22 @@ export const openApiSpec = {
           name: { type: 'string' },
           rtmpUrl: { type: 'string', nullable: true },
           provider: { type: 'string' },
+        },
+      },
+      StreamPreset: {
+        type: 'object',
+        description: 'A saved choice, not a running thing: the playlist, template, destination checklist and broadcast metadata to pre-populate a local-stream start with.',
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+          playlistId: { type: 'string' },
+          templateId: { type: 'string', nullable: true },
+          destinationIds: { type: 'array', items: { type: 'string' } },
+          title: { type: 'string', nullable: true },
+          description: { type: 'string', nullable: true },
+          privacyStatus: { type: 'string', nullable: true },
+          latencyPreference: { type: 'string', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
         },
       },
       ColorValue: {

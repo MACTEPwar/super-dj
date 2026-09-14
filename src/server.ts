@@ -24,6 +24,7 @@ import { StreamSceneDeps } from './stream/streamScene';
 import { PreviewFetch } from './stream/localStreamPreviewRoutes';
 import { TemplateRepository } from './templates/templateRepository';
 import { TemplateImageService } from './templates/templateImageService';
+import { StreamPresetRepository } from './stream/streamPresetRepository';
 import { Spawner, ChildProcessLike, ChildProcessWithPipes, PipeSpawner } from './ffmpeg/types';
 import { createApp } from './api/app';
 
@@ -137,6 +138,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   };
 
   const templateRepository = new TemplateRepository(prisma);
+  const streamPresetRepository = new StreamPresetRepository(prisma);
 
   // The destination-free half of the pipeline — everything a stream needs that has no destination
   // concept in it. LocalStreamManager below is constructed by spreading this same value, not a
@@ -192,6 +194,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     templateRepository,
     templateRendererDeps,
     templateImageService,
+    streamPresetRepository,
     frontendOrigin: config.frontendOrigin,
   });
 
