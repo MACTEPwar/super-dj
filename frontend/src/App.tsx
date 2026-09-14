@@ -14,6 +14,7 @@ import Streams from './pages/Streams';
 import StreamSessionPanel from './pages/StreamSessionPanel';
 import Templates from './pages/Templates';
 import TemplateEditor from './pages/TemplateEditor';
+import LocalStream from './pages/LocalStream';
 
 const queryClient = new QueryClient();
 
@@ -35,6 +36,7 @@ export default function App() {
                 <Route path="/destinations" element={<Destinations />} />
                 <Route path="/streams" element={<Streams />} />
                 <Route path="/streams/:id" element={<StreamSessionPanel />} />
+                <Route path="/local-stream" element={<LocalStream />} />
                 <Route path="/templates" element={<Templates />} />
                 <Route path="/templates/:id" element={<TemplateEditor />} />
               </Route>

@@ -12,6 +12,7 @@ export function Sidebar() {
     { to: '/destinations', label: t('sidebar.destinations') },
     { to: '/templates', label: t('sidebar.templates') },
     { to: '/streams', label: t('sidebar.streams') },
+    { to: '/local-stream', label: t('sidebar.localStream') },
   ];
   return (
     <aside className="flex h-screen w-56 flex-col justify-between border-r bg-gray-50 p-4">

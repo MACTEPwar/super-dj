@@ -7,6 +7,7 @@
     "destinations": "Destinations",
     "templates": "Templates",
     "streams": "Streams",
+    "localStream": "Local stream",
     "signOut": "Sign out"
   },
   "confirmDialog": {
@@ -290,6 +291,27 @@
     "paused": "paused",
     "error": "error",
     "reconnecting": "reconnecting"
+  },
+  "localStream": {
+    "title": "Local stream",
+    "subtitle": "One encode, running on this server. Watch it here before sending it anywhere.",
+    "playlistLabel": "Playlist",
+    "selectPlaylist": "Select a playlist…",
+    "templateLabel": "Overlay template",
+    "noTemplate": "No template (default look)",
+    "startButton": "Start local stream",
+    "starting": "Starting…",
+    "startFailed": "Failed to start the local stream",
+    "commandFailed": "The command failed",
+    "previous": "⏮ Previous",
+    "pause": "⏸ Pause",
+    "resume": "▶ Resume",
+    "next": "⏭ Next",
+    "stop": "⏹ Stop",
+    "nowPlayingNext": "Now playing: {{track}} · Next: {{next}}",
+    "previewStarting": "Preview is starting…",
+    "previewUnsupported": "Your browser cannot play this preview.",
+    "localOnlyNotice": "This stream is local only — nothing is being sent to any platform."
   },
   "drawer": {
     "close": "Close"
