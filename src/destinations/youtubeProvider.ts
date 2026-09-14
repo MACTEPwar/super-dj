@@ -1,14 +1,18 @@
 import { StreamDestination } from '@prisma/client';
 import { ApiError } from '../errors';
 import { decrypt } from '../crypto/streamKeyCipher';
-import { YoutubeApiClient, isAuthClassError } from './youtubeApiClient';
+import { YoutubeApiClient, YoutubeStream, isAuthClassError } from './youtubeApiClient';
 import { OAuthConnectionRepository } from './oauthConnectionRepository';
+import { DestinationRepository } from './destinationRepository';
 import { BroadcastMeta, DestinationLifecycle, DestinationLifecyclePhase, PreparedSession, StreamDestinationProvider } from './streamDestinationProvider';
 
 export interface YoutubeProviderDeps {
   client: YoutubeApiClient;
   encryptionKey: string;
   oauthConnectionRepository: Pick<OAuthConnectionRepository, 'findByDestinationId'>;
+  // Needed because the liveStream (the ingest endpoint) is now REUSED across toggles and therefore
+  // has to be remembered on the destination row. Only the liveBroadcast stays ephemeral.
+  destinationRepository: Pick<DestinationRepository, 'setYoutubeLiveStreamId'>;
   pollIntervalMs?: number;
   healthTimeoutMs?: number;
   scheduleNextPoll?: (fn: () => void | Promise<void>, delayMs: number) => void;
@@ -28,17 +32,37 @@ export class YoutubeProvider implements StreamDestinationProvider {
     this.clock = deps.clock ?? Date.now;
   }
 
+  // Lets DestinationForward show "reconnect your YouTube account" instead of a generic failure,
+  // and stops it retrying a grant that will never come back, without knowing anything about the
+  // YouTube API itself.
+  isAuthError(err: unknown): boolean {
+    return isAuthClassError(err);
+  }
+
   async prepareSession(destination: StreamDestination, meta: BroadcastMeta): Promise<PreparedSession> {
     const connection = await this.deps.oauthConnectionRepository.findByDestinationId(destination.id);
     if (!connection) throw new ApiError(502, 'no YouTube connection for this destination');
     const refreshToken = decrypt(connection.refreshTokenEncrypted, this.deps.encryptionKey);
 
     const accessToken = await this.deps.client.refreshAccessToken(refreshToken);
+
+    // The liveStream is reused across every toggle of this destination; only the broadcast below is
+    // ephemeral. A persisted id can still be stale (the user deleted the stream in YouTube Studio),
+    // which YouTube reports as an empty result rather than an error — so verify, then fall back to
+    // creating a fresh one and re-persisting it.
+    let stream: YoutubeStream | null = null;
+    if (destination.youtubeLiveStreamId) {
+      stream = await this.deps.client.getStream(accessToken, destination.youtubeLiveStreamId);
+    }
+    if (!stream) {
+      stream = await this.deps.client.createStream(accessToken, { title: meta.title });
+      await this.deps.destinationRepository.setYoutubeLiveStreamId(destination.id, stream.id);
+    }
+
     const broadcast = await this.deps.client.createBroadcast(accessToken, {
       title: meta.title, description: meta.description ?? '', privacyStatus: meta.privacyStatus ?? 'private',
       latencyPreference: meta.latencyPreference ?? 'normal',
     });
-    const stream = await this.deps.client.createStream(accessToken, { title: meta.title });
     await this.deps.client.bind(accessToken, broadcast.id, stream.id);
 
     let phase: DestinationLifecyclePhase = 'creating';
@@ -107,7 +131,17 @@ export class YoutubeProvider implements StreamDestinationProvider {
       },
 
       phase: () => phase,
-      watchUrl: () => `https://www.youtube.com/watch?v=${broadcast.id}`,
+      // One link that survives every toggle. A per-broadcast watch?v= URL dies the moment the user
+      // toggles this destination off, and nobody following the old link migrates automatically —
+      // the channel's own /live page always points at whatever that channel is broadcasting now.
+      // BUT the channel /live page only ever resolves to a PUBLIC broadcast — YouTube does not
+      // surface an unlisted or private one there at all, so for anything but 'public' the stable
+      // link would 404 for the owner's own viewers, replacing a watch?v= URL that worked. Fall
+      // back to the per-broadcast URL for exactly that case; this is also why the fallback for "no
+      // channel id known" reuses the same expression rather than needing a second one.
+      watchUrl: () => (connection.externalAccountId && meta.privacyStatus === 'public'
+        ? `https://www.youtube.com/channel/${connection.externalAccountId}/live`
+        : `https://www.youtube.com/watch?v=${broadcast.id}`),
       onPhaseChange: (cb) => { phaseChangeListener = cb; },
       isAuthError: () => authErrorSeen,
 
@@ -122,12 +156,10 @@ export class YoutubeProvider implements StreamDestinationProvider {
             console.error('failed to transition YouTube broadcast to complete', err);
           }
         }
-        try {
-          const accessToken3 = await this.deps.client.refreshAccessToken(refreshToken);
-          await this.deps.client.deleteStream(accessToken3, stream.id);
-        } catch (err) {
-          console.error('failed to delete ephemeral YouTube liveStream', err);
-        }
+        // The liveStream is deliberately NOT deleted: it is this destination's reusable ingest
+        // endpoint, persisted on the row and reused by the next toggle-on. Deleting it here is what
+        // used to cost an extra insert+delete per toggle and what used to leave an orphaned stream
+        // behind whenever finalize's own token refresh failed.
         phase = 'complete';
         phaseChangeListener?.();
       },

@@ -136,7 +136,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const streamDestinationProviders: Record<string, StreamDestinationProvider> = {
     custom: new CustomRtmpProvider(config.streamKeyEncryptionKey),
-    youtube: new YoutubeProvider({ client: youtubeApiClient, encryptionKey: config.streamKeyEncryptionKey, oauthConnectionRepository }),
+    youtube: new YoutubeProvider({ client: youtubeApiClient, encryptionKey: config.streamKeyEncryptionKey, oauthConnectionRepository, destinationRepository }),
   };
 
   const templateRepository = new TemplateRepository(prisma);

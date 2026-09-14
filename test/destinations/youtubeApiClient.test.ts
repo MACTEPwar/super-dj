@@ -72,6 +72,26 @@ describe('createYoutubeApiClient', () => {
     expect(stream).toEqual({ id: 'stream-1', ingestionAddress: 'rtmp://a.rtmp.youtube.com/live2', streamName: 'abcd-1234' });
   });
 
+  it('getStream returns the persisted stream\'s ingest details when YouTube still has it', async () => {
+    mockFetchOnce(200, { items: [{ id: 'S1', cdn: { ingestionInfo: { ingestionAddress: 'rtmp://a/live2', streamName: 'key-1' } } }] });
+    const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });
+
+    await expect(client.getStream('at', 'S1')).resolves.toEqual({
+      id: 'S1', ingestionAddress: 'rtmp://a/live2', streamName: 'key-1',
+    });
+    expect((global.fetch as jest.Mock).mock.calls[0][0]).toContain('/liveStreams?part=cdn&id=S1');
+  });
+
+  // A liveStream the user deleted in YouTube Studio comes back as an EMPTY items array with a 200,
+  // not a 404 — so "no items" has to mean "gone", or the provider would happily bind a broadcast to
+  // a stream that does not exist.
+  it('getStream returns null when YouTube no longer has that stream', async () => {
+    mockFetchOnce(200, { items: [] });
+    const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });
+
+    await expect(client.getStream('at', 'S1')).resolves.toBeNull();
+  });
+
   it('createBroadcast returns just the created id, and disables the monitor stream', async () => {
     mockFetchOnce(200, { id: 'broadcast-1' });
     const client = createYoutubeApiClient({ clientId: 'id', clientSecret: 'secret' });

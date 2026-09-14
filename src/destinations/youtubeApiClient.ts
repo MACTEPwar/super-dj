@@ -28,9 +28,14 @@ export interface YoutubeApiClient {
   getChannel(accessToken: string): Promise<YoutubeChannel>;
   createBroadcast(accessToken: string, meta: { title: string; description: string; privacyStatus: 'public' | 'unlisted' | 'private'; latencyPreference: 'normal' | 'low' | 'ultraLow' }): Promise<YoutubeBroadcast>;
   createStream(accessToken: string, meta: { title: string }): Promise<YoutubeStream>;
+  // Null when YouTube no longer has this stream (deleted in Studio, or by another app) — which it
+  // reports as an empty items array with a 200, not a 404.
+  getStream(accessToken: string, streamId: string): Promise<YoutubeStream | null>;
   bind(accessToken: string, broadcastId: string, streamId: string): Promise<void>;
   transition(accessToken: string, broadcastId: string, status: 'live' | 'complete'): Promise<void>;
   getStreamStatus(accessToken: string, streamId: string): Promise<string>;
+  // Unused by the streaming path since the liveStream became reusable; kept for future
+  // account-teardown cleanup.
   deleteStream(accessToken: string, streamId: string): Promise<void>;
 }
 
@@ -170,6 +175,14 @@ export function createYoutubeApiClient(config: { clientId: string; clientSecret:
       });
       const body = await readJsonOrThrow(res, 'createStream');
       return { id: body.id, ingestionAddress: body.cdn.ingestionInfo.ingestionAddress, streamName: body.cdn.ingestionInfo.streamName };
+    },
+
+    async getStream(accessToken, streamId) {
+      const res = await fetch(`${YOUTUBE_API}/liveStreams?part=cdn&id=${streamId}`, { headers: authHeader(accessToken) });
+      const body = await readJsonOrThrow(res, 'getStream');
+      const item = body.items?.[0];
+      if (!item) return null;
+      return { id: item.id, ingestionAddress: item.cdn.ingestionInfo.ingestionAddress, streamName: item.cdn.ingestionInfo.streamName };
     },
 
     async bind(accessToken, broadcastId, streamId) {

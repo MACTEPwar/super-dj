@@ -9,6 +9,8 @@ function fakeClient(overrides: Record<string, jest.Mock> = {}) {
     refreshAccessToken: jest.fn().mockResolvedValue('at'),
     createBroadcast: jest.fn().mockResolvedValue({ id: 'broadcast-1' }),
     createStream: jest.fn().mockResolvedValue({ id: 'stream-1', ingestionAddress: 'rtmp://a.rtmp.youtube.com/live2', streamName: 'key-1' }),
+    // Default: the persisted id (when there is one) is still valid on YouTube's side.
+    getStream: jest.fn().mockResolvedValue({ id: 'stream-1', ingestionAddress: 'rtmp://a.rtmp.youtube.com/live2', streamName: 'key-1' }),
     bind: jest.fn().mockResolvedValue(undefined),
     transition: jest.fn().mockResolvedValue(undefined),
     getStreamStatus: jest.fn().mockResolvedValue('active'),
@@ -18,22 +20,30 @@ function fakeClient(overrides: Record<string, jest.Mock> = {}) {
   };
 }
 
-function buildProvider(client = fakeClient(), extra: Record<string, unknown> = {}) {
+function buildProvider(client = fakeClient(), extra: Record<string, unknown> = {}, externalAccountId = 'UC123') {
   const oauthConnectionRepository = {
-    findByDestinationId: jest.fn().mockResolvedValue({ refreshTokenEncrypted: encrypt('refresh-token', KEY) }),
+    findByDestinationId: jest.fn().mockResolvedValue({
+      refreshTokenEncrypted: encrypt('refresh-token', KEY),
+      externalAccountId,
+    }),
   };
+  // The liveStream is reused across toggles, so the provider now writes its id back to the row.
+  const destinationRepository = { setYoutubeLiveStreamId: jest.fn().mockResolvedValue(undefined) };
   // Drives the poll loop deterministically instead of waiting on real timers.
   const scheduled: Array<() => void | Promise<void>> = [];
   const scheduleNextPoll = jest.fn((fn: () => void | Promise<void>) => { scheduled.push(fn); });
-  const provider = new YoutubeProvider({ client: client as any, encryptionKey: KEY, oauthConnectionRepository, scheduleNextPoll, ...extra });
+  const provider = new YoutubeProvider({
+    client: client as any, encryptionKey: KEY, oauthConnectionRepository, destinationRepository, scheduleNextPoll, ...extra,
+  });
   const runNextScheduledPoll = async () => {
     const fn = scheduled.shift();
     if (fn) await fn();
   };
-  return { provider, client, oauthConnectionRepository, runNextScheduledPoll, scheduled };
+  return { provider, client, oauthConnectionRepository, destinationRepository, runNextScheduledPoll, scheduled };
 }
 
-const destination = { id: 'dest-1' } as any;
+// The existing module-level fixture gains the new column. Every existing test keeps using `destination`.
+const destination = { id: 'dest-1', youtubeLiveStreamId: null } as any;
 const meta = { title: 'My Stream', description: 'desc', privacyStatus: 'private' as const };
 
 describe('YoutubeProvider', () => {
@@ -116,7 +126,10 @@ describe('YoutubeProvider', () => {
     await runNextScheduledPoll();
 
     expect(session.lifecycle!.phase()).toBe('error');
-    expect(client.deleteStream).toHaveBeenCalledWith('at', 'stream-1');
+    // The liveStream is this destination's REUSABLE ingest endpoint now (persisted on the row), so
+    // even a give-up leaves it alone — deleting it would cost an extra liveStreams.insert on the
+    // next toggle-on (~30% of a toggle cycle's quota) for no gain.
+    expect(client.deleteStream).not.toHaveBeenCalled();
   });
 
   it('short-circuits on an auth-class failure (a revoked/expired grant) instead of retrying for the rest of the health-check timeout', async () => {
@@ -133,7 +146,8 @@ describe('YoutubeProvider', () => {
     await runNextScheduledPoll();
 
     expect(session.lifecycle!.phase()).toBe('error');
-    expect(client.deleteStream).toHaveBeenCalledWith('at', 'stream-1');
+    // Reusable ingest endpoint — not deleted here either (see the quota note above).
+    expect(client.deleteStream).not.toHaveBeenCalled();
     expect(scheduled.length).toBe(0);
     expect(session.lifecycle!.isAuthError!()).toBe(true);
   });
@@ -174,7 +188,7 @@ describe('YoutubeProvider', () => {
     expect(session.lifecycle!.phase()).toBe('complete');
   });
 
-  it('finalize() transitions the broadcast to complete and deletes the ephemeral stream', async () => {
+  it('finalize() transitions the broadcast to complete and keeps the reusable stream', async () => {
     const { provider, client } = buildProvider();
     const session = await provider.prepareSession(destination, meta);
     session.lifecycle!.onPushStarted();
@@ -182,7 +196,10 @@ describe('YoutubeProvider', () => {
     await session.lifecycle!.finalize();
 
     expect(client.transition).toHaveBeenCalledWith('at', 'broadcast-1', 'complete');
-    expect(client.deleteStream).toHaveBeenCalledWith('at', 'stream-1');
+    // Only the BROADCAST is ephemeral. Deleting the liveStream on every toggle-off used to cost an
+    // extra liveStreams.insert+delete per cycle (~30% of its quota) and could orphan the stream
+    // whenever finalize's own token refresh failed.
+    expect(client.deleteStream).not.toHaveBeenCalled();
     expect(session.lifecycle!.phase()).toBe('complete');
   });
 
@@ -206,7 +223,8 @@ describe('YoutubeProvider', () => {
     await session.lifecycle!.finalize();
 
     expect(client.transition).not.toHaveBeenCalled();
-    expect(client.deleteStream).toHaveBeenCalled();
+    // Reusable ingest endpoint — never deleted on finalize (see the quota note above).
+    expect(client.deleteStream).not.toHaveBeenCalled();
   });
 
   it('invokes a registered onPhaseChange listener at every phase transition', async () => {
@@ -224,5 +242,91 @@ describe('YoutubeProvider', () => {
 
     await session.lifecycle!.finalize(); // live -> complete
     expect(onPhaseChange).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('YoutubeProvider — reusable liveStream and a stable watch URL', () => {
+  it('creates a liveStream on the first toggle and persists its id', async () => {
+    const { provider, client, destinationRepository } = buildProvider();
+
+    await provider.prepareSession(destination, meta);
+
+    expect(client.getStream).not.toHaveBeenCalled();
+    expect(client.createStream).toHaveBeenCalledTimes(1);
+    expect(destinationRepository.setYoutubeLiveStreamId).toHaveBeenCalledWith('dest-1', 'stream-1');
+  });
+
+  it('reuses the persisted liveStream on every later toggle instead of creating a new one', async () => {
+    const { provider, client, destinationRepository } = buildProvider();
+
+    const session = await provider.prepareSession({ id: 'dest-1', youtubeLiveStreamId: 'stream-1' } as any, meta);
+
+    expect(client.getStream).toHaveBeenCalledWith('at', 'stream-1');
+    expect(client.createStream).not.toHaveBeenCalled();
+    expect(destinationRepository.setYoutubeLiveStreamId).not.toHaveBeenCalled();
+    expect(session.rtmpUrl).toBe('rtmp://a.rtmp.youtube.com/live2');
+    expect(session.streamKey).toBe('key-1');
+    // Only the BROADCAST is ephemeral.
+    expect(client.createBroadcast).toHaveBeenCalledTimes(1);
+    expect(client.bind).toHaveBeenCalledWith('at', 'broadcast-1', 'stream-1');
+  });
+
+  // A stream the user deleted in YouTube Studio comes back as an empty result, not an error.
+  it('creates and re-persists a liveStream when the persisted one is gone from YouTube', async () => {
+    const client = fakeClient({ getStream: jest.fn().mockResolvedValue(null) });
+    const { provider, destinationRepository } = buildProvider(client);
+
+    await provider.prepareSession({ id: 'dest-1', youtubeLiveStreamId: 'deleted-1' } as any, meta);
+
+    expect(client.createStream).toHaveBeenCalledTimes(1);
+    expect(destinationRepository.setYoutubeLiveStreamId).toHaveBeenCalledWith('dest-1', 'stream-1');
+  });
+
+  // Deleting the reusable stream on every toggle-off is exactly what this change exists to stop.
+  it('finalize completes the broadcast and never deletes the liveStream', async () => {
+    const { provider, client } = buildProvider();
+    const session = await provider.prepareSession(destination, meta);
+
+    session.lifecycle!.onPushStarted();
+    await session.lifecycle!.finalize();
+
+    expect(client.transition).toHaveBeenCalledWith('at', 'broadcast-1', 'complete');
+    expect(client.deleteStream).not.toHaveBeenCalled();
+  });
+
+  // Spec: "the single best fix for 'my viewers' link keeps dying'" — one link that survives every
+  // toggle, instead of a fresh per-broadcast URL each time. Only true for a PUBLIC broadcast: the
+  // channel /live page never resolves an unlisted or private one, so this needs its own `meta`
+  // (the module-level fixture defaults to 'private' — see the next two tests for that case).
+  it('reports the channel\'s stable live URL for a public broadcast', async () => {
+    const { provider } = buildProvider();
+    const session = await provider.prepareSession(destination, { ...meta, privacyStatus: 'public' });
+
+    expect(session.lifecycle!.watchUrl()).toBe('https://www.youtube.com/channel/UC123/live');
+  });
+
+  it('falls back to the per-broadcast URL when the connection has no channel id', async () => {
+    const { provider } = buildProvider(fakeClient(), {}, '');
+    const session = await provider.prepareSession(destination, { ...meta, privacyStatus: 'public' });
+
+    expect(session.lifecycle!.watchUrl()).toBe('https://www.youtube.com/watch?v=broadcast-1');
+  });
+
+  // The module-level `meta` fixture defaults to privacyStatus: 'private' — exercise that default
+  // explicitly here so this case is asserted by name, not just incidentally by every other test in
+  // this file that doesn't override it. The pre-existing `'exposes a watchUrl built from the
+  // broadcast id'` test above already covers this input; this test names WHY that's the right
+  // answer (a channel id IS known here, and the fallback still wins on privacy grounds).
+  it('falls back to the per-broadcast URL for a private broadcast even when a channel id is known', async () => {
+    const { provider } = buildProvider();
+    const session = await provider.prepareSession(destination, meta);
+
+    expect(session.lifecycle!.watchUrl()).toBe('https://www.youtube.com/watch?v=broadcast-1');
+  });
+
+  it('classifies an auth-class rejection for DestinationForward', () => {
+    const { provider } = buildProvider();
+    expect(provider.isAuthError(new YoutubeApiError(401, null, 'createBroadcast', {}))).toBe(true);
+    expect(provider.isAuthError(new Error('network'))).toBe(false);
   });
 });
