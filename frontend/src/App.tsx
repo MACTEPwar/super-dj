@@ -10,11 +10,9 @@ import Library from './pages/Library';
 import Playlists from './pages/Playlists';
 import PlaylistEditor from './pages/PlaylistEditor';
 import Destinations from './pages/Destinations';
-import Streams from './pages/Streams';
-import StreamSessionPanel from './pages/StreamSessionPanel';
+import Stream from './pages/Stream';
 import Templates from './pages/Templates';
 import TemplateEditor from './pages/TemplateEditor';
-import LocalStream from './pages/LocalStream';
 
 const queryClient = new QueryClient();
 
@@ -34,9 +32,12 @@ export default function App() {
                 <Route path="/playlists" element={<Playlists />} />
                 <Route path="/playlists/:id" element={<PlaylistEditor />} />
                 <Route path="/destinations" element={<Destinations />} />
-                <Route path="/streams" element={<Streams />} />
-                <Route path="/streams/:id" element={<StreamSessionPanel />} />
-                <Route path="/local-stream" element={<LocalStream />} />
+                <Route path="/stream" element={<Stream />} />
+                {/* There is one stream per account now, and no id anywhere in its URLs. Redirect the
+                    three old entry points so existing bookmarks and links keep working. */}
+                <Route path="/streams" element={<Navigate to="/stream" replace />} />
+                <Route path="/streams/:id" element={<Navigate to="/stream" replace />} />
+                <Route path="/local-stream" element={<Navigate to="/stream" replace />} />
                 <Route path="/templates" element={<Templates />} />
                 <Route path="/templates/:id" element={<TemplateEditor />} />
               </Route>
