@@ -2357,6 +2357,13 @@ without a rewrite" — this task cashes that in.
 **Files:**
 - Modify: `src/stream/localStreamManager.ts` (whole file)
 - Modify: `src/server.ts:177-184` (new deps)
+- Modify: `src/stream/localStreamRoutes.ts` — `stop()` becomes `async` in this same task, and this
+  file's existing `localStreamManager.stop(id);` call site (currently line ~58) is unawaited. Add
+  the `await` HERE, not in Task 7 (which touches this file too, but later): left unawaited, a
+  `POST /local-stream/stop` on an already-inactive stream throws `ApiError(409)` inside a floating
+  promise that escapes `wrapAsync` entirely — the client gets a stale 200 AND Node's default
+  `--unhandled-rejections=throw` takes the whole process down (every tenant's stream, not just the
+  caller's). One keyword, one line; Task 7's own edit to this file later is unaffected.
 - Test: `test/stream/localStreamManager.test.ts` (substantial additions + status-shape updates)
 
 **Interfaces:**
@@ -2627,12 +2634,17 @@ describe('LocalStreamManager — destination forwards', () => {
     expect(prepareSession.mock.calls[0][0].youtubeLiveStreamId).toBeNull();
 
     // The encoder dies for good; the forward parks at 'pending' (still desired: 'on', never
-    // pruned) rather than being torn down by a user-initiated stop(). Matches the existing
-    // crash-loop pattern elsewhere in this file: invoke the onExit callback the fake encoder's
-    // own `start(onExit)` call captured, twice, to cross CRASH_LOOP_THRESHOLD.
+    // pruned) rather than being torn down by a user-initiated stop(). Cross CRASH_LOOP_THRESHOLD
+    // by re-invoking the SAME captured onExit callback twice, rather than waiting for a real
+    // respawn to capture a second one: this file's settle() is a plain setImmediate hop on REAL
+    // timers, and a respawn only happens behind createReconnectPolicy's real 2s±20% backoff —
+    // `encoder.start.mock.calls[1]` does not exist after one settle(). Re-entering the exit
+    // handler while the first exit's respawn is still merely SCHEDULED is a real shape (the
+    // implementation's own teardown() clears that pending timer first, so nothing double-fires),
+    // and `evaluateReconnect()` still sees consecutiveShortLivedFailures reach 2.
     (encoder.start.mock.calls[0][0] as (code: number | null) => void)(1);
     await settle();
-    (encoder.start.mock.calls[1][0] as (code: number | null) => void)(1);
+    (encoder.start.mock.calls[0][0] as (code: number | null) => void)(1);
     await settle();
     expect(manager.status('user-1').local.state).toBe('error');
     expect(manager.status('user-1').destinations[0].desired).toBe('on');
