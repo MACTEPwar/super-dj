@@ -30,15 +30,6 @@ describe('localStreamApi', () => {
     expect(JSON.parse(init.body)).toEqual({ playlistId: 'p1', templateId: 'tpl-1' });
   });
 
-  it('starts a stream with pre-checked destinations and broadcast metadata', async () => {
-    await localStreamApi.start({
-      playlistId: 'p1', destinationIds: ['d1'], title: 'Late night', privacyStatus: 'unlisted',
-    });
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-      playlistId: 'p1', destinationIds: ['d1'], title: 'Late night', privacyStatus: 'unlisted',
-    });
-  });
-
   it.each(['stop', 'pause', 'resume', 'next', 'previous'] as const)('posts to /local-stream/%s with no body', async (command) => {
     await localStreamApi[command]();
     const [url, init] = fetchMock.mock.calls[0];
@@ -58,6 +49,14 @@ describe('localStreamApi', () => {
     expect(url).toContain('/local-stream/destinations/dest-1');
     expect(init.method).toBe('PUT');
     expect(JSON.parse(init.body)).toEqual({ desired: 'on' });
+  });
+
+  // The whole point of this rework: a destination's own broadcast settings ride along with the
+  // toggle that turns it on, not with start().
+  it('PUTs a destination toggle with this destination\'s own broadcast metadata', async () => {
+    await localStreamApi.setDestination('dest-1', 'on', { title: 'Late night', privacyStatus: 'unlisted' });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({ desired: 'on', title: 'Late night', privacyStatus: 'unlisted' });
   });
 
   // Every request carries the session cookie — the preview player depends on the same behaviour.

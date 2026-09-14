@@ -1,10 +1,10 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import {
-  localStreamApi, DestinationForwardStatus, ForwardDesiredState, LocalStreamStatus,
+  localStreamApi, DestinationBroadcastMeta, ForwardDesiredState, LocalStreamStatus,
 } from '../api/localStream';
 import { streamPresetsApi } from '../api/streamPresets';
 import { useLocalStreamStatus, LOCAL_STREAM_STATUS_QUERY_KEY } from '../hooks/useLocalStreamStatus';
@@ -20,6 +20,13 @@ import { usePageTitle } from '../hooks/usePageTitle';
  * The one stream page. There is exactly one local stream per account, so there is no list, no id in
  * any URL and nothing to navigate between: you start it, you control it, you watch it, and you tick
  * destinations on and off underneath it without ever interrupting it.
+ *
+ * The destination checklist is ALWAYS driven by the real backend forward statuses, whether the
+ * stream is running or not — a toggle is valid in every state (it parks at 'pending' while idle),
+ * so there is no separate local-only "what I've ticked so far" state to keep in sync with it. Each
+ * destination's own broadcast settings (title/privacy/latency) are collected by
+ * DestinationToggles' own panel right at the moment of ticking it on — see that component — not on
+ * this page, and not once for the whole session: start() itself takes only playlistId/templateId.
  */
 export default function Stream() {
   const { t } = useTranslation();
@@ -35,14 +42,6 @@ export default function Stream() {
   const [presetName, setPresetName] = useState('');
   const [playlistId, setPlaylistId] = useState('');
   const [templateId, setTemplateId] = useState('');
-  // While nothing is running the checklist is LOCAL state — ticking a box then has no backend
-  // meaning yet and must not cost a round-trip. Once the stream is running the same checklist is
-  // driven by the real forward statuses instead (see `forwards` below).
-  const [selectedDestinationIds, setSelectedDestinationIds] = useState<string[]>([]);
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [privacyStatus, setPrivacyStatus] = useState<'public' | 'unlisted' | 'private'>('private');
-  const [latencyPreference, setLatencyPreference] = useState<'normal' | 'low' | 'ultraLow'>('normal');
 
   const status = statusQuery.data;
   const local = status?.local;
@@ -51,86 +50,14 @@ export default function Stream() {
   // a second one) nor the transport controls (there is nothing to control yet).
   const isStarting = local?.state === 'starting';
   const isRunning = local !== undefined && local.state !== 'idle' && local.state !== 'error' && !isStarting;
-  // Whether a TOGGLE goes to the backend or into local form state. Only while something is actually
-  // running server-side does a click have an immediate backend meaning; while idle it is form state
-  // (and `startMutation` below is what reconciles that intent against the backend).
-  const usesBackendForwards = isRunning || isStarting;
 
   const destinations = destinationsQuery.data ?? [];
-  // The backend holds forward state even while NOTHING is running, and it must never be discarded:
-  //  - `localStreamManager.stop()` is the only thing that clears the forwards map, so a session that
-  //    ended in `error` keeps every forward it had — including its `error` message and provider
-  //    phase, which a synthesized placeholder would silently replace with a blank 'pending' row.
-  //  - `setDestination` is explicitly valid with nothing running; it parks the forward at 'pending'.
-  const backendForwards = status?.destinations ?? [];
-  const backendSelectedIds = backendForwards
-    .filter((forward) => forward.desired === 'on')
-    .map((forward) => forward.destinationId);
-
-  // Adopt whatever selection the backend actually holds: on first load, on every change while the
-  // stream runs, and while nothing is running at all. Guarded on non-empty precisely so that
-  // `stop()` emptying the forwards map does NOT wipe the checklist — keeping the boxes ticked
-  // across a stop is the behaviour the old `wasRunning`/`lastBackendSelectedIds` pair existed to
-  // provide, and this subsumes it. Keyed on the joined ids rather than the array so a re-fetch that
-  // changes nothing does not clobber a tick the user just made; a genuine backend change does win.
-  const backendSelectionKey = backendSelectedIds.join(',');
-  const adoptedSelectionKey = useRef<string | null>(null);
-  useEffect(() => {
-    if (backendSelectionKey.length === 0 || adoptedSelectionKey.current === backendSelectionKey) return;
-    adoptedSelectionKey.current = backendSelectionKey;
-    setSelectedDestinationIds(backendSelectionKey.split(','));
-  }, [backendSelectionKey]);
-
-  // Display. A real backend entry always wins over a synthesized one — it is the only thing that
-  // carries the true state, the provider phase and any error message. While idle, two things are
-  // layered on top: a destination the user has only ticked locally gets a synthesized 'pending' row
-  // (wanted, nothing having happened on any platform yet — exactly what the backend would report),
-  // and a LOCAL untick wins over a backend `desired:'on'`, because the box has to show what
-  // pressing Start will actually do — which `startMutation` then makes true.
-  const forwards: DestinationForwardStatus[] = usesBackendForwards
-    ? backendForwards
-    : [
-      ...backendForwards.map((forward) => (forward.desired === 'on' && !selectedDestinationIds.includes(forward.destinationId)
-        ? { ...forward, desired: 'off' as const }
-        : forward)),
-      ...selectedDestinationIds
-        .filter((id) => !backendForwards.some((forward) => forward.destinationId === id))
-        .map((destinationId) => ({
-          destinationId,
-          name: destinations.find((d) => d.id === destinationId)?.name ?? destinationId,
-          desired: 'on' as const,
-          state: 'pending' as const,
-        })),
-    ];
-
-  const selectedIds = usesBackendForwards ? backendSelectedIds : selectedDestinationIds;
-  const hasYoutubeSelected = destinations.some((d) => d.provider === 'youtube' && selectedIds.includes(d.id));
+  const forwards = status?.destinations ?? [];
 
   const applyStatus = (next: LocalStreamStatus) => queryClient.setQueryData(LOCAL_STREAM_STATUS_QUERY_KEY, next);
 
   const startMutation = useMutation({
-    // `localStreamManager.start()` only ever ADDS `desired:'on'` for the ids it is handed — it never
-    // turns off a forward that is already on but absent from the list (see the comment above its own
-    // `refreshForwardRows` call). A destination the user unticked here would therefore go live from
-    // a Start the user believed excluded it; on YouTube that is a real broadcast appearing on their
-    // real channel. So switch those off first, sequentially, and only then start: what the checklist
-    // showed is exactly what goes live.
-    mutationFn: async () => {
-      for (const forward of backendForwards) {
-        if (forward.desired === 'on' && !selectedDestinationIds.includes(forward.destinationId)) {
-          await localStreamApi.setDestination(forward.destinationId, 'off');
-        }
-      }
-      return localStreamApi.start({
-        playlistId,
-        templateId: templateId || undefined,
-        destinationIds: selectedDestinationIds,
-        title: title || undefined,
-        description: description || undefined,
-        privacyStatus: hasYoutubeSelected ? privacyStatus : undefined,
-        latencyPreference: hasYoutubeSelected ? latencyPreference : undefined,
-      });
-    },
+    mutationFn: () => localStreamApi.start({ playlistId, templateId: templateId || undefined }),
     onSuccess: applyStatus,
     onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.startFailed')),
   });
@@ -150,22 +77,48 @@ export default function Stream() {
   const stopMutation = useCommand(localStreamApi.stop);
 
   const toggleMutation = useMutation({
-    mutationFn: ({ destinationId, desired }: { destinationId: string; desired: ForwardDesiredState }) =>
-      localStreamApi.setDestination(destinationId, desired),
+    mutationFn: ({ destinationId, desired, meta }: { destinationId: string; desired: ForwardDesiredState; meta?: DestinationBroadcastMeta }) =>
+      localStreamApi.setDestination(destinationId, desired, meta),
     onSuccess: applyStatus,
     onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.toggleFailed')),
   });
 
+  // Applying a preset ticks every one of its saved destinations on, each with that SAME preset's
+  // saved broadcast metadata (a preset only ever holds one shared copy, not a per-destination one —
+  // unlike a manual toggle's own settings panel) — valid whether the stream is running or idle, for
+  // the same reason a manual toggle is.
+  const applyPresetMutation = useMutation({
+    mutationFn: async (): Promise<LocalStreamStatus | undefined> => {
+      const preset = presetsQuery.data?.find((p) => p.id === presetId);
+      if (!preset) return undefined;
+      setPlaylistId(preset.playlistId);
+      setTemplateId(preset.templateId ?? '');
+      const meta: DestinationBroadcastMeta = {
+        title: preset.title ?? undefined,
+        description: preset.description ?? undefined,
+        privacyStatus: preset.privacyStatus ?? undefined,
+        latencyPreference: preset.latencyPreference ?? undefined,
+      };
+      let result: LocalStreamStatus | undefined;
+      for (const destinationId of preset.destinationIds) {
+        result = await localStreamApi.setDestination(destinationId, 'on', meta);
+      }
+      return result;
+    },
+    onSuccess: (result) => { if (result) applyStatus(result); },
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.startFailed')),
+  });
+
+  // A saved preset can only remember ONE shared name/playlist/template/destination-list; it does
+  // not attempt to capture each destination's own broadcast settings (those live on the toggle
+  // panel, in the moment, and are gone once that moment passes) — so a preset saved here carries no
+  // broadcast metadata of its own, only the currently-selected destinations to re-tick next time.
   const savePresetMutation = useMutation({
     mutationFn: () => streamPresetsApi.create({
       name: presetName.trim(),
       playlistId,
       templateId: templateId || null,
-      destinationIds: selectedDestinationIds,
-      title: title || null,
-      description: description || null,
-      privacyStatus: hasYoutubeSelected ? privacyStatus : null,
-      latencyPreference: hasYoutubeSelected ? latencyPreference : null,
+      destinationIds: forwards.filter((f) => f.desired === 'on').map((f) => f.destinationId),
     }),
     onSuccess: () => {
       setPresetName('');
@@ -175,26 +128,8 @@ export default function Stream() {
     onError: (err) => toast.error(err instanceof ApiError ? err.message : t('stream.presetSaveFailed')),
   });
 
-  function handleToggle(destinationId: string, desired: ForwardDesiredState) {
-    if (usesBackendForwards) {
-      toggleMutation.mutate({ destinationId, desired });
-      return;
-    }
-    setSelectedDestinationIds((current) => (desired === 'on'
-      ? [...current, destinationId]
-      : current.filter((id) => id !== destinationId)));
-  }
-
-  function applyPreset() {
-    const preset = presetsQuery.data?.find((p) => p.id === presetId);
-    if (!preset) return;
-    setPlaylistId(preset.playlistId);
-    setTemplateId(preset.templateId ?? '');
-    setSelectedDestinationIds(preset.destinationIds);
-    setTitle(preset.title ?? '');
-    setDescription(preset.description ?? '');
-    setPrivacyStatus(preset.privacyStatus ?? 'private');
-    setLatencyPreference(preset.latencyPreference ?? 'normal');
+  function handleToggle(destinationId: string, desired: ForwardDesiredState, meta?: DestinationBroadcastMeta) {
+    toggleMutation.mutate({ destinationId, desired, meta });
   }
 
   function handleSubmit(e: FormEvent) {
@@ -228,7 +163,12 @@ export default function Stream() {
                 <option value="">{t('stream.noPreset')}</option>
                 {presetsQuery.data?.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
               </select>
-              <button type="button" onClick={applyPreset} disabled={!presetId} className="rounded border px-3 py-2 disabled:opacity-50">
+              <button
+                type="button"
+                onClick={() => applyPresetMutation.mutate()}
+                disabled={!presetId || applyPresetMutation.isPending}
+                className="rounded border px-3 py-2 disabled:opacity-50"
+              >
                 {t('stream.applyPreset')}
               </button>
             </div>
@@ -263,41 +203,6 @@ export default function Stream() {
               <Link to="/templates" className="underline">{t('stream.manageTemplates')}</Link>
             </p>
           </div>
-
-          {hasYoutubeSelected && (
-            <div className="space-y-3 rounded border p-3">
-              <p className="text-xs text-gray-500">{t('stream.youtubeHelp')}</p>
-              <input className="w-full rounded border px-3 py-2" placeholder={t('stream.titlePlaceholder')} value={title} onChange={(e) => setTitle(e.target.value)} />
-              <textarea className="w-full rounded border px-3 py-2" placeholder={t('stream.descriptionPlaceholder')} value={description} onChange={(e) => setDescription(e.target.value)} />
-              <div>
-                <label htmlFor="stream-privacy" className="block text-sm font-medium">{t('stream.privacyLabel')}</label>
-                <select
-                  id="stream-privacy"
-                  className="mt-1 w-full rounded border px-3 py-2"
-                  value={privacyStatus}
-                  onChange={(e) => setPrivacyStatus(e.target.value as 'public' | 'unlisted' | 'private')}
-                >
-                  <option value="private">{t('stream.private')}</option>
-                  <option value="unlisted">{t('stream.unlisted')}</option>
-                  <option value="public">{t('stream.public')}</option>
-                </select>
-              </div>
-              <div>
-                <label htmlFor="stream-latency" className="block text-sm font-medium">{t('stream.latencyLabel')}</label>
-                <select
-                  id="stream-latency"
-                  className="mt-1 w-full rounded border px-3 py-2"
-                  value={latencyPreference}
-                  onChange={(e) => setLatencyPreference(e.target.value as 'normal' | 'low' | 'ultraLow')}
-                >
-                  <option value="normal">{t('stream.latencyNormal')}</option>
-                  <option value="low">{t('stream.latencyLow')}</option>
-                  <option value="ultraLow">{t('stream.latencyUltraLow')}</option>
-                </select>
-                <p className="mt-1 text-xs text-gray-500">{t('stream.latencyHelp')}</p>
-              </div>
-            </div>
-          )}
 
           <button
             type="submit"
@@ -343,7 +248,7 @@ export default function Stream() {
             </span>
             <span className="text-xs text-gray-500">{t(`streamState.${local.state}`)}</span>
           </div>
-          {status!.destinations.every((forward) => forward.desired === 'off') && (
+          {forwards.every((forward) => forward.desired === 'off') && (
             <p className="mt-2 text-xs text-gray-500">{t('stream.noDestinationsNotice')}</p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">
@@ -363,11 +268,6 @@ export default function Stream() {
         destinations={destinations}
         forwards={forwards}
         onToggle={handleToggle}
-        // Also disabled mid-toggle, not just mid-start: the backend now correctly reuses a
-        // settling forward (see DestinationForward.isInactive()'s comment) rather than racing a
-        // second prepareSession(), but a user firing several toggles on the SAME destination
-        // before any of them round-trip still has no reason to — one toggle in flight per
-        // checklist render is plenty.
         disabled={isStarting || toggleMutation.isPending}
       />
 

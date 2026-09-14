@@ -74,79 +74,57 @@ describe('Stream page', () => {
     expect(screen.queryByTestId('hls-player')).not.toBeInTheDocument();
   });
 
-  // While idle the checklist is local form state: ticking a box must not hit the network, and the
-  // ticked ids ride along with the start call.
-  it('starts with the destinations ticked before starting', async () => {
-    mockStatus(IDLE);
-    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
-    renderWithProviders(<Stream />);
-    await screen.findByText('Friday Mix');
-    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
-    await userEvent.click(await screen.findByLabelText('My channel'));
-    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
-    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
-      playlistId: 'p1', destinationIds: ['d1'],
-    })));
-  });
-
-  it('starts with no destinations at all', async () => {
+  // The checklist is ALWAYS backend-driven now — there is no separate local "what I've ticked"
+  // state — so start() itself only ever takes playlistId/templateId, whether or not a destination
+  // happens to already be on.
+  it('starts with only the playlist and template — destinations are never named to start()', async () => {
     mockStatus(IDLE);
     vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
     await screen.findByText('Friday Mix');
     await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
     await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
-    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
-      playlistId: 'p1', destinationIds: [],
-    })));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: undefined }));
   });
 
-  // The forwards the backend already holds are real state, not decoration: they outlive an errored
-  // session, they carry the error message, and start() only ever ADDS the ids it is passed — so a
-  // leftover `desired:'on'` forward that the checklist showed as unticked would go live anyway.
+  // A destination the backend already holds `desired:'on'` for (survived an errored session) shows
+  // ticked and carries its error message straight through the checklist — no synthesis needed, the
+  // forwards array IS the checklist.
   it('shows a leftover backend forward as ticked, with its error, while nothing is running', async () => {
     mockStatus(ERRORED_WITH_LEFTOVER);
-    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
     await screen.findByText('Friday Mix');
-    await waitFor(() => expect(screen.getByLabelText('My channel')).toBeChecked());
+    expect(screen.getByLabelText('My channel')).toBeChecked();
     expect(screen.getByText('YouTube rejected the broadcast')).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
-    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
-    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
-      playlistId: 'p1', destinationIds: ['d1'],
-    })));
   });
 
-  // The other half of that invariant. Unticking stays local while idle (no round-trip for a box the
-  // backend has no opinion on yet), so the backend still says `desired:'on'` — and start() would
-  // never turn it off. Starting has to switch it off explicitly, or the UI lied.
-  it('switches off a leftover forward the user unticked before starting', async () => {
+  // Unlike the old local-only checklist, turning a destination OFF hits the backend immediately —
+  // there is no "intent" that could be lost or forgotten by the time Start is pressed, since Start
+  // no longer has any destination list of its own to consult at all.
+  it('turning a leftover forward off calls the backend immediately, not on start', async () => {
     mockStatus(ERRORED_WITH_LEFTOVER);
-    vi.mocked(localStreamApi.setDestination).mockResolvedValue(ERRORED_WITH_LEFTOVER);
-    vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
+    vi.mocked(localStreamApi.setDestination).mockResolvedValue({ ...ERRORED_WITH_LEFTOVER, destinations: [] });
     renderWithProviders(<Stream />);
     await screen.findByText('Friday Mix');
-    await waitFor(() => expect(screen.getByLabelText('My channel')).toBeChecked());
     await userEvent.click(screen.getByLabelText('My channel'));
-    expect(screen.getByLabelText('My channel')).not.toBeChecked();
-    expect(localStreamApi.setDestination).not.toHaveBeenCalled();
-    await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
-    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
-    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith(expect.objectContaining({
-      destinationIds: [],
-    })));
-    expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'off');
+    expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'off', undefined);
   });
 
-  it('only offers the YouTube broadcast fields when a YouTube destination is ticked', async () => {
+  // Ticking an OFF YouTube destination — whether idle or running — opens its own settings panel
+  // (DestinationToggles' own concern, exercised in full there); confirming it is what actually
+  // calls the backend, carrying that ONE destination's own title/privacy/latency.
+  it('ticking a YouTube destination opens its settings panel and confirming toggles it on with that metadata', async () => {
     mockStatus(IDLE);
+    vi.mocked(localStreamApi.setDestination).mockResolvedValue(IDLE);
     renderWithProviders(<Stream />);
     await screen.findByText('Friday Mix');
-    expect(screen.queryByLabelText('Privacy')).not.toBeInTheDocument();
-    await userEvent.click(await screen.findByLabelText('My channel'));
-    expect(await screen.findByLabelText('Privacy')).toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText('My channel'));
+    await userEvent.type(await screen.findByPlaceholderText('Title (optional — defaults to this destination\'s name)'), 'Late night');
+    await userEvent.selectOptions(screen.getByLabelText('Privacy'), 'unlisted');
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', {
+      title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'normal',
+    });
   });
 
   it('renders the transport controls and player while running', async () => {
@@ -170,7 +148,10 @@ describe('Stream page', () => {
     vi.mocked(localStreamApi.setDestination).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
     await userEvent.click(await screen.findByLabelText('My channel'));
-    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', expect.objectContaining({
+      privacyStatus: 'private',
+    })));
     expect(localStreamApi.stop).not.toHaveBeenCalled();
   });
 
@@ -199,13 +180,17 @@ describe('Stream page', () => {
     expect(screen.queryByRole('button', { name: 'Start stream' })).not.toBeInTheDocument();
   });
 
-  it('applies a preset into the form', async () => {
+  // Applying a preset ticks every one of its saved destinations on with that SAME preset's saved
+  // metadata (a preset holds only one shared copy) — via the very same setDestination() call a
+  // manual toggle makes, not through start().
+  it('applies a preset by toggling its destinations on with the preset\'s saved metadata', async () => {
     mockStatus(IDLE);
     vi.mocked(streamPresetsApi.list).mockResolvedValue([{
       id: 'preset-1', name: 'Friday night', playlistId: 'p1', templateId: 'tpl-1',
       destinationIds: ['d1'], title: 'Late night', description: null,
       privacyStatus: 'unlisted', latencyPreference: 'low', createdAt: '2026-09-14T10:00:00.000Z',
     }]);
+    vi.mocked(localStreamApi.setDestination).mockResolvedValue(IDLE);
     vi.mocked(localStreamApi.start).mockResolvedValue(LIVE);
     renderWithProviders(<Stream />);
     // The <select> renders immediately with only its "No preset" option, so findByLabelText
@@ -214,18 +199,20 @@ describe('Stream page', () => {
     await screen.findByText('Friday night');
     await userEvent.selectOptions(screen.getByLabelText('Start from a preset'), 'preset-1');
     await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
-    await waitFor(() => expect(screen.getByLabelText('My channel')).toBeChecked());
-    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
-    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({
-      playlistId: 'p1', templateId: 'tpl-1', destinationIds: ['d1'],
+
+    await waitFor(() => expect(localStreamApi.setDestination).toHaveBeenCalledWith('d1', 'on', {
       title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'low',
     }));
+    await waitFor(() => expect(screen.getByLabelText('Playlist')).toHaveValue('p1'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start stream' }));
+    await waitFor(() => expect(localStreamApi.start).toHaveBeenCalledWith({ playlistId: 'p1', templateId: 'tpl-1' }));
   });
 
-  it('saves the current form as a preset', async () => {
-    mockStatus(IDLE);
+  it('saves the currently-selected destinations as a preset, with no broadcast metadata of its own', async () => {
+    mockStatus(ERRORED_WITH_LEFTOVER);
     vi.mocked(streamPresetsApi.create).mockResolvedValue({
-      id: 'preset-2', name: 'Saturday', playlistId: 'p1', templateId: null, destinationIds: [],
+      id: 'preset-2', name: 'Saturday', playlistId: 'p1', templateId: null, destinationIds: ['d1'],
       title: null, description: null, privacyStatus: null, latencyPreference: null, createdAt: '',
     });
     renderWithProviders(<Stream />);
@@ -233,8 +220,8 @@ describe('Stream page', () => {
     await userEvent.selectOptions(screen.getByLabelText('Playlist'), 'p1');
     await userEvent.type(screen.getByPlaceholderText('Preset name'), 'Saturday');
     await userEvent.click(screen.getByRole('button', { name: 'Save preset' }));
-    await waitFor(() => expect(streamPresetsApi.create).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'Saturday', playlistId: 'p1', destinationIds: [],
-    })));
+    await waitFor(() => expect(streamPresetsApi.create).toHaveBeenCalledWith({
+      name: 'Saturday', playlistId: 'p1', templateId: null, destinationIds: ['d1'],
+    }));
   });
 });

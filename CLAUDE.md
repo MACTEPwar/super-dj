@@ -109,10 +109,22 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
   The load-bearing details:
   - **`pending` is "wanted, nothing published yet, zero external side effects."** No
     `prepareSession()`, no YouTube broadcast, nothing. That is what makes "tick a box while nothing
-    is running" and "tick a box mid-stream" the *same* code path: a toggle-on with an idle account
-    parks at `pending` and the next `start()` reconciles it into life with no extra orchestration
-    (which is also why `POST /local-stream/start`'s `destinationIds` is implemented as "set the
-    intents, then run one reconcile", not as a second start-time path).
+    is running" and "tick a box mid-stream" the *same* code path — literally the same call,
+    `PUT /local-stream/destinations/{destinationId}` — and a toggle-on with an idle account parks
+    at `pending` and the next `start()` reconciles it into life with no extra orchestration.
+    `POST /local-stream/start` itself carries no destination list or broadcast metadata of its own
+    at all: a destination's own title/description/privacy/latency are chosen right at the moment of
+    ticking it on (see `setDesired()`'s `meta` parameter below), not once for a whole session.
+  - **`setDesired(desired, meta?)`'s `meta` is this ONE destination's own broadcast title/
+    description/privacy/latency — remembered on the forward instance itself, not derived from the
+    local session.** Supplied by the caller at the moment of ticking a box on (the frontend's
+    settings panel — see "Frontend" below), it is stored (`this.meta`) and reused by every future
+    `prepareSession()` call this same forward makes until the caller supplies a new one — a respawn
+    or an internal reconcile that omits it keeps using whatever was last chosen, rather than
+    silently reverting to the bare `{title: destination.name}` fallback used when a forward has
+    never been given any at all. This is the whole point of the toggle-time-settings rework: two
+    YouTube destinations forwarded from the same account can go out with two entirely different
+    titles/privacy levels, chosen independently, each right when IT actually goes live.
   - **HARD INVARIANT: a prepared session is registered before desired-state is re-checked.**
     `pass()` assigns `this.session = session` the instant `prepareSession()` resolves, *before* any
     re-read of `desired`. A `desired -> off` that arrived while that call was in flight must find a
@@ -275,11 +287,11 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
 - **Ownership checks.** Every track/playlist/destination/template/preset route verifies the
   resource belongs to the authenticated user: 404 if the resource doesn't exist, 403 if it exists
   but belongs to someone else. The local-stream routes mostly have **no id to check** (one stream
-  per account, resolved from the session cookie); the two places an id does arrive —
-  `PUT /local-stream/destinations/{destinationId}` and `POST /local-stream/start`'s
-  `destinationIds[]` — go through `LocalStreamManager.requireOwnedDestination()`, which 404s/403s
-  the same way, **before any side effect**: a bad or foreign id must not mint a relay token,
-  register MediaMTX credentials or build a scene. Ids referenced from a request **body** into the
+  per account, resolved from the session cookie); the one place an id does arrive —
+  `PUT /local-stream/destinations/{destinationId}` (`POST /local-stream/start` carries no
+  destination id of its own at all) — goes through `LocalStreamManager.requireOwnedDestination()`,
+  which 404s/403s the same way, **before any side effect**: a bad or foreign id must not mint a
+  relay token, register MediaMTX credentials or build a scene. Ids referenced from a request **body** into the
   caller's own resource (`PUT /playlists/{id}/tracks`'s `trackIds`) are instead validated against
   the caller's own tracks and rejected with 400 — not 403/404 — so playlist membership can't leak
   which ids exist for other users. (A preset's body ids are the exception that proves the rule: a
@@ -707,14 +719,37 @@ SSE frame into the query cache; nothing polls.
 **There is one stream page** (`pages/Stream.tsx`, routed at `/stream`, linked from the sidebar;
 `/streams`, `/streams/:id` and `/local-stream` all redirect to it) — no list, no id in any URL and
 nothing to navigate between, because there is exactly one local stream per account. It carries the
-start form (playlist, template, preset, broadcast metadata), the transport controls, the embedded
-preview, and `components/DestinationToggles.tsx`, the destination checklist. That checklist is
-deliberately **two-natured**: while nothing is running it is local form state (ticking a box then
-has no backend meaning yet and must not cost a round-trip — those ids go out as
-`POST /local-stream/start`'s `destinationIds`), and once something is running the same UI is driven
-by the real forward statuses and each click is a `PUT /local-stream/destinations/{id}`. The
-checklist is rendered over the user's **destinations**, not over the forwards: the backend prunes
-forwards that want nothing and hold nothing, so *absence is the representation of "not forwarded"*.
+start form (playlist, template, preset picker — no broadcast metadata of its own any more, see
+below), the transport controls, the embedded preview, and `components/DestinationToggles.tsx`, the
+destination checklist. **The checklist is ALWAYS driven by the real backend forward statuses**,
+whether the stream is running or not — every toggle is the SAME `PUT
+/local-stream/destinations/{id}` call in every state, since a toggle is valid even while idle (it
+parks at `pending`). There is no separate local-only "what I've ticked so far" state to keep in
+sync with the backend any more — that two-natured checklist, and the frontend-side fix that once
+had to switch a leftover backend-on destination off before `start()` (since `start()`'s own
+`destinationIds` only ever ADDED intent, never removed it), are both gone with the field they were
+guarding: `start()` has no destination list to omit anything from. The checklist is rendered over
+the user's **destinations**, not over the forwards: the backend prunes forwards that want nothing
+and hold nothing, so *absence is the representation of "not forwarded"*.
+
+**A destination's own broadcast settings (title/description/privacy/latency) are chosen by
+`DestinationToggles`' own settings panel, right at the moment of ticking that ONE destination on —
+never once for the whole session.** Ticking a provider with a broadcast concept (currently only
+`youtube`) opens an inline panel instead of toggling immediately; confirming it is what actually
+calls `setDestination(id, 'on', meta)`, carrying that single destination's own metadata. A provider
+with none (custom RTMP) skips the panel and toggles straight away, and turning a destination OFF
+never needs one either. This holds identically whether the stream is idle or already running — the
+same panel, the same call — and it is why two YouTube destinations forwarded from one account can
+go out under two entirely different titles or privacy levels, chosen independently.
+
+**Applying a saved preset (`api/streamPresets.ts`) ticks every one of its saved destinations on
+with that SAME preset's own saved metadata**, via the very same `setDestination()` call a manual
+toggle makes — a preset only ever holds one shared title/description/privacy/latency for all of its
+destinations together (unlike a live toggle's own per-destination panel), then separately
+pre-fills the playlist/template fields for `start()`. Saving a NEW preset, symmetrically, captures
+only the currently-on destination ids and the playlist/template — no broadcast metadata, since
+there is no single value left on this page to capture (each destination's own settings live and die
+with the toggle-on moment that chose them).
 
 The preview is `components/HlsPlayer.tsx` — hls.js with `withCredentials` set on every request,
 because the backend resolves *which* stream to serve from the session cookie, and a fatal error
@@ -891,35 +926,41 @@ assert that as a regression check.
 exactly one local stream per account, resolved from the session cookie, so there is nothing to
 address and therefore no ownership check to get wrong.
 
-`start` takes `playlistId` (400 if missing or not a string), and optionally: `templateId` (400 on an
+`start` takes `playlistId` (400 if missing or not a string), and optionally `templateId` (400 on an
 empty string; 404/403 if given and not found/not owned — a stream can start with no overlay template
 selected and fall back to a built-in default layout, see the "Overlay templates" Stage 1a notes for
-why it isn't required), `destinationIds[]` (400 if not an array of non-empty strings or if it
-contains duplicates; each id 404/403-checked **before any side effect**, so a bad id never mints a
-relay token or builds a scene — the ids are then applied as intents and reconciled, deliberately the
-*same* code path a later `PUT` takes rather than a second start-time orchestration), and the
-broadcast metadata `title`/`description`/`privacyStatus`/`latencyPreference` (400 on a non-string
-`title`/`description`, a `privacyStatus` outside `'public'`/`'unlisted'`/`'private'`, or a
-`latencyPreference` outside `'normal'`/`'low'`/`'ultraLow'`). The metadata is used by any provider
-that creates a live broadcast (YouTube) and ignored by `custom` destinations — Phase A omitted these
-fields precisely because it had no destinations at all; they are back because it now does.
-`title` defaults to the playlist's name. `latencyPreference` maps straight to YouTube's own
-broadcast `contentDetails.latencyPreference` and defaults to `'normal'` when omitted — YouTube's own
-default, and its highest end-to-end latency (its ingest→transcode→CDN→player pipeline typically adds
-~20-40s regardless of how fast this app reacts to a command); `'low'`/`'ultraLow'` trade some
-playback-buffering resilience for viewers on slow connections for a much snappier feel.
-`start` 409s if a stream is already active **or already starting** for the account, and 429s once
-the host is at `MAX_CONCURRENT_LOCAL_STREAMS`. `play` takes `name` (400 if missing or not a string)
-and jumps to that track by name out of the user's whole library; `pause`/`resume`/`next`/`previous`
-take no body. Everything but `start` 409s when no local stream is active.
+why it isn't required) — **and nothing else**. It names no destination and carries no broadcast
+metadata of its own: a destination (and its own title/description/privacy/latency) is switched on
+separately, via `PUT /local-stream/destinations/{destinationId}` below, before or after this call —
+ticking a box before `start()` parks that forward at `pending` with zero external side effects, and
+the very same `start()` (via `refreshForwardRows()` + one `reconcileForwards()` pass) is what
+reconciles it into life, the identical code path a later mid-stream toggle takes. `start` 409s if a
+stream is already active **or already starting** for the account, and 429s once the host is at
+`MAX_CONCURRENT_LOCAL_STREAMS`. `play` takes `name` (400 if missing or not a string) and jumps to
+that track by name out of the user's whole library; `pause`/`resume`/`next`/`previous` take no body.
+Everything but `start` 409s when no local stream is active.
 
 `PUT /local-stream/destinations/{destinationId}` takes `{desired: 'on' | 'off'}` (400 on anything
 else) and is **the checkbox**: idempotent, valid in *every* local-stream state including `idle` (a
 toggle with nothing running parks the forward at `pending` rather than 409ing), never blocking on
 the work it triggers, and answering with the same combined status payload every other route does.
-It is a `PUT` because it sets a value rather than issuing a command. 404/403 if the destination
-isn't the caller's; 400 for a destination whose `provider` has no registered
-`StreamDestinationProvider`.
+It is a `PUT` because it sets a value rather than issuing a command. **This is also where a
+destination's own broadcast settings live** — `title`/`description`/`privacyStatus`/
+`latencyPreference` (same validation `start` used to carry: 400 on a non-string `title`/
+`description`, a `privacyStatus` outside `'public'`/`'unlisted'`/`'private'`, or a
+`latencyPreference` outside `'normal'`/`'low'`/`'ultraLow'`), all optional and all ignored on
+`desired: 'off'`. Every one of them is THIS destination's own — chosen right at the moment of
+switching it on, not a session-wide default — and ignored entirely by a provider with no broadcast
+concept (`custom` RTMP). `title` defaults to the destination's own name when omitted (there is no
+playlist context at toggle time to default it from any more); any value this same destination last
+used is otherwise kept, since `DestinationForward` remembers the metadata it was last given across
+a respawn or a toggle-off-then-on that doesn't resupply it. `latencyPreference` maps straight to
+YouTube's own broadcast `contentDetails.latencyPreference` and defaults to `'normal'` when
+omitted — YouTube's own default, and its highest end-to-end latency (its ingest→transcode→CDN→player
+pipeline typically adds ~20-40s regardless of how fast this app reacts to a command); `'low'`/
+`'ultraLow'` trade some playback-buffering resilience for viewers on slow connections for a much
+snappier feel. 404/403 if the destination isn't the caller's; 400 for a destination whose `provider`
+has no registered `StreamDestinationProvider`.
 
 `stop` is **awaited**: it forces every forward's desired to `off`, tears the encode down, and waits
 for each provider-side finalize (a YouTube transition-to-complete takes seconds) before responding,
@@ -976,19 +1017,23 @@ deliberately applies to the file name only, never to the query. Verified end to 
 MediaMTX 1.21.0 (see the "Local relay" section above).
 
 `POST /stream-presets` (`name` + `playlistId` required, optional `templateId`/`destinationIds[]`/
-`title`/`description`/`privacyStatus`/`latencyPreference` — every field validated exactly as
-`POST /local-stream/start` validates its own copy), `GET /stream-presets`,
+`title`/`description`/`privacyStatus`/`latencyPreference` — every field validated the same way
+`PUT /local-stream/destinations/{destinationId}` validates its own copy), `GET /stream-presets`,
 `GET /stream-presets/{id}`, `PUT /stream-presets/{id}` (full replace, same validation),
 `DELETE /stream-presets/{id}` — all scoped to the preset's owner. A preset is a **saved choice, not
-a running thing**: it has no side effects at all and starting a stream from one is just the client
-pre-filling `POST /local-stream/start` from it. `name` is deliberately separate from `title`
-(`title` is the YouTube *broadcast* title; overloading one field would make the preset picker show
-broadcast titles), and **`destinationIds: []` is valid** — a local stream forwarded nowhere is a
-normal way to run, where the old `StreamSession` these rows used to back required a non-empty list.
-Every referenced id is checked against the caller's own resources and answered 404/403 (not 400, as
-`PUT /playlists/{id}/tracks` has to: a preset is a private object of the caller's with no membership
-to leak). Backed by the repurposed `StreamSession`/`StreamSessionDestination` tables — same tables,
-no rename, no data migration.
+a running thing**: it has no side effects at all, and applying one from the frontend is just that
+same client pre-filling `POST /local-stream/start`'s playlist/template fields AND separately
+toggling each of its saved destination ids on (via that same `PUT`, carrying the preset's own saved
+metadata) — a preset holds only ONE shared title/description/privacy/latency for every destination
+it lists together, unlike a live toggle's own per-destination settings panel, which is why saving a
+*new* preset from the frontend no longer captures those fields at all (see "Frontend" above). `name`
+is deliberately separate from `title` (`title` is the YouTube *broadcast* title; overloading one
+field would make the preset picker show broadcast titles), and **`destinationIds: []` is valid** —
+a local stream forwarded nowhere is a normal way to run, where the old `StreamSession` these rows
+used to back required a non-empty list. Every referenced id is checked against the caller's own
+resources and answered 404/403 (not 400, as `PUT /playlists/{id}/tracks` has to: a preset is a
+private object of the caller's with no membership to leak). Backed by the repurposed
+`StreamSession`/`StreamSessionDestination` tables — same tables, no rename, no data migration.
 
 `POST /templates` (`name`, `elements[]`), `GET /templates`, `GET /templates/{id}`,
 `PUT /templates/{id}`, `DELETE /templates/{id}` — a template is a named, reusable overlay layout

@@ -41,12 +41,6 @@ export interface LocalStreamStatus {
 
 export interface StartLocalStreamOptions {
   templateId?: string;
-  // Destinations to pre-check. Setting an intent and reconciling is the SAME code path a mid-stream
-  // toggle takes — deliberately, so there is no second orchestration path to keep in sync.
-  destinationIds?: string[];
-  // Broadcast metadata for any destination this session prepares (YouTube and any future
-  // broadcast-creating provider). Ignored entirely by custom RTMP destinations.
-  meta?: Partial<BroadcastMeta>;
 }
 
 export interface LocalPreviewTarget {
@@ -78,7 +72,6 @@ interface LocalStreamEntry {
   relay: LocalRelaySession;
   playlistId: string;
   templateId: string | null;
-  meta: BroadcastMeta;
   startedAt: number;
   expiryTimer: NodeJS.Timeout;
 }
@@ -149,15 +142,6 @@ export class LocalStreamManager extends EventEmitter {
     this.starting.add(userId);
     this.emit('statusChanged', userId);
     try {
-      // Resolve every pre-checked destination BEFORE any side effect: a bad or foreign id must
-      // 404/403 without minting a relay token, registering credentials or building a scene.
-      const destinations: StreamDestination[] = [];
-      for (const destinationId of new Set(options.destinationIds ?? [])) {
-        const destination = await this.requireOwnedDestination(userId, destinationId);
-        this.requireProvider(destination);
-        destinations.push(destination);
-      }
-
       const scene = await this.buildScene(this.deps.sceneDeps, {
         userId,
         playlistId,
@@ -166,13 +150,6 @@ export class LocalStreamManager extends EventEmitter {
         // overlay PNGs.
         sceneId: userId,
       });
-
-      const meta: BroadcastMeta = {
-        title: options.meta?.title ?? scene.playlistName,
-        description: options.meta?.description,
-        privacyStatus: options.meta?.privacyStatus,
-        latencyPreference: options.meta?.latencyPreference,
-      };
 
       // Minted AFTER the scene resolves, so a 404/403/409 never burns a token, and registered
       // BEFORE the encoder starts, so the publish attempt can never lose a race with its own
@@ -224,7 +201,7 @@ export class LocalStreamManager extends EventEmitter {
       expiryTimer.unref();
 
       const entry: LocalStreamEntry = {
-        controller, relay, playlistId, templateId: options.templateId ?? null, meta,
+        controller, relay, playlistId, templateId: options.templateId ?? null,
         startedAt: Date.now(), expiryTimer,
       };
       this.streams.set(userId, entry);
@@ -240,15 +217,10 @@ export class LocalStreamManager extends EventEmitter {
         throw err;
       }
 
-      // Intents first, then one reconcile: "start with these pre-checked" and "check a box
-      // mid-stream" are deliberately the same code path.
-      for (const destination of destinations) {
-        this.getOrCreateForward(userId, destination).setDesired('on');
-      }
       // A forward can SURVIVE across stop-and-restart without going through getOrCreateForward at
       // all: an encoder crash finalizes it into 'pending' (branch 1) without pruning it (desired is
-      // still 'on'), and this restart's `destinations` array only contains whatever the CALLER
-      // passed this time — a destination the user checked earlier and never unchecked isn't in it.
+      // still 'on'), and this restart's start() call has no destination list of its own any more —
+      // destinations are toggled independently via setDestinationDesired(), before or after start().
       // Without this, that surviving forward's very next prepareSession() would read the STALE row
       // captured whenever it was originally constructed, missing any youtubeLiveStreamId a prior
       // session persisted — the exact bug setDestination() exists to prevent, just reachable from a
@@ -299,14 +271,34 @@ export class LocalStreamManager extends EventEmitter {
 
   /**
    * The checkbox. Idempotent, never blocks on the work it triggers, and valid in every local-stream
-   * state including idle (spec open question #3: a toggle while nothing runs parks at 'pending'
-   * rather than 409ing, so pre-checking and mid-stream toggling are one code path).
+   * state including idle (a toggle while nothing runs parks at 'pending' rather than 409ing, so
+   * pre-checking before a start and toggling mid-stream are one code path). `meta` is this
+   * destination's own broadcast title/description/privacy/latency, supplied by the caller right at
+   * the moment of toggling ON — this is where per-destination broadcast settings actually apply,
+   * not a session-wide default chosen once at start(). Ignored on toggle-off, and optional on
+   * toggle-on too (see DestinationForward.setDesired()'s own doc comment for the fallback).
    */
-  async setDestinationDesired(userId: string, destinationId: string, desired: ForwardDesiredState): Promise<LocalStreamStatus> {
+  async setDestinationDesired(
+    userId: string,
+    destinationId: string,
+    desired: ForwardDesiredState,
+    meta?: Partial<BroadcastMeta>,
+  ): Promise<LocalStreamStatus> {
     const destination = await this.requireOwnedDestination(userId, destinationId);
     this.requireProvider(destination);
     const forward = this.getOrCreateForward(userId, destination);
-    forward.setDesired(desired);
+    // `title` defaults to the destination's own name — the natural fallback now that there is no
+    // shared playlist/session context to default it from (the old start()-level default used the
+    // playlist's name; a per-destination toggle has no playlist name of its own to reach for).
+    // A plain `{ title: destination.name, ...meta }` spread would NOT do this correctly: the route
+    // always includes every key (title included) even when its value is `undefined`, and spreading
+    // an explicit `undefined` overwrites the default rather than falling through to it.
+    forward.setDesired(desired, meta ? {
+      title: meta.title ?? destination.name,
+      description: meta.description,
+      privacyStatus: meta.privacyStatus,
+      latencyPreference: meta.latencyPreference,
+    } : undefined);
     // Deliberately NOT pruning here, even for desired === 'off': a toggle-off starts finalize()
     // asynchronously (this call returns before it resolves), and isInactive() correctly reports
     // false while it's 'stopping' — but calling pruneForwards() eagerly right after setDesired()
@@ -395,9 +387,6 @@ export class LocalStreamManager extends EventEmitter {
     const forward = new DestinationForward({
       destination,
       provider: this.requireProvider(destination),
-      // Resolved lazily so a forward created while nothing is running picks up the metadata of
-      // whatever session eventually starts.
-      meta: () => this.streams.get(userId)?.meta ?? { title: destination.name },
       sourceUrl: () => this.sourceUrlFor(userId),
       isSourcePublishing: () => this.isSourcePublishing(userId),
       createRelay: this.createRelay,

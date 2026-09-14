@@ -49,9 +49,6 @@ export interface DestinationForwardStatus {
 export interface DestinationForwardDeps {
   destination: StreamDestination;
   provider: StreamDestinationProvider;
-  // Resolved lazily: a forward can exist (desired=on, actual=pending) before any local stream is
-  // running, and the broadcast metadata only exists once one is.
-  meta: () => BroadcastMeta;
   // The CURRENT local session's MediaMTX read URL, or null when this account has no live session
   // to read from (never started, stopped, or reconnect gave up). Deliberately NON-null while the
   // local stream is merely 'reconnecting' — see the hold rule in pass().
@@ -91,6 +88,11 @@ const defaultSetTimer = (fn: () => void, delayMs: number): NodeJS.Timeout => {
 export class DestinationForward {
   private desired: ForwardDesiredState = 'off';
   private actual: ForwardActualState = 'off';
+  // The broadcast metadata for the NEXT (or current) prepareSession() call — set explicitly by
+  // whoever calls setDesired('on', meta), and remembered across a respawn/toggle-off-then-on so a
+  // caller that omits it (an internal reconcile, a restart) keeps using whatever was last chosen
+  // rather than silently reverting to the bare fallback below.
+  private meta: BroadcastMeta | null = null;
   private session: PreparedSession | null = null;
   private relay: RelayProcess | null = null;
   private relayStartedAt: number | null = null;
@@ -138,8 +140,17 @@ export class DestinationForward {
     this.deps.destination = destination;
   }
 
-  /** Set directly and idempotently by the checkbox. Never blocks on the reconcile it triggers. */
-  setDesired(desired: ForwardDesiredState): void {
+  /**
+   * Set directly and idempotently by the checkbox. Never blocks on the reconcile it triggers.
+   * `meta` is the broadcast metadata (title/description/privacy/latency) to use the next time this
+   * forward calls prepareSession() — provided by the caller at the moment of toggling ON, so a
+   * YouTube destination's title/privacy/latency are chosen right when it actually goes live, not
+   * once for a whole session. Omitted on an ordinary toggle-off, and optional on toggle-on too (a
+   * respawn or an internal reconcile need not resupply it): when omitted, whatever this forward
+   * last had — or the bare `{title: destination.name}` fallback if it never had any — is used.
+   */
+  setDesired(desired: ForwardDesiredState, meta?: BroadcastMeta): void {
+    if (meta) this.meta = meta;
     if (this.desired === desired) return;
     this.desired = desired;
     this.error = null;
@@ -306,7 +317,10 @@ export class DestinationForward {
       this.setState('preparing');
       let session: PreparedSession;
       try {
-        session = await this.deps.provider.prepareSession(this.deps.destination, this.deps.meta());
+        session = await this.deps.provider.prepareSession(
+          this.deps.destination,
+          this.meta ?? { title: this.deps.destination.name },
+        );
       } catch (err) {
         this.giveUp(this.deps.provider.isAuthError?.(err) ? 'auth' : 'provider', err);
         return;

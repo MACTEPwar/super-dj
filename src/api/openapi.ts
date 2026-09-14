@@ -206,6 +206,7 @@ export const openApiSpec = {
     '/local-stream/start': {
       post: {
         summary: 'Start this account\'s single local stream — encoded once and published to the internal relay, with no destination receiving it',
+        description: 'Names no destination and carries no broadcast metadata: a destination (and its own title/description/privacy/latency) is switched on separately, via PUT /local-stream/destinations/{destinationId}, before or after this call — the destination\'s own settings are chosen right when it actually goes live, not once for the whole session.',
         requestBody: {
           required: true,
           content: {
@@ -216,11 +217,6 @@ export const openApiSpec = {
                 properties: {
                   playlistId: { type: 'string' },
                   templateId: { type: 'string', description: 'Optional overlay template id (see /templates). Omitted -> the built-in default layout.' },
-                  destinationIds: { type: 'array', items: { type: 'string' }, description: 'Optional destinations to switch on as soon as the stream is publishing. May be omitted or empty — a local stream with nothing forwarded is a fully valid running state. No duplicates.' },
-                  title: { type: 'string', description: 'Optional broadcast title for any destination that creates a live broadcast (e.g. YouTube); defaults to the playlist name' },
-                  description: { type: 'string', description: 'Optional broadcast description (destinations that create a live broadcast)' },
-                  privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Optional broadcast privacy; defaults to private' },
-                  latencyPreference: { type: 'string', enum: ['normal', 'low', 'ultraLow'], description: "Optional YouTube broadcast latency; defaults to 'normal'" },
                 },
               },
             },
@@ -228,10 +224,10 @@ export const openApiSpec = {
         },
         responses: {
           '200': { description: 'Started', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } },
-          '400': { description: 'Missing playlistId, an empty-string templateId, or invalid destinationIds/broadcast fields' },
+          '400': { description: 'Missing playlistId or an empty-string templateId' },
           '401': { description: 'Not authenticated' },
-          '403': { description: 'Not your playlist, template or destination' },
-          '404': { description: 'Playlist, template or destination not found' },
+          '403': { description: 'Not your playlist or template' },
+          '404': { description: 'Playlist or template not found' },
           '409': { description: 'A local stream is already active (or starting) for this account, or the playlist is empty' },
           '429': { description: 'Too many local streams are running on this host' },
         },
@@ -262,15 +258,29 @@ export const openApiSpec = {
     '/local-stream/destinations/{destinationId}': {
       put: {
         summary: 'Switch one destination\'s forward on or off for this account\'s local stream',
-        description: 'Idempotent. Valid in every state, including with no local stream running — the forward then sits at `pending` with no external side effects until the next start. Never interrupts the local stream or any other destination.',
+        description: 'Idempotent. Valid in every state, including with no local stream running — the forward then sits at `pending` with no external side effects until the next start. Never interrupts the local stream or any other destination. title/description/privacyStatus/latencyPreference are THIS destination\'s own broadcast settings, applied only on desired:"on" and only by any destination provider that creates a broadcast (YouTube); a custom RTMP destination ignores them. Every one is optional — omitted, the destination\'s own name is used as the title, and any value this same destination last used (if any) is otherwise kept.',
         parameters: [{ name: 'destinationId', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
-          content: { 'application/json': { schema: { type: 'object', required: ['desired'], properties: { desired: { type: 'string', enum: ['on', 'off'] } } } } },
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['desired'],
+                properties: {
+                  desired: { type: 'string', enum: ['on', 'off'] },
+                  title: { type: 'string', description: 'Broadcast title; defaults to the destination\'s own name. Ignored on desired:"off".' },
+                  description: { type: 'string', description: 'Broadcast description. Ignored on desired:"off".' },
+                  privacyStatus: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Broadcast privacy; defaults to private. Ignored on desired:"off".' },
+                  latencyPreference: { type: 'string', enum: ['normal', 'low', 'ultraLow'], description: 'YouTube broadcast latency; defaults to \'normal\'. Ignored on desired:"off".' },
+                },
+              },
+            },
+          },
         },
         responses: {
           '200': { description: 'Intent recorded', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } },
-          '400': { description: 'body.desired must be on or off, or the request was not application/json' },
+          '400': { description: 'body.desired must be on or off, an invalid broadcast field, or the request was not application/json' },
           '401': { description: 'Not authenticated' },
           '403': { description: 'Not your destination' },
           '404': { description: 'Destination not found' },

@@ -259,8 +259,8 @@
     "watchLink": "Open watch page",
     "connectingHelp": "Going live on a platform takes 10-40 seconds. Toggling again will not make it faster.",
     "youtubeToggleWarning": "Each time you switch this on, YouTube starts a brand-new broadcast: chat, viewer count and likes reset, and switching off leaves another recording on your channel. The link above always points at whatever you are broadcasting now.",
-    "youtubeHelp": "Broadcast details for any YouTube destination you switch on during this stream.",
-    "titlePlaceholder": "Title (optional — defaults to playlist name)",
+    "youtubeHelp": "This destination's own broadcast details — chosen right now, for this toggle-on.",
+    "titlePlaceholder": "Title (optional — defaults to this destination's name)",
     "descriptionPlaceholder": "Description (optional)",
     "privacyLabel": "Privacy",
     "private": "Private",
@@ -270,7 +270,9 @@
     "latencyNormal": "Normal (~20-40s delay, most reliable)",
     "latencyLow": "Low (~5-10s delay)",
     "latencyUltraLow": "Ultra-low (~2-5s delay, least buffering headroom)",
-    "latencyHelp": "Lower latency means viewers see track changes almost immediately, at the cost of some playback stability on slow connections."
+    "latencyHelp": "Lower latency means viewers see track changes almost immediately, at the cost of some playback stability on slow connections.",
+    "confirmAndGoLive": "Confirm",
+    "cancel": "Cancel"
   },
   "drawer": {
     "close": "Close"

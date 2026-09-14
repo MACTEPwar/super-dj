@@ -72,7 +72,6 @@ function buildForward(options: {
   const deps: DestinationForwardDeps = {
     destination: options.destination ?? destination(),
     provider: { prepareSession, isAuthError: options.isAuthError } as never,
-    meta: () => ({ title: 'Friday Mix' }),
     sourceUrl: () => sourceUrl,
     isSourcePublishing: () => publishing && sourceUrl !== null,
     createRelay: createRelay as never,
@@ -126,10 +125,41 @@ describe('DestinationForward — pending and toggling', () => {
     const h = buildForward();
     h.forward.setDesired('on');
     await h.forward.reconcile();
-    expect(h.prepareSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'dest-1' }), { title: 'Friday Mix' });
+    // No meta was ever given, so it falls back to the bare {title: destination.name}.
+    expect(h.prepareSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'dest-1' }), { title: 'My channel' });
     expect(h.createRelay).toHaveBeenCalledWith({ inputUrl: SOURCE_URL, outputUrl: 'rtmp://dest.example/app/secret-key' });
     expect(h.lastRelay().start).toHaveBeenCalled();
     expect(h.forward.status().state).toBe('connecting');
+  });
+
+  // The whole point of this rework: a destination's own title/description/privacy/latency are
+  // supplied right at the moment of toggling ON, not derived from a session-wide default.
+  it('prepares the provider session with the meta given at toggle-on time', async () => {
+    const h = buildForward();
+    h.forward.setDesired('on', {
+      title: 'Friday night set', description: 'chill vibes', privacyStatus: 'public', latencyPreference: 'low',
+    });
+    await h.forward.reconcile();
+    expect(h.prepareSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'dest-1' }), {
+      title: 'Friday night set', description: 'chill vibes', privacyStatus: 'public', latencyPreference: 'low',
+    });
+  });
+
+  // A respawn or an internal reconcile calls setDesired() (or nothing at all) without resupplying
+  // meta — the LAST explicitly-given meta must still be what the next prepareSession() uses, not a
+  // silent revert to the bare fallback.
+  it('remembers the meta given at toggle-on across a toggle-off-then-on that omits it', async () => {
+    const h = buildForward();
+    h.forward.setDesired('on', { title: 'Friday night set', privacyStatus: 'unlisted' });
+    await h.forward.reconcile();
+    h.forward.setDesired('off');
+    await h.forward.reconcile();
+    h.forward.setDesired('on'); // no meta this time
+    await h.forward.reconcile();
+    expect(h.prepareSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'dest-1' }),
+      { title: 'Friday night set', privacyStatus: 'unlisted' },
+    );
   });
 
   it('is idempotent: setting the same desired state twice changes nothing', async () => {

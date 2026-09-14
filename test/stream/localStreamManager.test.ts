@@ -407,9 +407,10 @@ describe('LocalStreamManager — destination forwards', () => {
     expect(manager.status('user-1').local.state).toBe('streaming');
   });
 
-  it('starts a relay for a destination pre-checked at start', async () => {
+  it('starts a relay for a destination toggled on before start', async () => {
     const { manager, prepareSession, createRelay } = buildManager();
-    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on');
+    await manager.start('user-1', 'playlist-1');
     await settle();
     expect(prepareSession).toHaveBeenCalled();
     expect(createRelay).toHaveBeenCalledWith({
@@ -419,14 +420,6 @@ describe('LocalStreamManager — destination forwards', () => {
     expect(manager.status('user-1').destinations[0]).toEqual(expect.objectContaining({
       destinationId: 'dest-1', desired: 'on', state: 'connecting',
     }));
-  });
-
-  it('rejects an unknown or someone else\'s pre-checked destination before any side effect', async () => {
-    const { manager, authRegistry, relayTarget } = buildManager();
-    await expect(manager.start('user-1', 'playlist-1', { destinationIds: ['nope'] })).rejects.toThrow('destination not found');
-    await expect(manager.start('user-2', 'playlist-1', { destinationIds: ['dest-1'] })).rejects.toThrow('not your destination');
-    expect(relayTarget.create).not.toHaveBeenCalled();
-    expect(authRegistry.register).not.toHaveBeenCalled();
   });
 
   it('toggles a destination on and off mid-stream without touching the encode', async () => {
@@ -596,17 +589,19 @@ describe('LocalStreamManager — destination forwards', () => {
 
   // The same stale-row hazard as the test above, reached from a DIFFERENT path: a forward that
   // SURVIVES a stop/restart (parked at 'pending' by an encoder crash, never pruned since desired
-  // is still 'on') without ever going through getOrCreateForward's toggle-route refresh. If the
-  // next start() only refreshed the destinations it was explicitly handed, a destination the user
-  // checked earlier and never unchecked would keep prepareSession()-ing with a stale row forever.
-  it('refreshes a surviving forward\'s row on restart, even when start() is not re-passed that destinationId', async () => {
+  // is still 'on') without ever going through getOrCreateForward's toggle-route refresh. start()
+  // itself has no destination list of its own at all now — every forward it might reconcile into
+  // life is either toggled on before this call or already sitting in the manager's own forward
+  // map from before, so refreshForwardRows() must cover BOTH without being told which is which.
+  it('refreshes a surviving forward\'s row on restart, with no destination list for start() to consult', async () => {
     const { manager, prepareSession, rows, encoder } = buildManager();
     prepareSession.mockImplementation(async (destination: StreamDestination) => {
       if (!destination.youtubeLiveStreamId) rows.set(destination.id, { ...destination, youtubeLiveStreamId: 'ls-1' });
       return { rtmpUrl: 'rtmp://a.example/live', streamKey: 'key' };
     });
 
-    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on');
+    await manager.start('user-1', 'playlist-1');
     await settle();
     expect(prepareSession.mock.calls[0][0].youtubeLiveStreamId).toBeNull();
 
@@ -627,8 +622,8 @@ describe('LocalStreamManager — destination forwards', () => {
     expect(manager.status('user-1').local.state).toBe('error');
     expect(manager.status('user-1').destinations[0].desired).toBe('on');
 
-    // Restart with NO destinationIds passed — the surviving forward isn't in this call's
-    // `destinations` array at all, only in the manager's own forward map from before.
+    // Restart — the surviving forward is only in the manager's own forward map from before, never
+    // named to this call at all.
     await manager.start('user-1', 'playlist-1');
     await settle();
     expect(prepareSession).toHaveBeenCalledTimes(2);
@@ -667,7 +662,8 @@ describe('LocalStreamManager — destination forwards', () => {
 
   it('stops every forward and finalizes before reporting the stream stopped', async () => {
     const { manager, relays, encoder } = buildManager();
-    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on');
+    await manager.start('user-1', 'playlist-1');
     await settle();
     await manager.stop('user-1');
     expect(relays[0].stop).toHaveBeenCalled();
@@ -685,7 +681,8 @@ describe('LocalStreamManager — destination forwards', () => {
   // its lifecycle WITHOUT touching the local stream."
   it('removeDestination stops only that forward, never the encode', async () => {
     const { manager, relays, encoder } = buildManager();
-    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on');
+    await manager.start('user-1', 'playlist-1');
     await settle();
     await manager.removeDestination('user-1', 'dest-1');
     expect(relays[0].stop).toHaveBeenCalled();
@@ -700,29 +697,37 @@ describe('LocalStreamManager — destination forwards', () => {
     await expect(manager.removeDestination('user-1', 'dest-1')).resolves.toBeUndefined();
   });
 
-  it('passes the broadcast metadata from start() to every forward it prepares', async () => {
+  // The whole point of this rework: broadcast settings are THIS destination's own, chosen right at
+  // toggle-on time — not a session-wide default start() used to hand every forward alike.
+  it('passes the broadcast metadata given at toggle-on time to that forward\'s prepareSession', async () => {
     const { manager, prepareSession } = buildManager();
-    await manager.start('user-1', 'playlist-1', {
-      destinationIds: ['dest-1'],
-      meta: { title: 'Late night', privacyStatus: 'unlisted', latencyPreference: 'low' },
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on', {
+      title: 'Late night', privacyStatus: 'unlisted', latencyPreference: 'low',
     });
+    await manager.start('user-1', 'playlist-1');
     await settle();
     expect(prepareSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'dest-1' }), {
       title: 'Late night', description: undefined, privacyStatus: 'unlisted', latencyPreference: 'low',
     });
   });
 
-  it('defaults the broadcast title to the playlist name, as the old session API did', async () => {
+  // No playlist name to default to any more (a toggle has no playlist context at all) — the
+  // destination's own name is the fallback, whether no meta was given (the forward's own bare
+  // default) or a partial one was (this manager's own title ?? destination.name resolution).
+  it('defaults the broadcast title to the destination\'s own name when the toggle omits it', async () => {
     const { manager, prepareSession } = buildManager();
-    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on', { privacyStatus: 'unlisted' });
+    await manager.start('user-1', 'playlist-1');
     await settle();
-    expect(prepareSession.mock.calls[0][1].title).toBe('Mix');
+    expect(prepareSession.mock.calls[0][1]).toEqual({
+      title: 'Twitch', description: undefined, privacyStatus: 'unlisted', latencyPreference: undefined,
+    });
   });
 
-  it('rejects a pre-checked destination whose provider is not registered', async () => {
+  it('rejects a toggle for a destination whose provider is not registered', async () => {
     const { manager, rows } = buildManager();
     rows.set('dest-1', destinationRow({ provider: 'nonsense' }));
-    await expect(manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] }))
+    await expect(manager.setDestinationDesired('user-1', 'dest-1', 'on'))
       .rejects.toThrow('unsupported destination provider');
   });
 
@@ -732,7 +737,8 @@ describe('LocalStreamManager — destination forwards', () => {
   // or every destination would drop the moment the user hit pause.
   it('keeps every forward running across a pause and resume', async () => {
     const { manager, relays } = buildManager();
-    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await manager.setDestinationDesired('user-1', 'dest-1', 'on');
+    await manager.start('user-1', 'playlist-1');
     await settle();
 
     manager.pause('user-1');

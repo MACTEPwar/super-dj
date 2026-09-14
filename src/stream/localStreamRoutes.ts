@@ -14,8 +14,11 @@ import { AuthService } from '../auth/authService';
  * LocalStreamManager itself (404/403 straight through).
  *
  * title/description/privacyStatus/latencyPreference configure a broadcast for any destination
- * provider that creates one (YouTube); custom RTMP destinations ignore them. Phase A omitted these
- * fields because it had no destinations at all — Phase B (this file, from here on) reinstates them.
+ * provider that creates one (YouTube); custom RTMP destinations ignore them. They live on the
+ * destination TOGGLE below, not on /start: a destination's own settings are chosen right when it
+ * actually goes live, not once for the whole session — so /start only ever takes playlistId/
+ * templateId, and every destination (whether ticked before the first start or added mid-stream)
+ * goes through the same PUT .../destinations/{id} call.
  */
 // The session cookie is `SameSite=None; Secure` in production (sessionCookie.ts), so it rides on
 // cross-site requests. A route with no id and no ownership check to get wrong (see doc comment
@@ -44,39 +47,16 @@ export function createLocalStreamRouter(
   const auth = requireAuth(authService);
   const userId = (req: AuthenticatedRequest) => req.user!.id;
 
-  // Every field except playlistId is optional. destinationIds pre-checks destinations — exactly the
-  // same intents a later PUT /destinations/:id would set, so there is one orchestration path rather
-  // than two. title/description/privacyStatus/latencyPreference configure any broadcast a
-  // destination provider creates (YouTube); they are accepted again here because, unlike Phase A,
-  // this API now has destinations. Custom RTMP destinations ignore them.
+  // Only playlistId is required; templateId is the only other field. Destinations are never named
+  // here — see this router's own doc comment above for why.
   router.post('/start', auth, requireJsonRequest, wrapAsync(async (req, res) => {
-    const { playlistId, templateId, destinationIds, title, description, privacyStatus, latencyPreference } = req.body ?? {};
+    const { playlistId, templateId } = req.body ?? {};
     if (typeof playlistId !== 'string' || playlistId.length === 0) throw new ApiError(400, 'body.playlistId is required');
     if (templateId !== undefined && (typeof templateId !== 'string' || templateId.length === 0)) {
       throw new ApiError(400, 'body.templateId must be a non-empty string');
     }
-    if (destinationIds !== undefined) {
-      if (!Array.isArray(destinationIds) || destinationIds.some((id: unknown) => typeof id !== 'string' || id.length === 0)) {
-        throw new ApiError(400, 'body.destinationIds must be an array of non-empty strings');
-      }
-      if (new Set(destinationIds).size !== destinationIds.length) {
-        throw new ApiError(400, 'body.destinationIds must not contain duplicates');
-      }
-    }
-    if (title !== undefined && typeof title !== 'string') throw new ApiError(400, 'body.title must be a string');
-    if (description !== undefined && typeof description !== 'string') throw new ApiError(400, 'body.description must be a string');
-    if (privacyStatus !== undefined && !['public', 'unlisted', 'private'].includes(privacyStatus)) {
-      throw new ApiError(400, "body.privacyStatus must be 'public', 'unlisted', or 'private'");
-    }
-    if (latencyPreference !== undefined && !['normal', 'low', 'ultraLow'].includes(latencyPreference)) {
-      throw new ApiError(400, "body.latencyPreference must be 'normal', 'low', or 'ultraLow'");
-    }
     const id = userId(req as AuthenticatedRequest);
-    await localStreamManager.start(id, playlistId, {
-      templateId,
-      destinationIds,
-      meta: { title, description, privacyStatus, latencyPreference },
-    });
+    await localStreamManager.start(id, playlistId, { templateId });
     res.status(200).json(localStreamManager.status(id));
   }));
 
@@ -124,12 +104,27 @@ export function createLocalStreamRouter(
   // The checkbox. PUT rather than POST because it sets a value idempotently rather than issuing a
   // command, and it carries the destination id in the URL — but it still goes through
   // requireJsonRequest, because a PUT with a JSON content-type is what forces the browser preflight
-  // this app's CORS policy then has to approve.
+  // this app's CORS policy then has to approve. title/description/privacyStatus/latencyPreference
+  // are THIS destination's own broadcast settings, applied right when it goes live — validated the
+  // same way /start used to validate its now-removed session-wide copies. Every one of them is
+  // optional (and ignored on desired:'off'): the manager falls back to the destination's own name
+  // as the title, and to whatever this forward last used, when omitted.
   router.put('/destinations/:destinationId', auth, requireJsonRequest, wrapAsync(async (req, res) => {
-    const { desired } = req.body ?? {};
+    const { desired, title, description, privacyStatus, latencyPreference } = req.body ?? {};
     if (desired !== 'on' && desired !== 'off') throw new ApiError(400, "body.desired must be 'on' or 'off'");
+    if (title !== undefined && typeof title !== 'string') throw new ApiError(400, 'body.title must be a string');
+    if (description !== undefined && typeof description !== 'string') throw new ApiError(400, 'body.description must be a string');
+    if (privacyStatus !== undefined && !['public', 'unlisted', 'private'].includes(privacyStatus)) {
+      throw new ApiError(400, "body.privacyStatus must be 'public', 'unlisted', or 'private'");
+    }
+    if (latencyPreference !== undefined && !['normal', 'low', 'ultraLow'].includes(latencyPreference)) {
+      throw new ApiError(400, "body.latencyPreference must be 'normal', 'low', or 'ultraLow'");
+    }
     const id = userId(req as AuthenticatedRequest);
-    const status = await localStreamManager.setDestinationDesired(id, req.params.destinationId, desired);
+    const meta = desired === 'on' && (title !== undefined || description !== undefined || privacyStatus !== undefined || latencyPreference !== undefined)
+      ? { title, description, privacyStatus, latencyPreference }
+      : undefined;
+    const status = await localStreamManager.setDestinationDesired(id, req.params.destinationId, desired, meta);
     res.status(200).json(status);
   }));
 

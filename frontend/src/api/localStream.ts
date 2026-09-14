@@ -34,6 +34,16 @@ export interface DestinationForwardStatus {
   error?: ForwardError;
 }
 
+// This destination's own broadcast title/description/privacy/latency, given right at the moment
+// of toggling it ON — never a session-wide default. Ignored by a provider with no broadcast
+// concept (custom RTMP).
+export interface DestinationBroadcastMeta {
+  title?: string;
+  description?: string;
+  privacyStatus?: 'public' | 'unlisted' | 'private';
+  latencyPreference?: 'normal' | 'low' | 'ultraLow';
+}
+
 export interface LocalStreamState {
   state: LocalSessionState;
   currentTrack: string | null;
@@ -53,17 +63,11 @@ export interface LocalStreamStatus {
   destinations: DestinationForwardStatus[];
 }
 
+// No destination and no broadcast metadata here any more: a destination (and its own settings)
+// is switched on separately, via setDestination(), before or after start() — see that method.
 export interface StartLocalStreamOptions {
   playlistId: string;
   templateId?: string;
-  // Destinations to switch on as soon as the stream is publishing. Optional and possibly empty.
-  destinationIds?: string[];
-  // Broadcast metadata for destinations that create a live broadcast (YouTube). Ignored by custom
-  // RTMP destinations.
-  title?: string;
-  description?: string;
-  privacyStatus?: 'public' | 'unlisted' | 'private';
-  latencyPreference?: 'normal' | 'low' | 'ultraLow';
 }
 
 export const localStreamApi = {
@@ -76,9 +80,11 @@ export const localStreamApi = {
   previous: () => api.post<LocalStreamStatus>('/local-stream/previous'),
   play: (name: string) => api.post<LocalStreamStatus>('/local-stream/play', { name }),
   // The checkbox. Idempotent, and valid even with nothing running — the forward then waits at
-  // 'pending' for the next start.
-  setDestination: (destinationId: string, desired: ForwardDesiredState) =>
-    api.put<LocalStreamStatus>(`/local-stream/destinations/${destinationId}`, { desired }),
+  // 'pending' for the next start. `meta` is this destination's own broadcast settings, applied
+  // right at the moment of switching it on (ignored on 'off', and on a provider with no broadcast
+  // concept such as custom RTMP).
+  setDestination: (destinationId: string, desired: ForwardDesiredState, meta?: DestinationBroadcastMeta) =>
+    api.put<LocalStreamStatus>(`/local-stream/destinations/${destinationId}`, { desired, ...meta }),
   eventsUrl: () => `${API_BASE_URL}/local-stream/events`,
   // Absolute, because hls.js loads it itself rather than going through the `api` wrapper. The
   // backend resolves which stream this is from the session cookie — there is no id in this URL by

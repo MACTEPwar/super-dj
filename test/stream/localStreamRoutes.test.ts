@@ -34,11 +34,7 @@ describe('local stream control routes', () => {
     const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
     const res = await request(buildApp(manager, 'user-9')).post('/local-stream/start').send({ playlistId: 'p1' });
     expect(res.status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-9', 'p1', {
-      templateId: undefined,
-      destinationIds: undefined,
-      meta: { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined },
-    });
+    expect(manager.start).toHaveBeenCalledWith('user-9', 'p1', { templateId: undefined });
     expect(res.body).toEqual(STATUS);
   });
 
@@ -47,11 +43,7 @@ describe('local stream control routes', () => {
     const app = buildApp(manager);
     expect((await request(app).post('/local-stream/start').send({ playlistId: 'p1', templateId: '' })).status).toBe(400);
     expect((await request(app).post('/local-stream/start').send({ playlistId: 'p1', templateId: 'tpl-1' })).status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', {
-      templateId: 'tpl-1',
-      destinationIds: undefined,
-      meta: { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined },
-    });
+    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', { templateId: 'tpl-1' });
   });
 
   it.each([
@@ -135,8 +127,39 @@ describe('local stream destination toggles', () => {
     const res = await request(buildApp(manager, 'user-7'))
       .put('/local-stream/destinations/dest-1').send({ desired: 'on' });
     expect(res.status).toBe(200);
-    expect(manager.setDestinationDesired).toHaveBeenCalledWith('user-7', 'dest-1', 'on');
+    expect(manager.setDestinationDesired).toHaveBeenCalledWith('user-7', 'dest-1', 'on', undefined);
     expect(res.body).toEqual(STATUS);
+  });
+
+  // The whole point of this rework: a destination's own broadcast settings are chosen right at the
+  // moment of toggling it ON, not once for a whole session via /start.
+  it('PUT /destinations/:id passes this destination\'s own broadcast metadata through on toggle-on', async () => {
+    const manager: any = { setDestinationDesired: jest.fn().mockResolvedValue(STATUS) };
+    const res = await request(buildApp(manager, 'user-7')).put('/local-stream/destinations/dest-1').send({
+      desired: 'on', title: 'Late night', description: 'chill', privacyStatus: 'unlisted', latencyPreference: 'low',
+    });
+    expect(res.status).toBe(200);
+    expect(manager.setDestinationDesired).toHaveBeenCalledWith('user-7', 'dest-1', 'on', {
+      title: 'Late night', description: 'chill', privacyStatus: 'unlisted', latencyPreference: 'low',
+    });
+  });
+
+  it('PUT /destinations/:id ignores broadcast metadata on toggle-off', async () => {
+    const manager: any = { setDestinationDesired: jest.fn().mockResolvedValue(STATUS) };
+    await request(buildApp(manager)).put('/local-stream/destinations/dest-1').send({ desired: 'off', title: 'whatever' });
+    expect(manager.setDestinationDesired).toHaveBeenCalledWith('user-1', 'dest-1', 'off', undefined);
+  });
+
+  it.each([
+    [{ title: 5 }],
+    [{ description: {} }],
+    [{ privacyStatus: 'semi-public' }],
+    [{ latencyPreference: 'instant' }],
+  ])('PUT /destinations/:id rejects invalid broadcast metadata %j', async (bad) => {
+    const manager: any = { setDestinationDesired: jest.fn() };
+    const res = await request(buildApp(manager)).put('/local-stream/destinations/dest-1').send({ desired: 'on', ...bad });
+    expect(res.status).toBe(400);
+    expect(manager.setDestinationDesired).not.toHaveBeenCalled();
   });
 
   it('PUT /destinations/:id rejects a body that is not on/off', async () => {
@@ -169,42 +192,12 @@ describe('local stream destination toggles', () => {
 });
 
 describe('POST /local-stream/start options', () => {
-  it('passes pre-checked destinations and broadcast metadata through', async () => {
+  // /start no longer takes a destination list or any broadcast metadata at all — see the PUT
+  // /destinations/:id tests above for where those now live.
+  it('starts with only playlistId and templateId — a fully valid running state with nothing forwarded', async () => {
     const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
-    const res = await request(buildApp(manager, 'user-2')).post('/local-stream/start').send({
-      playlistId: 'p1', templateId: 'tpl-1', destinationIds: ['d1', 'd2'],
-      title: 'Late night', description: 'chill', privacyStatus: 'unlisted', latencyPreference: 'low',
-    });
+    const res = await request(buildApp(manager)).post('/local-stream/start').send({ playlistId: 'p1', templateId: 'tpl-1' });
     expect(res.status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-2', 'p1', {
-      templateId: 'tpl-1',
-      destinationIds: ['d1', 'd2'],
-      meta: { title: 'Late night', description: 'chill', privacyStatus: 'unlisted', latencyPreference: 'low' },
-    });
-  });
-
-  it('starts with no destinations at all — a fully valid running state', async () => {
-    const manager: any = { start: jest.fn().mockResolvedValue(undefined), status: jest.fn().mockReturnValue(STATUS) };
-    const res = await request(buildApp(manager)).post('/local-stream/start').send({ playlistId: 'p1' });
-    expect(res.status).toBe(200);
-    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', {
-      templateId: undefined, destinationIds: undefined,
-      meta: { title: undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined },
-    });
-  });
-
-  it.each([
-    [{ destinationIds: 'd1' }],
-    [{ destinationIds: [1] }],
-    [{ destinationIds: ['d1', 'd1'] }],
-    [{ title: 5 }],
-    [{ description: {} }],
-    [{ privacyStatus: 'semi-public' }],
-    [{ latencyPreference: 'instant' }],
-  ])('rejects invalid start option %j', async (bad) => {
-    const manager: any = { start: jest.fn() };
-    const res = await request(buildApp(manager)).post('/local-stream/start').send({ playlistId: 'p1', ...bad });
-    expect(res.status).toBe(400);
-    expect(manager.start).not.toHaveBeenCalled();
+    expect(manager.start).toHaveBeenCalledWith('user-1', 'p1', { templateId: 'tpl-1' });
   });
 });
