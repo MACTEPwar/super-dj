@@ -8,8 +8,11 @@ function jsonResponse(body: unknown) {
 }
 
 const STATUS = {
-  state: 'streaming', currentTrack: 'a', nextTrack: 'b',
-  previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
+  local: {
+    state: 'streaming', currentTrack: 'a', nextTrack: 'b',
+    previewReady: true, playlistId: 'p1', templateId: null, startedAt: '2026-09-14T10:00:00.000Z',
+  },
+  destinations: [],
 };
 
 describe('localStreamApi', () => {
@@ -27,6 +30,15 @@ describe('localStreamApi', () => {
     expect(JSON.parse(init.body)).toEqual({ playlistId: 'p1', templateId: 'tpl-1' });
   });
 
+  it('starts a stream with pre-checked destinations and broadcast metadata', async () => {
+    await localStreamApi.start({
+      playlistId: 'p1', destinationIds: ['d1'], title: 'Late night', privacyStatus: 'unlisted',
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      playlistId: 'p1', destinationIds: ['d1'], title: 'Late night', privacyStatus: 'unlisted',
+    });
+  });
+
   it.each(['stop', 'pause', 'resume', 'next', 'previous'] as const)('posts to /local-stream/%s with no body', async (command) => {
     await localStreamApi[command]();
     const [url, init] = fetchMock.mock.calls[0];
@@ -38,6 +50,14 @@ describe('localStreamApi', () => {
   it('queues a track by name', async () => {
     await localStreamApi.play('Track A');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ name: 'Track A' });
+  });
+
+  it('PUTs a destination toggle', async () => {
+    await localStreamApi.setDestination('dest-1', 'on');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('/local-stream/destinations/dest-1');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ desired: 'on' });
   });
 
   // Every request carries the session cookie — the preview player depends on the same behaviour.

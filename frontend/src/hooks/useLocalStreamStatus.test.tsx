@@ -17,8 +17,11 @@ class FakeEventSource {
 }
 
 const IDLE = {
-  state: 'idle', currentTrack: null, nextTrack: null,
-  previewReady: false, playlistId: null, templateId: null, startedAt: null,
+  local: {
+    state: 'idle', currentTrack: null, nextTrack: null,
+    previewReady: false, playlistId: null, templateId: null, startedAt: null,
+  },
+  destinations: [],
 };
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -45,9 +48,12 @@ describe('useLocalStreamStatus', () => {
   it('replaces the cached status when an SSE frame arrives', async () => {
     const { result } = renderHook(() => useLocalStreamStatus(), { wrapper });
     await waitFor(() => expect(result.current.data).toBeDefined());
-    FakeEventSource.instances[0].emit({ ...IDLE, state: 'streaming', currentTrack: 'a', previewReady: true });
-    await waitFor(() => expect(result.current.data?.state).toBe('streaming'));
-    expect(result.current.data?.previewReady).toBe(true);
+    FakeEventSource.instances[0].emit({
+      ...IDLE,
+      local: { ...IDLE.local, state: 'streaming', currentTrack: 'a', previewReady: true },
+    });
+    await waitFor(() => expect(result.current.data?.local.state).toBe('streaming'));
+    expect(result.current.data?.local.previewReady).toBe(true);
   });
 
   it('closes the EventSource on unmount', async () => {
