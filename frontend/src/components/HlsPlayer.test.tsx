@@ -12,13 +12,14 @@ interface FakeInstance {
   recoverMediaError: ReturnType<typeof vi.fn>;
   emitError: (data: ErrorPayload) => void;
   emitManifestParsed: () => void;
+  emitMediaAttached: () => void;
 }
 
 const { instances } = vi.hoisted(() => ({ instances: [] as FakeInstance[] }));
 
 vi.mock('hls.js', () => {
   class FakeHls {
-    static Events = { ERROR: 'hlsError', MANIFEST_PARSED: 'hlsManifestParsed' };
+    static Events = { ERROR: 'hlsError', MANIFEST_PARSED: 'hlsManifestParsed', MEDIA_ATTACHED: 'hlsMediaAttached' };
     static ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError' };
     static isSupported = vi.fn(() => true);
 
@@ -37,6 +38,7 @@ vi.mock('hls.js', () => {
 
     emitError(data: ErrorPayload) { this.handlers.hlsError?.('hlsError', data); }
     emitManifestParsed() { this.handlers.hlsManifestParsed?.('hlsManifestParsed', {}); }
+    emitMediaAttached() { this.handlers.hlsMediaAttached?.('hlsMediaAttached', {}); }
   }
   return { default: FakeHls };
 });
@@ -53,16 +55,33 @@ function advance(ms: number) {
   act(() => { vi.advanceTimersByTime(ms); });
 }
 
+// jsdom's document.hidden is a non-configurable getter on the prototype, so override it on the
+// instance. `setHidden(false)` alone models Chrome's own behaviour (the flag flips before the
+// event); `showPage()` also delivers the event the component listens for.
+let hiddenValue = false;
+
+function setHidden(value: boolean) {
+  hiddenValue = value;
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hiddenValue });
+}
+
+function showPage() {
+  setHidden(false);
+  act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+}
+
 describe('HlsPlayer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     instances.length = 0;
     vi.useFakeTimers();
+    setHidden(false);
     (Hls.isSupported as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    setHidden(false);
   });
 
   it('attaches hls.js to the video element and loads the source', () => {
@@ -183,6 +202,67 @@ describe('HlsPlayer', () => {
     expect(instances[0].destroy).toHaveBeenCalledTimes(1);
     expect(instances).toHaveLength(2);
     expect(instances[1].loadSource).toHaveBeenCalledWith('http://api/b.m3u8');
+  });
+
+  // THE regression test for the second "preview never plays" bug. Chrome defers a media element's
+  // load while the document is hidden, so the MediaSource handed to attachMedia() never opens and
+  // hls.js never fires MEDIA_ATTACHED — after which StreamController silently refuses to pick a
+  // fragment on every tick, with no ERROR event to recover from. Reproduced against real binaries:
+  // 0 fragment requests while hidden, playback the instant the page was brought to the front.
+  it('does not build a player while the page is hidden', () => {
+    setHidden(true);
+    render(<HlsPlayer src="http://api/index.m3u8" unsupportedMessage="no hls" />);
+    expect(instances).toHaveLength(0);
+  });
+
+  it('builds the player as soon as the page becomes visible', () => {
+    setHidden(true);
+    render(<HlsPlayer src="http://api/index.m3u8" unsupportedMessage="no hls" />);
+    showPage();
+    expect(instances).toHaveLength(1);
+    expect(instances[0].loadSource).toHaveBeenCalledWith('http://api/index.m3u8');
+  });
+
+  // The page went hidden between attachMedia() and the MediaSource opening, so this instance is the
+  // zombie described above: alive, polling, and permanently unable to load a fragment.
+  it('rebuilds a player whose media never attached once the page becomes visible', () => {
+    render(<HlsPlayer src="http://api/index.m3u8" unsupportedMessage="no hls" />);
+    setHidden(true);
+    showPage();
+    expect(instances).toHaveLength(2);
+    expect(instances[0].destroy).toHaveBeenCalled();
+    expect(instances[1].loadSource).toHaveBeenCalledWith('http://api/index.m3u8');
+  });
+
+  // A player that IS attached keeps buffering in a background tab; tabbing back must not cost the
+  // viewer a fresh MediaMTX session and several seconds of re-buffering.
+  it('leaves an already-attached player alone when the page becomes visible again', () => {
+    render(<HlsPlayer src="http://api/index.m3u8" unsupportedMessage="no hls" />);
+    instances[0].emitMediaAttached();
+    setHidden(true);
+    showPage();
+    expect(instances).toHaveLength(1);
+    expect(instances[0].destroy).not.toHaveBeenCalled();
+  });
+
+  it('defers a scheduled rebuild that comes due while the page is hidden until it is visible', () => {
+    render(<HlsPlayer src="http://api/index.m3u8" unsupportedMessage="no hls" />);
+    instances[0].emitError(FATAL_NETWORK);
+    setHidden(true);
+    advance(FIRST_DELAY);
+    expect(instances).toHaveLength(1);
+
+    showPage();
+    expect(instances).toHaveLength(2);
+    expect(instances[1].loadSource).toHaveBeenCalledWith('http://api/index.m3u8');
+  });
+
+  it('stops reacting to visibility changes after unmount', () => {
+    setHidden(true);
+    const { unmount } = render(<HlsPlayer src="http://api/index.m3u8" unsupportedMessage="no hls" />);
+    unmount();
+    showPage();
+    expect(instances).toHaveLength(0);
   });
 
   it('falls back to the browser\'s native player when MSE-based hls.js is unsupported', () => {

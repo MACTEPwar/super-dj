@@ -270,10 +270,11 @@ split works: no credentials → 401, wrong read secret → 401, and the **publis
 a read → 401. What did **not** hold is the assumption in that first sentence's original wording —
 that `HlsPlayer`'s retry logic coped with that window at all. It did not; see item 3 below.
 
-**A third read-leg correction, found after Phase A shipped, on the CLIENT half of the same
-window.** Same standard of evidence as items 1 and 2 — reproduced and then re-verified against a
-real MediaMTX 1.21.0, a real ffmpeg publisher, the real hls.js 1.7.3 the app bundles, and a real
-headless Google Chrome, all on an isolated docker network:
+**Two further corrections, found after Phase A shipped, both on the CLIENT half of the read leg —
+and both of which first presented as server-side faults.** Same standard of evidence as items 1
+and 2: reproduced and then re-verified against a real MediaMTX 1.21.0, a real ffmpeg publisher, the
+real hls.js 1.7.3 the app bundles, and a real headless Google Chrome — item 3 on an isolated docker
+network, item 4 against the deployed stand's own encoder/relay/proxy:
 
 3. **A preview whose first read lands before MediaMTX's own "stream is available and online"
    transition used to hang forever, until a manual page reload.** Confirmed from the deployed
@@ -327,6 +328,66 @@ headless Google Chrome, all on an isolated docker network:
    No backend defect was found. The proxy, `createPreviewFetch`'s redirect handling, and
    `previewReady`'s timing all behave as documented; passing MediaMTX's 404 straight through is
    still right, and nothing on the server side was changed for this.
+
+4. **A preview built while the browser tab is HIDDEN never loads a single fragment — and the
+   symptom points convincingly at the server.** Reported as "the manifest and the media playlist
+   both load, 200, every ~2 s, forever, and hls.js never issues one `.ts` request; `readyState`
+   stays 0; no `ERROR` event ever fires." Every server-side suspect was measured and cleared
+   against the real deployed stand (real persistent encoder → real MediaMTX 1.21.0 → the real
+   `/local-stream/preview` proxy), so record them here so they are not re-investigated:
+   - The multivariant playlist is well-formed: `#EXT-X-INDEPENDENT-SEGMENTS`,
+     `CODECS="avc1.42c01f,mp4a.40.2"`, `RESOLUTION=1280x720`, `FRAME-RATE=30.000`.
+   - The media playlist is well-formed and carries an `#EXT-X-PROGRAM-DATE-TIME` before **every**
+     segment (not just the first), `#EXT-X-TARGETDURATION:2`, seven `#EXTINF:2.00000` entries.
+   - Proxy response headers are correct: `content-type: application/vnd.apple.mpegurl` for both
+     playlists, **`video/mp2t` for segments** (so the extension-fallback map in
+     `localStreamPreviewRoutes.ts` is never even reached), `cache-control: no-store` throughout.
+   - The segments are structurally fine: `ffprobe` on a live one shows H.264 Constrained Baseline
+     L3.1 1280x720 + AAC-LC 44.1 kHz stereo, the first video packet of the segment flagged `K_`
+     (keyframe) at `pts_time 42.023`, audio starting 4.8 ms later at `42.028` — no missing IDR, no
+     audio/video PTS divergence, no discontinuity (`cc [0,0]`).
+   - `PTSKnown: false` / `alignedSliding: false` on every `LEVEL_UPDATED` are *consequences*, not
+     causes: both flip true the instant the first fragment is parsed. So is `startPosition: -1` —
+     for a live playlist that is hls.js's deliberate sentinel (`base-stream-controller.ts`
+     `setStartPosition`: "Leave this.startPosition at -1, so that we can use `getInitialLiveFragment`
+     logic"), not a stuck value.
+   - `backBufferLength: 30` is not implicated: the identical config plays fine.
+
+   **Root cause is Chrome, and it is invisible from every one of those angles: Chrome DEFERS a
+   media element's load entirely while `document.hidden` is true.** The element sits at
+   `networkState === 2` (NETWORK_LOADING) and stops there; the `MediaSource` that `hls.attachMedia()`
+   handed it never leaves `readyState === 'closed'`, so `sourceopen` — and therefore hls.js's
+   `MEDIA_ATTACHED` — never fires. hls.js has no error path for that: `StreamController.doTickIdle()`
+   returns at its very **first** gate (`!media && !primaryPrefetch && (startFragRequested ||
+   !hls.config.startFragPrefetch)`) on every 100 ms tick, silently, while `LevelController` keeps
+   refreshing the playlist on its own timer. Hence 200s forever, no fragment, no error.
+
+   Measured in the reporter's own Chrome 153/Windows on the real deployed app (`visibilityState:
+   "hidden"`, tab driven by an automation extension in a background window): 10 preview requests in
+   17 s, **zero** `.ts`, `readyState 0`; a separately-attached `Hls` in the same page reported
+   `mediaSource.readyState: "closed"`, `streamController.media: null`, and exactly two lifecycle
+   events in 52 s — `MEDIA_ATTACHING`, `MANIFEST_PARSED` — with `MEDIA_ATTACHED` never among them.
+   Then the one-variable confirmation, in a controlled headless Chrome against the same real stack:
+   page hidden via a second tab's `bringToFront()` → `mediaSource: "closed"`, `hasMedia: false`, 0
+   `FRAG_LOADING` in 15 s; `bringToFront()` back on the **same** instance → MediaSource opened,
+   `FRAG_LOADING`/`FRAG_LOADED` immediately, `readyState 4`, `currentTime` 9.73 → 24.75 s.
+
+   **Fix (`frontend/src/components/HlsPlayer.tsx`): `build()` does nothing while `document.hidden`,
+   and a `visibilitychange` listener builds (or rebuilds) when the page is shown.** The rebuild half
+   is gated on a `MEDIA_ATTACHED` flag, so it only fires for an instance that never attached — a
+   player that *is* attached keeps buffering in a background tab, which is what a viewer who tabs
+   away expects. Deliberately one-directional: becoming visible can start a player, becoming hidden
+   never stops one. Re-verified A/B through real binaries, same hidden-at-mount scenario, real
+   deployed backend/MediaMTX/encoder, real headless Chrome: **before** — 7 preview requests, 0
+   segments, `readyState 0` for 15 s while hidden; **after** — **0 preview requests at all** while
+   hidden (so a hidden tab no longer holds MediaMTX's on-demand muxer open for nobody), then on
+   `bringToFront()`: 8 segments, `readyState 4`, `currentTime` 0.35 → 15.36 s. The ordinary
+   visible-at-mount path is unchanged (13 segments, `currentTime` 26.63 → 29.64 s at `readyState 4`).
+
+   No backend, MediaMTX or encoder defect was found, and nothing server-side was changed. Note the
+   trap for next time: **any browser automation that drives a background window reproduces this
+   100% of the time**, which makes a purely client-side, purely environmental stall look exactly
+   like a server-side one.
 
 **Overlay templates (in progress).** Rework driven by two goals at once: fix the recurring
 segment-switch corruption (see "Known follow-ups" below) *and* lay the foundation for a
@@ -856,6 +917,19 @@ Safari, follow-up (b) above) gets none of this recovery, since nothing there is 
 rebuild — one more reason (b) needs a real fix rather than a documented shrug; and a `[HLS]
 [session …] created by` line in MediaMTX's log means a request arrived, **not** that a session
 exists, so never read one as evidence that a read succeeded.
+(m) **(Fixed.)** A second, unrelated "the preview never plays" failure: built while the browser tab
+is **hidden**, the player loaded both playlists successfully every ~2 s forever and never requested
+a single segment, with `readyState 0` and no `ERROR` event to recover from. Root cause is again
+entirely client-side and entirely environmental — Chrome defers a media element's load while
+`document.hidden`, so the `MediaSource` never opens, hls.js never fires `MEDIA_ATTACHED`, and
+`StreamController.doTickIdle()` bails at its first gate on every tick. `HlsPlayer.tsx` now declines
+to build a player while the page is hidden and builds/rebuilds one on `visibilitychange`. Every
+server-side suspect (playlist shape, proxy content types, segment keyframe/PTS structure) was
+measured against the real stand and cleared — see "Local relay (MediaMTX)" item 4 for the full
+evidence. **Carry forward: browser automation that drives a background window reproduces this
+100% of the time**, so a stall observed only through such a tool must have `document.visibilityState`
+checked before anything server-side is suspected. The native-HLS fallback path (iOS Safari,
+follow-up (b)) again gets none of this, for the same reason as in (l).
 
 ## Tooling
 
