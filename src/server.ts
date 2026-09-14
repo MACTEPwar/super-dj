@@ -179,6 +179,8 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     sceneDeps,
     relayTarget: new LocalRelayTarget({ rtmpBaseUrl: config.mediaMtxRtmpUrl, hlsBaseUrl: config.mediaMtxHlsUrl }),
     authRegistry: mediaMtxAuthRegistry,
+    destinationRepository,
+    providers: streamDestinationProviders,
     maxConcurrentStreams: config.maxConcurrentLocalStreams,
     maxSessionDurationMs: config.maxLocalStreamDurationMs,
   });

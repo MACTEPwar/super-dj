@@ -55,7 +55,11 @@ export function createLocalStreamRouter(
 
   router.post('/stop', auth, requireJsonRequest, wrapAsync(async (req, res) => {
     const id = userId(req as AuthenticatedRequest);
-    localStreamManager.stop(id);
+    // Awaited because stop() is async as of Phase B: it also shuts every destination forward down
+    // and waits for each provider-side finalize. Unawaited, its 409 for an inactive stream would
+    // escape wrapAsync as an unhandled rejection (fatal under Node 20's default) instead of a
+    // response. Task 7 rewrites this handler; the await must not wait for it.
+    await localStreamManager.stop(id);
     res.status(200).json(localStreamManager.status(id));
   }));
 
