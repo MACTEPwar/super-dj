@@ -262,12 +262,71 @@ smoke test and both fixed (and re-verified against a real MediaMTX 1.21.0) by Ta
    `redirect: 'follow'` explicitly, so a future client swap that does not follow redirects is a
    visible change rather than a silent breakage into bare 302s with no `Location`.
 
-What held on the read leg unchanged: on-demand muxing behaves exactly as `HlsPlayer`'s retry logic
-assumes — from a fresh publish, `index.m3u8` 404s (`{"status":"error","error":"no stream is
-available on path 'live/…'"}`) for a few seconds (measured 2.4 s with a stub publisher, ~6.4 s
-through the real encoder, which has a template render and a track probe to do first) and then
-returns 200 with a segment already available. And the credential split works: no credentials → 401,
-wrong read secret → 401, and the **publish** credential used for a read → 401.
+What held on the read leg unchanged: from a fresh publish, `index.m3u8` 404s
+(`{"status":"error","error":"no stream is available on path 'live/…'"}`) for a few seconds (measured
+2.4 s with a stub publisher, ~6.4 s through the real encoder, which has a template render and a
+track probe to do first) and then returns 200 with a segment already available. And the credential
+split works: no credentials → 401, wrong read secret → 401, and the **publish** credential used for
+a read → 401. What did **not** hold is the assumption in that first sentence's original wording —
+that `HlsPlayer`'s retry logic coped with that window at all. It did not; see item 3 below.
+
+**A third read-leg correction, found after Phase A shipped, on the CLIENT half of the same
+window.** Same standard of evidence as items 1 and 2 — reproduced and then re-verified against a
+real MediaMTX 1.21.0, a real ffmpeg publisher, the real hls.js 1.7.3 the app bundles, and a real
+headless Google Chrome, all on an isolated docker network:
+
+3. **A preview whose first read lands before MediaMTX's own "stream is available and online"
+   transition used to hang forever, until a manual page reload.** Confirmed from the deployed
+   stand's own MediaMTX log: at `09:25:09` an RTMP connection opened and two HLS sessions were
+   logged, at `09:25:11` the path went online — and for the next **nine minutes**, while the encoder
+   happily advanced tracks, MediaMTX logged no further HLS session and never created a muxer for
+   that path. Three separate facts combine into that, each verified rather than assumed:
+   - **A `[HLS] [session …] created by` line does not mean a session exists.**
+     `internal/servers/hls/session.go` logs it *before* calling `pathManager.AddReader`, so a
+     request that 404s ("no stream is available") still logs one. A session line with no
+     `[muxer …] created` line after it is simply a 404 — which is what every one of those
+     never-worked sessions was.
+   - **The redirect chain is not the culprit, and does not duplicate sessions.** Measured directly:
+     one proxy-shaped fetch (`redirect: 'follow'`) produces exactly **one** MediaMTX session and one
+     `authHTTP` callback, even though it is two HTTP hops — the `cookieCheck` 302 is written at
+     `http_server.go:289`, well before the session struct at `:315`. Two session lines therefore
+     mean two real client requests, not one request seen twice.
+   - **hls.js never retries a 4xx, and `hls.startLoad()` cannot recover a manifest that never
+     loaded.** `retryForHttpStatus` (hls.js 1.7.3) excludes 400-499 outright, so no
+     `manifestLoadPolicy` tuning can make the on-demand 404 retryable; the playlist loader marks a
+     failed MANIFEST context `fatal`. And with no manifest ever parsed there is no level, so
+     `LevelController.startLoad()` → `loadPlaylist()` → `shouldLoadPlaylist(undefined)` is a no-op:
+     the old `ERROR` handler's `hls.startLoad()` never re-requested `index.m3u8` at all.
+
+   Reproduced end to end (real Chrome, real MediaMTX, real ffmpeg, first read 1.2 s ahead of the
+   publisher): `PROXY index.m3u8 -> 404` … `ERROR fatal=true details=manifestLoadError
+   httpStatus=404` … `recovery: hls.startLoad()` … then **zero** further requests, `readyState=0`,
+   `currentTime=0.00` for the next 40 s while the path was online and healthy.
+
+   The same dead end has a second trigger that does not need the startup window at all: MediaMTX
+   bakes a `?session=<uuid>` into every child reference, that session id is the credential for child
+   requests, and MediaMTX destroys it with its muxer (measured: `hlsMuxerCloseAfter` 60 s idle, or
+   the publisher dropping). `startLoad()` then reloads the **same** session-scoped level URI, which
+   401s forever. Reproduced: a player that had been happily playing froze at `currentTime=15.94`
+   and hammered `main_stream.m3u8?session=efc5ef90-…` with 401s for 80 s straight — including the
+   final 40 s, during which the publisher was back and the path was online again.
+
+   **Fix (`frontend/src/components/HlsPlayer.tsx`): a fatal error destroys and rebuilds the whole
+   `Hls` instance** — the only recovery that re-fetches `index.m3u8` and so makes MediaMTX mint a
+   fresh session — on a backoff of 500/1000/1500/2000/3000/5000/8000 ms whose last value repeats
+   **forever**, reset whenever a manifest parses. A fatal media error still gets one in-place
+   `recoverMediaError()` first, and falls through to a rebuild if it recurs. Re-verified under the
+   identical conditions that reproduced each failure: startup race → rebuilds #1-#3 through the 404
+   window, `index.m3u8 -> 200` at t+7.07 s, `MANIFEST_PARSED`, `currentTime` climbing 0.26 → 38.26 s
+   at `readyState=4`, 20 segments fetched; mid-playback session loss → rebuilds #1-#8 backing off to
+   a steady 8 s poll (MediaMTX logging a brand-new session per attempt: `190dca5f`, `4d475da7`,
+   `1bee8919`, `1650122c`, `2c298463`, `96c80e9f`, `d9386a85`, all 404), then 7 s after the
+   publisher returned, `session 0c8ec684` → `muxer … created` → `MANIFEST_PARSED (backoff reset)`
+   and playback resumed, with no page reload.
+
+   No backend defect was found. The proxy, `createPreviewFetch`'s redirect handling, and
+   `previewReady`'s timing all behave as documented; passing MediaMTX's 404 straight through is
+   still right, and nothing on the server side was changed for this.
 
 **Overlay templates (in progress).** Rework driven by two goals at once: fix the recurring
 segment-switch corruption (see "Known follow-ups" below) *and* lay the foundation for a
@@ -409,7 +468,9 @@ multi-destination session, or `GET /local-stream/events` for the local-first pat
 polling overhead. The local-first page (`pages/LocalStream.tsx`, routed at `/local-stream` and
 linked from the sidebar) embeds the preview itself via `components/HlsPlayer.tsx` — hls.js with
 `withCredentials` set on every request, because the backend resolves *which* stream to serve from
-the session cookie. Every add/edit form (track upload,
+the session cookie, and a fatal error there destroys and rebuilds the whole `Hls` instance rather
+than calling `startLoad()` (the only recovery that re-fetches `index.m3u8`, which is what makes
+MediaMTX mint a fresh HLS session — see "Local relay (MediaMTX)" item 3). Every add/edit form (track upload,
 playlist creation, destination connection, starting a stream) opens in a shared `Drawer`
 component (a slide-out panel built on the same Radix `Dialog` primitive) rather than being inlined
 on the page.
@@ -501,7 +562,7 @@ frontend/                   React + Vite SPA
                             AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal,
                             StartStreamDrawer — has the Stage 4 template picker, ConfirmDialog,
                             LanguageSwitcher, HlsPlayer.tsx — hls.js preview player with
-                            credentialed requests and network-error retry)
+                            credentialed requests and a destroy-and-rebuild recovery loop)
     i18n/                   react-i18next setup + en/ru/uk locale files
     hooks/                  custom React hooks (incl. useLocalStreamStatus.ts — initial fetch +
                             SSE-driven query-cache updates)
@@ -604,8 +665,10 @@ that accepted a path or token parameter would be one IDOR away from cross-tenant
 is checked against an anchored allowlist regex (`name.m3u8|ts|mp4|m4s`, no separators, no traversal)
 and every response is `no-store`. A non-2xx upstream status is passed straight through rather than
 remapped: MediaMTX muxes HLS on demand, so the first playlist request after a start legitimately
-404s until the muxer has cut a segment — which is exactly what `HlsPlayer`'s network-error retry
-exists for (measured against a real relay: 2.4-6.4 s of 404 from a fresh publish, then 200).
+404s until the muxer has cut a segment (measured against a real relay: 2.4-6.4 s of 404 from a fresh
+publish, then 200) — carrying the player across that window is `HlsPlayer`'s destroy-and-rebuild
+recovery loop, **not** an hls.js retry, because hls.js does not retry a 4xx at all (see "Local relay
+(MediaMTX)" item 3; this route is correct as written and was not changed by that fix).
 The **inbound query string is forwarded upstream verbatim**, because MediaMTX's playlists reference
 their children with a required `?session=<uuid>` and answer 401 without it — the `{file}` allowlist
 deliberately applies to the file name only, never to the query. Verified end to end against a real
@@ -779,6 +842,20 @@ A.** `MAX_CONCURRENT_LOCAL_STREAMS` (default 10) bounds local streams only —
 per-destination encodes. A host can therefore run up to `10 + N` simultaneous libx264 720p30
 encodes, not just the 10 the "two host-level ceilings" language above might suggest on its
 own — size deployment capacity off the sum, not off the local cap alone.
+(l) **(Fixed.)** The HLS preview could hang forever — no video, no network activity, until a manual
+page reload — whenever its first read landed in MediaMTX's on-demand 404 window (the common case:
+the page mounts the player the instant `previewReady` flips true, ~2 s before the encoder's publish
+is established), and again whenever MediaMTX destroyed the session mid-playback. Root cause was
+entirely client-side: hls.js never retries a 4xx, so the 404 goes straight to a fatal
+`manifestLoadError`, and the old handler's `hls.startLoad()` is a no-op for a manifest that never
+parsed (and, once one has, re-requests the same permanently-401 `?session=<uuid>` URL).
+`HlsPlayer.tsx` now destroys and rebuilds the `Hls` instance on a capped, never-expiring backoff.
+Confirmed and re-verified with real binaries — see "Local relay (MediaMTX)" item 3 for the full
+timings and log lines. Two things worth carrying forward: the **native-HLS fallback path** (iOS
+Safari, follow-up (b) above) gets none of this recovery, since nothing there is an `Hls` instance to
+rebuild — one more reason (b) needs a real fix rather than a documented shrug; and a `[HLS]
+[session …] created by` line in MediaMTX's log means a request arrived, **not** that a session
+exists, so never read one as evidence that a read succeeded.
 
 ## Tooling
 
