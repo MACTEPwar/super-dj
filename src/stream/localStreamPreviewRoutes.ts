@@ -79,6 +79,13 @@ export function createLocalStreamPreviewRouter(
     // produced a playlist yet" — pass the status through and let the player retry rather than
     // inventing a different one.
     if (upstream.status < 200 || upstream.status > 299 || !upstream.body) {
+      // A real HTTP client typically supplies a body even for an error status (e.g. a 404's error
+      // page) — and this branch is the EXPECTED, frequent one (MediaMTX's on-demand HLS muxer
+      // 404ing right after a fresh publish, presumably polled every second or two by the player).
+      // Leaving that body undrained/undestroyed on every such poll risks leaking sockets/
+      // connections to MediaMTX over a long session. Destroy it before responding; harmless no-op
+      // when body is already null.
+      (upstream.body as Readable | null)?.destroy?.();
       res.status(upstream.status).end();
       return;
     }

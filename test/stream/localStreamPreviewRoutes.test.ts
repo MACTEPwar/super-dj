@@ -105,6 +105,16 @@ describe('GET /local-stream/preview', () => {
     expect(res.text).toBe('');
   });
 
+  it('destroys the upstream body on a non-2xx response that still has one, instead of leaking it', async () => {
+    const body = new Readable({ read() {} });
+    const destroy = jest.spyOn(body, 'destroy');
+    const previewFetch = jest.fn().mockResolvedValue({ status: 404, contentType: null, body });
+    const { app } = buildApp({ previewFetch });
+    const res = await request(app).get('/local-stream/preview/index.m3u8');
+    expect(res.status).toBe(404);
+    expect(destroy).toHaveBeenCalled();
+  });
+
   it('never echoes the upstream URL or the read credential to the client', async () => {
     const previewFetch = jest.fn().mockRejectedValue(new Error(`connect ECONNREFUSED http://mediamtx:8888/live/${TOKEN}`));
     const { app } = buildApp({ previewFetch });
