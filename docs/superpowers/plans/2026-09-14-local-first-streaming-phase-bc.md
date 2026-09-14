@@ -160,7 +160,7 @@ platform) as a first-class OAuth provider — Twitch stays a `custom` destinatio
 | The spec's "`starting` promoted into a real state" | Added as `'starting'` on the **local status payload only** (`LocalSessionState = SessionState \| 'starting'` in `localStreamManager.ts`), derived from the existing `starting: Set<string>` re-entrancy guard. `SessionState` in `src/stream/types.ts` is left alone: `StreamController` never produces `'starting'`, and widening its union would mean a state the controller's own switch logic can never reach. |
 | The spec's forward-level "`isSourceAvailable` veto" | Implemented **once**, inside `DestinationForward.pass()`/`handleRelayExit()`, not as a second veto inside `reconnectPolicy.ts`. Reason: the policy can only answer retry/give-up, while the forward needs a *third* outcome — **hold** (don't retry, don't finalize, don't spend budget). Putting the check in the policy would make "source down" indistinguishable from "budget exhausted" at the one call site that must tell them apart, and a scheduled retry re-enters the same `reconcile()` anyway, so a policy-level copy would be dead code. `reconnectPolicy.ts` gains only the spec's *other* forward addition: its own faster backoff schedule. |
 | Reusable `liveStream` bookkeeping when YouTube has deleted it out from under us | `YoutubeProvider.prepareSession()` reads `destination.youtubeLiveStreamId`, calls a new `YoutubeApiClient.getStream()`, and falls back to creating (and persisting) a fresh one when that returns null. `finalize()` no longer deletes the `liveStream` at all — which also retires the "ephemeral liveStream orphaned because finalize's token call failed" follow-up in `CLAUDE.md`. |
-| `DestinationLifecycle.watchUrl()` shape | Returns the **stable** `https://www.youtube.com/channel/{channelId}/live` link (channelId = `OAuthConnection.externalAccountId`, which `YoutubeOAuthAdapter.fetchAccountIdentity` already stores), falling back to the per-broadcast `watch?v=` URL only when no channel id is known. Spec: "the single best fix for 'my viewers' link keeps dying'". One field, not two. |
+| `DestinationLifecycle.watchUrl()` shape | Returns the **stable** `https://www.youtube.com/channel/{channelId}/live` link (channelId = `OAuthConnection.externalAccountId`, which `YoutubeOAuthAdapter.fetchAccountIdentity` already stores) **only for a `public` broadcast** — the channel `/live` page never resolves an unlisted or private one, so it would 404 for the owner's own viewers. Falls back to the per-broadcast `watch?v=` URL whenever no channel id is known OR the broadcast isn't public. Spec: "the single best fix for 'my viewers' link keeps dying'" — true for the public case, which the addendum's decision expects to be the common one; a private/unlisted broadcast still gets a fresh URL per toggle, same as before this change. One field, not two. |
 | `StreamSession` → preset schema delta | Add **`name String @default("Untitled preset")`** (a preset is picked by name, and `title` already means "the YouTube broadcast title" — overloading it would make the picker show broadcast titles) and **`latencyPreference String?`** (the one `BroadcastMeta` field the table never persisted). The **Prisma model names stay `StreamSession`/`StreamSessionDestination`** so no table is renamed and the migration is two `ADD COLUMN`s; only the TypeScript layer is renamed to `StreamPreset*`, with a comment at each boundary saying why the names differ. |
 | Preset API surface | `POST/GET/PUT/DELETE /stream-presets` (+ `GET /stream-presets/{id}`), routes + repository only — no manager class, matching how `playlistRoutes.ts`/`destinationRoutes.ts` do CRUD. `destinationIds` **may be empty** (zero destinations is a valid preset, unlike the old session which required a non-empty list). |
 | Frontend route/page naming | One page `frontend/src/pages/Stream.tsx` at **`/stream`**, one sidebar entry. `/streams`, `/streams/:id` and `/local-stream` all `<Navigate replace>` to `/stream` so existing bookmarks and the Phase A link keep working. |
@@ -1056,9 +1056,15 @@ describe('DestinationForward — relay failure', () => {
       expect(h.timers).toHaveLength(1); // the respawn timer, scheduled but not yet fired
 
       // The provider ends the broadcast (YouTube's own health-check timeout, or an auth failure)
-      // while that timer is still pending.
+      // while that timer is still pending. setPhase() synchronously starts a NEW reconcile loop
+      // (branch 3's giveUp() -> again() -> reconcile()), but reaching 'error' takes several more
+      // passes after that (branch 2's own setState('stopping') -> await finalizeSession() ->
+      // finalize()'s promise -> another pass to setState('error')) — a single microtask hop is not
+      // enough to observe the end state, only the first pass's effects. await the forward's own
+      // reconcile() (which resolves once its whole run() loop drains, same pattern as the sibling
+      // "stays in error" test below) rather than a bare microtask.
       lifecycle.setPhase('error');
-      await Promise.resolve(); // let the phase-change-triggered reconcile settle
+      await h.forward.reconcile();
 
       expect(h.forward.status().state).toBe('error');
       expect(lifecycle.finalize).toHaveBeenCalledTimes(1);
@@ -1979,7 +1985,8 @@ EOF
   - `YoutubeProviderDeps` gains `destinationRepository: Pick<DestinationRepository, 'setYoutubeLiveStreamId'>`
   - `YoutubeProvider.isAuthError(err: unknown): boolean` (delegates to `isAuthClassError`)
   - `DestinationLifecycle.watchUrl()` for YouTube now returns
-    `https://www.youtube.com/channel/{externalAccountId}/live` when a channel id is known.
+    `https://www.youtube.com/channel/{externalAccountId}/live` when a channel id is known AND the
+    broadcast is `public`; falls back to `https://www.youtube.com/watch?v={broadcastId}` otherwise.
 
 - [ ] **Step 1: Write the failing client test**
 
@@ -2328,7 +2335,8 @@ Only the liveBroadcast is ephemeral now. The reusable ingest endpoint is
 persisted on the destination and re-verified each time, so a toggle cycle drops
 liveStreams.insert/delete (~30% of its quota cost) and can no longer orphan a
 stream when finalize's token refresh fails. watchUrl() now returns the channel's
-stable /live link, which survives every toggle.
+stable /live link for a public broadcast (falling back to a per-broadcast URL
+otherwise, since the channel page never resolves an unlisted/private one).
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -2518,7 +2526,11 @@ describe('LocalStreamManager — destination forwards', () => {
     const finalize = jest.fn(() => new Promise<void>((resolve) => { resolveFinalize = resolve; }));
     prepareSession.mockResolvedValue({
       rtmpUrl: 'rtmp://a.example/live', streamKey: 'key',
-      lifecycle: { finalize, phase: () => 'live', watchUrl: () => null },
+      // onPushStarted is REQUIRED on DestinationLifecycle (src/destinations/
+      // streamDestinationProvider.ts) — `session.lifecycle?.onPushStarted()` in pass() branch 6
+      // guards a null lifecycle, not a missing method, so omitting it throws inside pass(), gets
+      // swallowed by run()'s catch, and silently aborts the reconcile loop this test depends on.
+      lifecycle: { finalize, phase: () => 'live', watchUrl: () => null, onPushStarted: jest.fn() },
     });
     await manager.start('user-1', 'playlist-1');
     await manager.setDestinationDesired('user-1', 'dest-1', 'on');
@@ -2550,15 +2562,28 @@ describe('LocalStreamManager — destination forwards', () => {
   // YoutubeProvider.prepareSession() persists youtubeLiveStreamId to the DATABASE, not back onto
   // whatever row the caller passed in — so the reused forward must be handed a FRESH row on every
   // lookup, or it keeps reading its own stale (pre-persist) copy and reuse never actually happens.
+  //
+  // This MUST reuse the SAME forward object across the toggle cycle to mean anything — a naive
+  // version of this test that lets the off-toggle fully settle (actual: 'off') before toggling
+  // back on gets PRUNED by the C1 fix's own onStatusChanged-driven cleanup, so the second toggle-on
+  // constructs a brand-new forward from an already-fresh row and passes whether setDestination()
+  // exists or not. Borrow the same hanging-finalize trick as the test above to keep this forward's
+  // `actual` at 'stopping' (never reaching 'off', so isInactive() stays false and pruning never
+  // fires) across the whole toggle-off-then-on sequence.
   it('re-reads the destination row on every toggle, so a later prepareSession sees an earlier one\'s persisted id', async () => {
     const { manager, prepareSession, rows } = buildManager();
+    let resolveFinalize!: () => void;
+    const finalize = jest.fn(() => new Promise<void>((resolve) => { resolveFinalize = resolve; }));
     prepareSession.mockImplementation(async (destination: StreamDestination) => {
       // Simulate YoutubeProvider persisting the reusable liveStream id to the repository — a real
       // DB write the row object passed in does NOT observe unless the caller re-reads it.
       if (!destination.youtubeLiveStreamId) {
         rows.set(destination.id, { ...destination, youtubeLiveStreamId: 'ls-1' });
       }
-      return { rtmpUrl: 'rtmp://a.example/live', streamKey: 'key' };
+      return {
+        rtmpUrl: 'rtmp://a.example/live', streamKey: 'key',
+        lifecycle: { finalize, phase: () => 'live', watchUrl: () => null, onPushStarted: jest.fn() },
+      };
     });
 
     await manager.start('user-1', 'playlist-1');
@@ -2566,13 +2591,57 @@ describe('LocalStreamManager — destination forwards', () => {
     await settle();
     expect(prepareSession.mock.calls[0][0].youtubeLiveStreamId).toBeNull();
 
+    // Toggle off — finalize() starts and hangs, so this forward's actual stays 'stopping', never
+    // reaching 'off'. Toggle back on immediately, before finalize resolves.
     await manager.setDestinationDesired('user-1', 'dest-1', 'off');
     await settle();
+    expect(manager.status('user-1').destinations[0].state).toBe('stopping');
     await manager.setDestinationDesired('user-1', 'dest-1', 'on');
     await settle();
+    expect(prepareSession).toHaveBeenCalledTimes(1); // still the same, still-settling forward
+
+    resolveFinalize();
+    await settle();
+    await settle(); // finalize's own .then() plus the reconcile it triggers, two macrotask hops
     // The SAME forward object's second prepareSession() must see the id the first call persisted —
     // proving getOrCreateForward() re-applied the freshly-read row rather than reusing the one
     // captured when the forward was first constructed.
+    expect(prepareSession).toHaveBeenCalledTimes(2);
+    expect(prepareSession.mock.calls[1][0].youtubeLiveStreamId).toBe('ls-1');
+  });
+
+  // The same stale-row hazard as the test above, reached from a DIFFERENT path: a forward that
+  // SURVIVES a stop/restart (parked at 'pending' by an encoder crash, never pruned since desired
+  // is still 'on') without ever going through getOrCreateForward's toggle-route refresh. If the
+  // next start() only refreshed the destinations it was explicitly handed, a destination the user
+  // checked earlier and never unchecked would keep prepareSession()-ing with a stale row forever.
+  it('refreshes a surviving forward\'s row on restart, even when start() is not re-passed that destinationId', async () => {
+    const { manager, prepareSession, rows, encoder } = buildManager();
+    prepareSession.mockImplementation(async (destination: StreamDestination) => {
+      if (!destination.youtubeLiveStreamId) rows.set(destination.id, { ...destination, youtubeLiveStreamId: 'ls-1' });
+      return { rtmpUrl: 'rtmp://a.example/live', streamKey: 'key' };
+    });
+
+    await manager.start('user-1', 'playlist-1', { destinationIds: ['dest-1'] });
+    await settle();
+    expect(prepareSession.mock.calls[0][0].youtubeLiveStreamId).toBeNull();
+
+    // The encoder dies for good; the forward parks at 'pending' (still desired: 'on', never
+    // pruned) rather than being torn down by a user-initiated stop(). Matches the existing
+    // crash-loop pattern elsewhere in this file: invoke the onExit callback the fake encoder's
+    // own `start(onExit)` call captured, twice, to cross CRASH_LOOP_THRESHOLD.
+    (encoder.start.mock.calls[0][0] as (code: number | null) => void)(1);
+    await settle();
+    (encoder.start.mock.calls[1][0] as (code: number | null) => void)(1);
+    await settle();
+    expect(manager.status('user-1').local.state).toBe('error');
+    expect(manager.status('user-1').destinations[0].desired).toBe('on');
+
+    // Restart with NO destinationIds passed — the surviving forward isn't in this call's
+    // `destinations` array at all, only in the manager's own forward map from before.
+    await manager.start('user-1', 'playlist-1');
+    await settle();
+    expect(prepareSession).toHaveBeenCalledTimes(2);
     expect(prepareSession.mock.calls[1][0].youtubeLiveStreamId).toBe('ls-1');
   });
 
@@ -2945,6 +3014,16 @@ export class LocalStreamManager extends EventEmitter {
       for (const destination of destinations) {
         this.getOrCreateForward(userId, destination).setDesired('on');
       }
+      // A forward can SURVIVE across stop-and-restart without going through getOrCreateForward at
+      // all: an encoder crash finalizes it into 'pending' (branch 1) without pruning it (desired is
+      // still 'on'), and this restart's `destinations` array only contains whatever the CALLER
+      // passed this time — a destination the user checked earlier and never unchecked isn't in it.
+      // Without this, that surviving forward's very next prepareSession() would read the STALE row
+      // captured whenever it was originally constructed, missing any youtubeLiveStreamId a prior
+      // session persisted — the exact bug setDestination() exists to prevent, just reachable from a
+      // different call site than the toggle route. Refresh every surviving forward's row here, not
+      // only the ones this call happens to also be (re-)toggling on.
+      await this.refreshForwardRows(userId);
       this.reconcileForwards(userId);
     } finally {
       this.starting.delete(userId);
@@ -3129,6 +3208,19 @@ export class LocalStreamManager extends EventEmitter {
     for (const forward of this.forwards.get(userId)?.values() ?? []) void forward.reconcile();
   }
 
+  // Called once, from start(), right before reconcileForwards() — NOT from every onStatusChanged
+  // (that one stays synchronous/fire-and-forget on purpose; a plain local DB read on every relay
+  // exit or pause/resume would be needless load). A local DB lookup, not a provider round-trip, so
+  // awaiting it here doesn't reintroduce the "a status change must not wait on YouTube" problem
+  // reconcileForwards's own comment guards against.
+  private async refreshForwardRows(userId: string): Promise<void> {
+    const forwards = [...(this.forwards.get(userId)?.values() ?? [])];
+    await Promise.all(forwards.map(async (forward) => {
+      const row = await this.deps.destinationRepository.findById(forward.destinationId);
+      if (row) forward.setDestination(row);
+    }));
+  }
+
   // Drop forwards that want nothing and hold nothing, so a user who ticked and unticked a box does
   // not carry a dead entry in every status payload forever.
   private pruneForwards(userId: string): void {
@@ -3256,13 +3348,16 @@ In `test/stream/localStreamRoutes.test.ts`, replace the flat `STATUS` constant w
 add the new cases below, AND fix three existing tests this task's own change silently contradicts
 (today at lines 30-55):
 - The two existing assertions of `manager.start` being called with `{ templateId: … }` (today at
-  lines 34 and 43) must become `{ templateId: …, destinationIds: undefined, meta: undefined }` (or
-  whatever the actual no-options-passed shape is once Step 4's handler always builds those three
-  keys) — the new handler always passes all three, not just `templateId`.
+  lines 34 and 43) must become `{ templateId: …, destinationIds: undefined, meta: { title:
+  undefined, description: undefined, privacyStatus: undefined, latencyPreference: undefined } }` —
+  matching exactly what the new `'starts with no destinations at all'` test below asserts for the
+  same no-options-passed call shape — because the new handler (Step 3) always builds all three top-
+  level keys, not just `templateId`, and `meta` itself is always an object with all four fields
+  present (as `undefined` when omitted from the body), never `undefined` itself.
 - `'POST /start ignores destination-only broadcast fields entirely'` (today at lines 49-55) asserts
-  a 200 for `body.privacyStatus: 'nonsense'`. This task makes that 400 (see the validation table in
-  Step 4) — the test now asserts the OPPOSITE of the intended behaviour. Delete it; its replacement
-  is the new validation-table test added below.
+  a 200 for `body.privacyStatus: 'nonsense'`. This task makes that 400 (see the `it.each` validation
+  cases in Step 3) — the test now asserts the OPPOSITE of the intended behaviour. Delete it; its
+  replacement is the new `it.each` validation test added below.
 
 ```typescript
 const STATUS = {
@@ -3622,7 +3717,7 @@ its `responses` (lines 486-508) with:
             properties: {
               type: { type: 'string' },
               phase: { type: 'string' },
-              watchUrl: { type: 'string', nullable: true, description: "The channel's stable /live link, which survives every toggle" },
+              watchUrl: { type: 'string', nullable: true, description: "The channel's stable /live link for a public broadcast (survives every toggle); a per-broadcast link, fresh on every toggle, for an unlisted/private one or when no channel id is known" },
             },
           },
           error: {
@@ -4680,7 +4775,8 @@ between Task 10 and Task 12's page swap, not a claim that this task is "additive
 down — the API surface is additive (nothing existing callers relied on is removed), but its own
 type shape is not backward-compatible with the ONE remaining consumer of the old shape, and that
 consumer is deliberately Task 12's problem to remove, not this task's to patch around. The
-project-wide clean-build gate returns in Task 12's own Step 4, once `LocalStream.tsx` is gone.
+project-wide clean-build gate returns in Task 12's own Step 6 ("Run the frontend suite and build"),
+once `LocalStream.tsx` is gone.
 
 - [ ] **Step 5: Commit**
 
@@ -4865,8 +4961,12 @@ describe('DestinationToggles', () => {
         onToggle={vi.fn()}
       />,
     );
-    // The badge renders forwardState.error's own locale value ("error"), not a decorated string —
-    // there is no such thing as "🔴 Error" anywhere in this component or its locale keys.
+    // The BADGE renders forwardState.error's own locale value ("error"), not a decorated string.
+    // "🔴 Error" IS a real string elsewhere (streamPhase.error, used for a DIFFERENT phase label),
+    // but this fixture's provider.phase is 'error' and DestinationToggles renders the badge from
+    // forwardState[state], not from streamPhase — getByText('error') is what this component
+    // actually produces for this fixture, and (per testing-library's getNodeText, which reads only
+    // direct text children) is unambiguous here even though "🔴 Error" also contains the substring.
     expect(screen.getByText('error')).toBeInTheDocument();
     expect(screen.getByText('invalid_grant')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open watch page' })).toHaveAttribute('href', 'https://www.youtube.com/channel/UC1/live');
@@ -5710,7 +5810,7 @@ export default function Stream() {
         forwards={forwards}
         onToggle={handleToggle}
         // Also disabled mid-toggle, not just mid-start: the backend now correctly reuses a
-        // settling forward (see LocalStreamManager.isInactive()'s comment) rather than racing a
+        // settling forward (see DestinationForward.isInactive()'s comment) rather than racing a
         // second prepareSession(), but a user firing several toggles on the SAME destination
         // before any of them round-trip still has no reason to — one toggle in flight per
         // checklist render is plenty.
@@ -5853,8 +5953,17 @@ stand's own checkout, currently carrying an uncommitted, local-only edit to `doc
 can collide with it, and rebuilding/checking out under a running stack is a side effect on a shared
 host this task has no reason to take.
 
+Do **not** pass `--branch feature/local-first-streaming` to this clone: a local-path `git clone`
+only copies `refs/heads/*` from the source repo, and the demo stand's own checkout is very likely
+sitting on `master` (Task 14 later has to `git checkout feature/local-first-streaming` there,
+which only makes sense if it isn't already) — `--branch` on a ref the local clone never copied
+fails with "Remote branch … not found in upstream origin". This task doesn't need branch-specific
+application code anyway, only the same ffmpeg binary the app ships (Debian bookworm's `ffmpeg
+5.1.9`, pulled in by the `Dockerfile`, which this plan does not touch) — clone whatever is
+currently checked out there:
+
 ```bash
-ssh 192.168.14.26 'rm -rf /tmp/superdj-fwd-src && git clone --branch feature/local-first-streaming ~/repos/super-dj /tmp/superdj-fwd-src && docker build -t superdj-smoke /tmp/superdj-fwd-src'
+ssh 192.168.14.26 'rm -rf /tmp/superdj-fwd-src && git clone ~/repos/super-dj /tmp/superdj-fwd-src && docker build -t superdj-smoke /tmp/superdj-fwd-src'
 ssh 192.168.14.26 '
   docker network create superdj-fwd-net &&
   docker run -d --rm --name superdj-fwd-auth --network superdj-fwd-net \
@@ -6117,9 +6226,18 @@ against port 8088:
    unattended. Hand off to the user with the `authUrl` from that endpoint's response and wait for
    confirmation that a `StreamDestination` with `provider: "youtube"` now exists before continuing.
 2. Upload one short track and create a one-track playlist (or reuse an existing one).
-3. `POST /local-stream/start` with that `playlistId`, **no `destinationIds`** — prove the local
-   stream runs and previews with nothing forwarded (the spec's "zero destinations is a fully valid
-   running state").
+3. `POST /local-stream/start` with that `playlistId`, **no `destinationIds`**, and
+   **`privacyStatus: "public"`** — prove the local stream runs and previews with nothing forwarded
+   (the spec's "zero destinations is a fully valid running state"), and set the broadcast privacy
+   now, at start time, since it can't be changed later: `privacyStatus`/`title`/etc. are `start()`
+   options (per the addendum's decision on where broadcast metadata comes from), not something the
+   toggle route in Step 3 takes. **This choice matters for what Step 3/4 can actually observe**:
+   `watchUrl()`'s new privacy gate (Task 5) only returns the stable channel `/live` link for a
+   PUBLIC broadcast — a private one (the default) falls back to a per-broadcast `watch?v=` URL that
+   changes on every toggle, which would make Step 4's "same stable watch URL across a toggle"
+   check fail by construction, not because of a bug. If a private/unlisted broadcast specifically
+   needs verifying too, do that as an explicit extra pass, and expect (correctly) a fresh URL each
+   toggle there.
 4. Confirm `GET /local-stream/status` reports `local.state: "streaming"`, `previewReady: true` and
    `destinations: []`, and that the preview plays in the browser.
 
@@ -6244,7 +6362,8 @@ In `CLAUDE.md`:
 4. **Architecture — `StreamDestinationProvider` / `OAuthProviderAdapter` split** — update: the
    `liveStream` is now persisted per destination (`StreamDestination.youtubeLiveStreamId`) and reused
    across toggles, only the `liveBroadcast` is ephemeral, `finalize()` no longer deletes the stream,
-   `watchUrl()` returns the channel's stable `/live` link, and `prepareSession()` is called by a
+   `watchUrl()` returns the channel's stable `/live` link for a public broadcast (a per-broadcast
+   link for an unlisted/private one), and `prepareSession()` is called by a
    `DestinationForward` on toggle-on rather than by `StreamManager.start()`. Record the real quota
    figure measured in Task 14.
 
