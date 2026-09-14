@@ -18,6 +18,8 @@ function buildApp() {
     destinationEncryptionKey: 'a'.repeat(64),
     streamManager,
     streamSessionManager,
+    localStreamManager: {} as any,
+    previewFetch: jest.fn() as any,
     oauthProviderAdapters: {},
     oauthStateRepository: {} as any,
     oauthConnectionRepository: {} as any,
@@ -34,6 +36,18 @@ describe('API docs', () => {
     expect(res.status).toBe(200);
     expect(res.body.paths).toHaveProperty('/tracks');
     expect(res.body.paths).toHaveProperty('/auth/register');
+  });
+
+  it('documents the local-stream routes', async () => {
+    const res = await request(buildApp()).get('/openapi.json');
+    expect(res.body.paths).toHaveProperty('/local-stream/start');
+    expect(res.body.paths).toHaveProperty('/local-stream/status');
+    // Array form, not a dot-separated string: Jest's toHaveProperty parses a STRING keyPath as a
+    // deep path, so '/local-stream/preview/index.m3u8' would look up
+    // paths['/local-stream/preview/index']['m3u8'] (undefined) instead of the literal key — a
+    // false failure this repo's other assertions here (`'/tracks'`, `'/auth/register'`) never hit
+    // only because those keys happen to contain no dots.
+    expect(res.body.paths).toHaveProperty(['/local-stream/preview/index.m3u8']);
   });
 
   it('serves Swagger UI at /docs', async () => {

@@ -23,6 +23,12 @@ const config: AppConfig = {
   googleOAuthClientSecret: 'client-secret',
   appBaseUrl: 'https://app.example.com',
   frontendOrigin: 'https://web.example.com',
+  mediaMtxRtmpUrl: 'rtmp://mediamtx:1935',
+  mediaMtxHlsUrl: 'http://mediamtx:8888',
+  mediaMtxAuthSecret: 'shared-secret',
+  mediaMtxAuthPort: 3001,
+  maxConcurrentLocalStreams: 10,
+  maxLocalStreamDurationMs: 12 * 60 * 60 * 1000,
 };
 
 describe('buildServer', () => {
@@ -36,6 +42,19 @@ describe('buildServer', () => {
     const { app } = buildServer(config, fakeSpawner());
     const res = await request(app).get('/tracks');
     expect(res.status).toBe(401);
+  });
+
+  it('builds a separate MediaMTX auth app that answers 401 for a wrong shared secret and 404 for anything else', async () => {
+    const { mediaMtxAuthApp, mediaMtxAuthPort } = buildServer(config, fakeSpawner());
+    expect(mediaMtxAuthPort).toBe(3001);
+    expect((await request(mediaMtxAuthApp).post('/internal/mediamtx-auth/wrong').send({})).status).toBe(401);
+    expect((await request(mediaMtxAuthApp).get('/openapi.json')).status).toBe(404);
+  });
+
+  it('requires authentication for the local-stream routes', async () => {
+    const { app } = buildServer(config, fakeSpawner());
+    expect((await request(app).get('/local-stream/status')).status).toBe(401);
+    expect((await request(app).get('/local-stream/preview/index.m3u8')).status).toBe(401);
   });
 });
 

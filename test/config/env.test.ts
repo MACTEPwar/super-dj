@@ -8,6 +8,7 @@ describe('loadConfig', () => {
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for optional values', () => {
@@ -32,6 +33,7 @@ describe('loadConfig — database', () => {
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
   } as NodeJS.ProcessEnv;
 
   it('throws when DATABASE_URL is missing', () => {
@@ -59,6 +61,7 @@ describe('loadConfig — multi-tenant additions', () => {
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for uploadsDir, streamKeyEncryptionKey requirement, and fifoDir', () => {
@@ -86,6 +89,7 @@ describe('loadConfig — YouTube OAuth additions', () => {
     DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
     STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
     FRONTEND_ORIGIN: 'https://web.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
   } as NodeJS.ProcessEnv;
 
   it('applies GOOGLE_OAUTH_CLIENT_ID/SECRET and APP_BASE_URL', () => {
@@ -117,6 +121,7 @@ describe('loadConfig — frontend origin', () => {
   const base = {
     DATABASE_URL: 'postgresql://u:p@localhost:5432/db', STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
     GOOGLE_OAUTH_CLIENT_ID: 'x', GOOGLE_OAUTH_CLIENT_SECRET: 'y', APP_BASE_URL: 'https://app.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
   } as NodeJS.ProcessEnv;
 
   it('applies FRONTEND_ORIGIN', () => {
@@ -126,5 +131,48 @@ describe('loadConfig — frontend origin', () => {
 
   it('throws when FRONTEND_ORIGIN is missing', () => {
     expect(() => loadConfig(base)).toThrow('FRONTEND_ORIGIN environment variable is required');
+  });
+});
+
+describe('loadConfig — local-first streaming additions', () => {
+  const base = {
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    GOOGLE_OAUTH_CLIENT_ID: 'client-id',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
+    APP_BASE_URL: 'https://app.example.com',
+    FRONTEND_ORIGIN: 'https://web.example.com',
+  } as NodeJS.ProcessEnv;
+
+  it('applies compose-network defaults for the MediaMTX endpoints and the caps', () => {
+    const config = loadConfig({ ...base, MEDIAMTX_AUTH_SECRET: 'shared' } as NodeJS.ProcessEnv);
+    expect(config.mediaMtxRtmpUrl).toBe('rtmp://mediamtx:1935');
+    expect(config.mediaMtxHlsUrl).toBe('http://mediamtx:8888');
+    expect(config.mediaMtxAuthPort).toBe(3001);
+    expect(config.maxConcurrentLocalStreams).toBe(10);
+    expect(config.maxLocalStreamDurationMs).toBe(12 * 60 * 60 * 1000);
+  });
+
+  // Required, never defaulted: a defaulted shared secret is a backdoor, and MediaMTX's auth
+  // callback is the only thing standing between one tenant's stream and another's.
+  it('throws when MEDIAMTX_AUTH_SECRET is missing', () => {
+    expect(() => loadConfig(base)).toThrow('MEDIAMTX_AUTH_SECRET environment variable is required');
+  });
+
+  it('honors overrides', () => {
+    const config = loadConfig({
+      ...base,
+      MEDIAMTX_AUTH_SECRET: 'shared',
+      MEDIAMTX_RTMP_URL: 'rtmp://relay.internal:1935',
+      MEDIAMTX_HLS_URL: 'http://relay.internal:8888',
+      MEDIAMTX_AUTH_PORT: '4100',
+      MAX_CONCURRENT_LOCAL_STREAMS: '3',
+      MAX_LOCAL_STREAM_HOURS: '4',
+    } as NodeJS.ProcessEnv);
+    expect(config.mediaMtxRtmpUrl).toBe('rtmp://relay.internal:1935');
+    expect(config.mediaMtxHlsUrl).toBe('http://relay.internal:8888');
+    expect(config.mediaMtxAuthPort).toBe(4100);
+    expect(config.maxConcurrentLocalStreams).toBe(3);
+    expect(config.maxLocalStreamDurationMs).toBe(4 * 60 * 60 * 1000);
   });
 });

@@ -3,12 +3,18 @@ import { buildServer } from './server';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { app, prisma } = buildServer(config);
+  const { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort } = buildServer(config);
 
   await prisma.$connect();
 
   const server = app.listen(config.port, () => {
     console.log(`super-dj listening on port ${config.port}`);
+  });
+
+  // Deliberately a second listener on its own port, which docker-compose never publishes: only
+  // MediaMTX (by compose service name) can reach it. See src/stream/mediaMtxAuth.ts.
+  const authServer = mediaMtxAuthApp.listen(mediaMtxAuthPort, () => {
+    console.log(`super-dj mediamtx auth endpoint listening on port ${mediaMtxAuthPort}`);
   });
 
   let shuttingDown = false;
@@ -20,6 +26,7 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error('error disconnecting from the database during shutdown', err);
     }
+    authServer.close();
     server.close(() => process.exit(0));
   };
 

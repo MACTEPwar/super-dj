@@ -478,6 +478,77 @@ export const openApiSpec = {
         },
       },
     },
+    '/local-stream/start': {
+      post: {
+        summary: 'Start this account\'s single local stream — encoded once and published to the internal relay, with no destination receiving it',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['playlistId'],
+                properties: {
+                  playlistId: { type: 'string' },
+                  templateId: { type: 'string', description: 'Optional overlay template id (see /templates). Omitted -> the built-in default layout.' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Started', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } },
+          '400': { description: 'Missing playlistId, or an empty-string templateId' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your playlist or not your template' },
+          '404': { description: 'Playlist not found, or templateId given but not found' },
+          '409': { description: 'A local stream is already active (or starting) for this account, or the playlist is empty' },
+          '429': { description: 'Too many local streams are running on this host' },
+        },
+      },
+    },
+    '/local-stream/stop': {
+      post: { summary: 'Stop this account\'s local stream', responses: { '200': { description: 'Stopped', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '401': { description: 'Not authenticated' }, '409': { description: 'No local stream is active' } } },
+    },
+    '/local-stream/pause': {
+      post: { summary: 'Pause playback (the local publish itself never stops, so the preview keeps working)', responses: { '200': { description: 'Paused', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '401': { description: 'Not authenticated' }, '409': { description: 'No local stream is active, or it is not currently streaming' } } },
+    },
+    '/local-stream/resume': {
+      post: { summary: 'Resume playback from the paused position', responses: { '200': { description: 'Resumed', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '401': { description: 'Not authenticated' }, '409': { description: 'No local stream is active, or it is not paused' } } },
+    },
+    '/local-stream/next': {
+      post: { summary: 'Skip to the next track', responses: { '200': { description: 'Skipped', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '401': { description: 'Not authenticated' }, '409': { description: 'No local stream is active' } } },
+    },
+    '/local-stream/previous': {
+      post: { summary: 'Go back to the previous track', responses: { '200': { description: 'Moved back', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '401': { description: 'Not authenticated' }, '409': { description: 'No local stream is active' } } },
+    },
+    '/local-stream/play': {
+      post: {
+        summary: 'Queue one of this user\'s tracks to play next',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } },
+        responses: { '200': { description: 'Queued', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '400': { description: 'Missing name' }, '401': { description: 'Not authenticated' }, '404': { description: 'Track not found in this user\'s library' }, '409': { description: 'No local stream is active' } },
+      },
+    },
+    '/local-stream/status': {
+      get: { summary: 'Current state of this account\'s local stream', responses: { '200': { description: 'Current status', content: { 'application/json': { schema: { $ref: '#/components/schemas/LocalStreamStatus' } } } }, '401': { description: 'Not authenticated' } } },
+    },
+    '/local-stream/events': {
+      get: { summary: 'Server-Sent Events stream of this account\'s local stream status', responses: { '200': { description: 'text/event-stream — each event is a LocalStreamStatus JSON payload' }, '401': { description: 'Not authenticated' } } },
+    },
+    '/local-stream/preview/index.m3u8': {
+      get: {
+        summary: 'HLS multivariant playlist for this account\'s own local stream, proxied from the internal relay',
+        description: 'The caller never names a stream or path: it is resolved server-side from the authenticated session. Responses are never cacheable. A 404 shortly after starting is normal — the relay muxes HLS on demand; retry.',
+        responses: { '200': { description: 'application/vnd.apple.mpegurl' }, '401': { description: 'Not authenticated' }, '404': { description: 'The relay has not produced a playlist yet' }, '409': { description: 'No local stream is active' }, '502': { description: 'The relay could not be reached' } },
+      },
+    },
+    '/local-stream/preview/{file}': {
+      get: {
+        summary: 'One HLS artefact (media playlist or segment) referenced by the multivariant playlist above',
+        parameters: [{ name: 'file', in: 'path', required: true, schema: { type: 'string' }, description: 'A plain HLS file name such as stream.m3u8 or segment0.ts — anything else is rejected' }],
+        responses: { '200': { description: 'The playlist or segment' }, '400': { description: 'Invalid preview file name' }, '401': { description: 'Not authenticated' }, '404': { description: 'Not produced by the relay' }, '409': { description: 'No local stream is active' }, '502': { description: 'The relay could not be reached' } },
+      },
+    },
     '/templates': {
       post: {
         summary: 'Create a named, reusable overlay template ("theme") — a positioned list of elements (cover art, title text, playlist window, elapsed timer, literal text, uploaded images) rendered onto the stream video',
@@ -681,6 +752,18 @@ export const openApiSpec = {
   },
   components: {
     schemas: {
+      LocalStreamStatus: {
+        type: 'object',
+        properties: {
+          state: { type: 'string', enum: ['idle', 'streaming', 'paused', 'error', 'reconnecting'] },
+          currentTrack: { type: 'string', nullable: true },
+          nextTrack: { type: 'string', nullable: true },
+          previewReady: { type: 'boolean', description: 'True while the encoder is publishing — including while paused, since pausing only swaps the audio' },
+          playlistId: { type: 'string', nullable: true },
+          templateId: { type: 'string', nullable: true },
+          startedAt: { type: 'string', format: 'date-time', nullable: true },
+        },
+      },
       User: {
         type: 'object',
         properties: {

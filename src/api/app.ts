@@ -18,6 +18,9 @@ import { StreamManager } from '../stream/streamManager';
 import { createStreamRouter } from '../stream/streamRoutes';
 import { StreamSessionManager } from '../stream/streamSessionManager';
 import { createStreamSessionRouter } from '../stream/streamSessionRoutes';
+import { LocalStreamManager } from '../stream/localStreamManager';
+import { createLocalStreamRouter } from '../stream/localStreamRoutes';
+import { PreviewFetch } from '../stream/localStreamPreviewRoutes';
 import { TemplateRepository } from '../templates/templateRepository';
 import { createTemplateRouter, TemplateRendererDeps } from '../templates/templateRoutes';
 import { TemplateImageService } from '../templates/templateImageService';
@@ -33,6 +36,8 @@ export interface AppDeps {
   destinationEncryptionKey: string;
   streamManager: StreamManager;
   streamSessionManager: StreamSessionManager;
+  localStreamManager: LocalStreamManager;
+  previewFetch: PreviewFetch;
   oauthProviderAdapters: Record<string, OAuthProviderAdapter>;
   oauthStateRepository: OAuthStateRepository;
   oauthConnectionRepository: OAuthConnectionRepository;
@@ -56,6 +61,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/destinations', createOAuthRouter(deps.authService, deps.oauthProviderAdapters, deps.oauthStateRepository, deps.oauthConnectionRepository, deps.destinationRepository, deps.destinationEncryptionKey));
   app.use('/destinations/:destinationId/stream', createStreamRouter(deps.authService, deps.streamManager, deps.destinationRepository));
   app.use('/stream-sessions', createStreamSessionRouter(deps.authService, deps.streamSessionManager, deps.streamManager));
+  app.use('/local-stream', createLocalStreamRouter(deps.authService, deps.localStreamManager, deps.previewFetch));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));

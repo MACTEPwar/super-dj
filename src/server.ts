@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { Readable } from 'stream';
 import { PrismaClient } from '@prisma/client';
 import { AppConfig } from './config/env';
 import { UserRepository } from './auth/userRepository';
@@ -19,6 +20,11 @@ import { StreamDestinationProvider } from './destinations/streamDestinationProvi
 import { StreamManager } from './stream/streamManager';
 import { StreamSessionRepository } from './stream/streamSessionRepository';
 import { StreamSessionManager } from './stream/streamSessionManager';
+import { LocalRelayTarget } from './stream/localRelayTarget';
+import { MediaMtxAuthRegistry, createMediaMtxAuthApp } from './stream/mediaMtxAuth';
+import { LocalStreamManager } from './stream/localStreamManager';
+import { StreamSceneDeps } from './stream/streamScene';
+import { PreviewFetch } from './stream/localStreamPreviewRoutes';
 import { TemplateRepository } from './templates/templateRepository';
 import { TemplateImageService } from './templates/templateImageService';
 import { Spawner, ChildProcessLike, ChildProcessWithPipes, PipeSpawner } from './ffmpeg/types';
@@ -85,6 +91,22 @@ export function createPipeSpawner(): PipeSpawner {
   };
 }
 
+/**
+ * Adapts Node 20's global fetch to the PreviewFetch seam the HLS proxy takes. The conversion from
+ * a WHATWG ReadableStream to a Node readable happens here, once, so the route can pipe straight
+ * through and its tests can hand it a plain Readable without touching global fetch.
+ */
+export function createPreviewFetch(): PreviewFetch {
+  return async (url, init) => {
+    const res = await fetch(url, { headers: init.headers });
+    return {
+      status: res.status,
+      contentType: res.headers.get('content-type'),
+      body: res.body ? Readable.fromWeb(res.body as import('stream/web').ReadableStream) : null,
+    };
+  };
+}
+
 export function buildServer(config: AppConfig, spawner: Spawner = createSpawner()) {
   const prisma = new PrismaClient({ datasources: { db: { url: config.databaseUrl } } });
 
@@ -141,6 +163,36 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     templateRepository,
   });
 
+  // The destination-free half of the pipeline. sceneDeps is deliberately the SAME object shape
+  // StreamManager takes (StreamManagerDeps extends StreamSceneDeps), so the two paths can never
+  // drift on fonts, dimensions, uploads or repositories.
+  const sceneDeps: StreamSceneDeps = {
+    spawner,
+    pipeSpawner: createPipeSpawner(),
+    fifoDir: config.fifoDir,
+    defaultCoverPath: config.defaultCoverPath,
+    backgroundImagePath: config.backgroundImagePath,
+    fontFile: FONT_FILE,
+    fontFamily: OVERLAY_FONT_FAMILY,
+    playlistRepository,
+    trackRepository,
+    templateRepository,
+    templateImageService,
+  };
+
+  const mediaMtxAuthRegistry = new MediaMtxAuthRegistry();
+  const localStreamManager = new LocalStreamManager({
+    sceneDeps,
+    relayTarget: new LocalRelayTarget({ rtmpBaseUrl: config.mediaMtxRtmpUrl, hlsBaseUrl: config.mediaMtxHlsUrl }),
+    authRegistry: mediaMtxAuthRegistry,
+    maxConcurrentStreams: config.maxConcurrentLocalStreams,
+    maxSessionDurationMs: config.maxLocalStreamDurationMs,
+  });
+
+  // A SEPARATE app on a SEPARATE, unpublished port: MediaMTX is not a browser and cannot present
+  // the session cookie requireAuth needs, so this must never be mounted on the public API.
+  const mediaMtxAuthApp = createMediaMtxAuthApp(mediaMtxAuthRegistry, config.mediaMtxAuthSecret);
+
   const templateRendererDeps = {
     fontPath: FONT_FILE,
     fontFamily: OVERLAY_FONT_FAMILY,
@@ -156,6 +208,8 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     destinationEncryptionKey: config.streamKeyEncryptionKey,
     streamManager,
     streamSessionManager,
+    localStreamManager,
+    previewFetch: createPreviewFetch(),
     oauthProviderAdapters,
     oauthStateRepository,
     oauthConnectionRepository,
@@ -165,5 +219,5 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     frontendOrigin: config.frontendOrigin,
   });
 
-  return { app, prisma };
+  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort };
 }
