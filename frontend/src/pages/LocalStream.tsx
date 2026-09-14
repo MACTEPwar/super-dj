@@ -128,8 +128,11 @@ export default function LocalStream() {
             </div>
           </div>
 
-          {/* Mounting the player only once previewReady is true keeps it from hammering the proxy
-              with 404s while the relay is still spinning its on-demand HLS muxer up. */}
+          {/* previewReady only means the encoder has started (see localStreamManager.ts's
+              previewTarget()) — MediaMTX's on-demand HLS muxer still takes a few seconds to cut a
+              first segment after that, and HlsPlayer's own network-error retry (not this gate) is what
+              carries the player through that window. Mounting only once previewReady is true just
+              avoids rendering <HlsPlayer> with no active stream to point it at. */}
           {status.previewReady
             ? <HlsPlayer src={localStreamApi.previewUrl()} unsupportedMessage={t('localStream.previewUnsupported')} />
             : <p className="rounded-lg border p-4 text-sm text-gray-500">{t('localStream.previewStarting')}</p>}

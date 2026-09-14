@@ -84,6 +84,12 @@ export function createLocalStreamPreviewRouter(
       throw new ApiError(502, 'preview is temporarily unavailable');
     }
 
+    // Live playlists and segments are session-scoped and short-lived; nothing in this response may
+    // ever be cached by a browser or an intermediary and replayed for a different user — including
+    // a 404 right after a fresh publish (RFC 7231 permits heuristically caching those), which would
+    // otherwise stall HlsPlayer's retry loop.
+    res.setHeader('Cache-Control', 'no-store');
+
     // MediaMTX muxes HLS on demand, so a 404 right after a start just means "the muxer has not
     // produced a playlist yet" — pass the status through and let the player retry rather than
     // inventing a different one.
@@ -102,9 +108,6 @@ export function createLocalStreamPreviewRouter(
     const extension = fileName.slice(fileName.lastIndexOf('.') + 1);
     res.status(200);
     res.setHeader('Content-Type', upstream.contentType ?? CONTENT_TYPE_BY_EXTENSION[extension] ?? 'application/octet-stream');
-    // Live playlists and segments are session-scoped and short-lived; nothing in this response may
-    // ever be cached by a browser or an intermediary and replayed for a different user.
-    res.setHeader('Cache-Control', 'no-store');
 
     // Plain `.pipe()` attaches no 'error' listener to the SOURCE — an 'error' event with no
     // listener is an uncaught exception in Node, which would crash the whole process (every

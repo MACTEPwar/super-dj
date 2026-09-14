@@ -202,9 +202,12 @@ overrode what the design spec originally called for:
   "shared-secret header" is impossible. `MTX_AUTHHTTPADDRESS` is therefore
   `http://super-dj:3001/internal/mediamtx-auth/<MEDIAMTX_AUTH_SECRET>`, compared with
   `timingSafeEqual`, and supplied by environment so the secret never lands in the committed
-  `mediamtx.yml` — which leaves `authHTTPAddress:` empty on purpose, since MediaMTX refuses to start
-  with `authMethod: http` and no address, exactly the fail-closed behaviour wanted if the variable
-  ever goes missing.
+  `mediamtx.yml` — which leaves `authHTTPAddress:` empty in the committed file on purpose. If
+  `MEDIAMTX_AUTH_SECRET` is ever unset, Compose substitutes an empty string rather than
+  failing — but `loadConfig()` (`src/config/env.ts`) requires the variable and throws before
+  the backend ever boots, which is the actual fail-closed mechanism; even without that guard,
+  the resulting path (`/internal/mediamtx-auth/`, trailing slash, no secret segment) wouldn't
+  match the route and would 404 — itself still a deny.
 
 **Verified against a real binary** (Task 12's smoke test: a real Debian-bookworm `ffmpeg 5.1.9`
 from this repo's own image publishing into a real `bluenviron/mediamtx:1.21.0`, on an isolated
@@ -762,6 +765,20 @@ on :8892/:8893 by default (never exposed — no ports are published) and logging
 for the singular `hlsAllowOrigin`; a real 1.21.0's startup log confirms both are gone. The standing
 risk is the general one rather than these two keys: the surface list is a denylist that a future
 version bump can outrun again.
+(j) **A local stream that hits a permanent, unrecoverable error (`onError` fires) keeps its
+`LocalStreamEntry` — and everything it holds — resident for the rest of the process's life,
+not just a small bookkeeping record.** The retained entry's `StreamController` still holds the
+whole scene closure: the resolved playlist's `tracks` array, the user's **full**
+`allUserTracks` array (used for play-by-name lookup), and the resolved template's elements/gif
+configs. For a user with a large library this is real memory, not a small record, and nothing
+reaps it except that same user calling `start`/`stop` again. Consider evicting the entry after
+an interval, or replacing the retained live controller with a small terminal-status snapshot.
+(k) **Two independent, separately-uncapped encode pools can run on the same host during Phase
+A.** `MAX_CONCURRENT_LOCAL_STREAMS` (default 10) bounds local streams only —
+`/stream-sessions/*`/`/destinations/{id}/stream/*` has and always had no cap on concurrent
+per-destination encodes. A host can therefore run up to `10 + N` simultaneous libx264 720p30
+encodes, not just the 10 the "two host-level ceilings" language above might suggest on its
+own — size deployment capacity off the sum, not off the local cap alone.
 
 ## Tooling
 

@@ -141,34 +141,10 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const templateRepository = new TemplateRepository(prisma);
 
-  const streamManager = new StreamManager({
-    spawner,
-    pipeSpawner: createPipeSpawner(),
-    fifoDir: config.fifoDir,
-    defaultCoverPath: config.defaultCoverPath,
-    backgroundImagePath: config.backgroundImagePath,
-    fontFile: FONT_FILE,
-    fontFamily: OVERLAY_FONT_FAMILY,
-    playlistRepository,
-    destinationRepository,
-    trackRepository,
-    templateRepository,
-    templateImageService,
-    providers: streamDestinationProviders,
-  });
-
-  const streamSessionRepository = new StreamSessionRepository(prisma);
-  const streamSessionManager = new StreamSessionManager({
-    streamManager,
-    streamSessionRepository,
-    destinationRepository,
-    playlistRepository,
-    templateRepository,
-  });
-
-  // The destination-free half of the pipeline. sceneDeps is deliberately the SAME object shape
-  // StreamManager takes (StreamManagerDeps extends StreamSceneDeps), so the two paths can never
-  // drift on fonts, dimensions, uploads or repositories.
+  // The destination-free half of the pipeline. sceneDeps IS the object StreamManager's own deps
+  // extend (StreamManagerDeps extends StreamSceneDeps) — StreamManager below is constructed by
+  // spreading this same value, not a second hand-written literal, so the two paths cannot drift
+  // on fonts, dimensions, uploads or repositories: there is only one literal to edit.
   const sceneDeps: StreamSceneDeps = {
     spawner,
     pipeSpawner: createPipeSpawner(),
@@ -182,6 +158,21 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     templateRepository,
     templateImageService,
   };
+
+  const streamManager = new StreamManager({
+    ...sceneDeps,
+    destinationRepository,
+    providers: streamDestinationProviders,
+  });
+
+  const streamSessionRepository = new StreamSessionRepository(prisma);
+  const streamSessionManager = new StreamSessionManager({
+    streamManager,
+    streamSessionRepository,
+    destinationRepository,
+    playlistRepository,
+    templateRepository,
+  });
 
   const mediaMtxAuthRegistry = new MediaMtxAuthRegistry();
   const localStreamManager = new LocalStreamManager({
