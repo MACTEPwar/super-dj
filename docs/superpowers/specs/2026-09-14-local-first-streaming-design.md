@@ -394,3 +394,43 @@ accepts userinfo-form RTMP credentials before committing to this). `canvasFeeder
 `audioRelay.ts` do not change. No new code path restarts the encoder. The `unpipe()`-before-`kill()`
 discipline is unaffected because no new component shares a pipe with an existing one — each
 `RelayProcess` owns its own stdio end to end, independent of the encoder's pipes.
+
+## Addendum after Phase A shipped (read this before decomposing Phase B/C)
+
+Phase A (local stream + preview, zero destinations) is done, merged-pending, and was verified
+against real ffmpeg/MediaMTX binaries twice (Task 12 found a real bug, Task 13 fixed and
+re-verified it). Three things this spec assumed turned out differently in practice — the plan for
+B/C must be written against the CURRENT code, not just this document:
+
+1. **RTMP credentials are query-param, not userinfo**, confirmed by reading MediaMTX 1.21.0's own
+   source (`internal/servers/rtmp/conn.go`) and re-confirmed against a real binary — the "verify
+   before committing to this" caveat above is resolved: userinfo form is NOT used.
+   `LocalRelayTarget.create()` (`src/stream/localRelayTarget.ts`) already mints a `readRtmpUrl`
+   field (`rtmp://mediamtx:1935/live/<token>?user=sub&pass=<readSecret>`) specifically *for Phase
+   B's RelayProcess to use as its `-i` input* — it was built in Phase A, unused until now. It also
+   already mints `hlsBaseUrl`/`readAuthorization` for the HLS preview leg. `RelayProcess` should
+   consume `readRtmpUrl` directly; no new credential-minting work is needed.
+2. **`buildStreamScene`'s actual signature** is `buildStreamScene(deps: StreamSceneDeps, params:
+   {userId, playlistId, templateId?, sceneId, overlayCache?, sessionId?})` (`src/stream/
+   streamScene.ts`) — not the two-argument `(userId, playlistId, templateId)` sketched above.
+   `overlayCache`/`sessionId` are the legacy `SessionOverlayCache` hooks this spec's "What this
+   deletes" section already says to delete — when Phase C removes `SessionOverlayCache`, delete
+   these two parameters from `buildStreamScene` too, not just the class that used them.
+3. **Two of the "open questions" below are already resolved in code, not still open**: #7
+   (`MAX_LOCAL_STREAM_HOURS`, default 12) and #8 (`MAX_CONCURRENT_LOCAL_STREAMS`, default 10) both
+   shipped in Phase A (`src/config/env.ts`, `src/stream/localStreamManager.ts`). Nothing to decide
+   here for B/C; carry the same env vars forward, don't reintroduce a second cap.
+4. **The real HLS/auth behaviour Phase A had to reverse-engineer from the pinned binary** — the
+   `?session=<uuid>` requirement on every HLS child request, the pre-auth `cookieCheck` 302, the
+   `moq`/`hlsAllowOrigins` denylist gaps — is fully written up in `CLAUDE.md`'s "Local relay
+   (MediaMTX)" section and its Known Follow-ups (h)/(i). That section is the authority on MediaMTX's
+   actual behavior now, superseding this spec's an-priori assumptions about it wherever the two
+   differ.
+5. **Decisions confirmed with the user on 2026-09-14, before decomposing B/C**: (a) full cutover —
+   delete `streamRoutes.ts`, `StreamSessionManager`, `SessionOverlayCache` in the same plan, no
+   staged legacy fallback; (b) build the `StreamSession`-as-saved-preset feature now, per open
+   question #1 below, not deferred; (c) a real YouTube channel with OAuth is available for the
+   real-binary/real-API smoke test this spec already calls a hard prerequisite (see "YouTube-
+   specific consequences"); (d) frontend unification (merging the Local Stream page and the
+   Streams/session views into one, keyed on the local stream) is in scope for this same effort,
+   pulled forward from Phase C.
