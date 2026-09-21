@@ -21,7 +21,7 @@ describe('executeSongRequest', () => {
     const streamInserter = { insertEphemeralTrack: jest.fn() };
     const deps: SongRequestDeps = { mediaSearchClient, streamInserter, tempDir, targetUserId: 'user-123' };
 
-    await executeSongRequest(deps, 'Blur - Song 2');
+    await expect(executeSongRequest(deps, 'Blur - Song 2')).resolves.toEqual({ ok: true });
 
     expect(mediaSearchClient.fetchAudio).toHaveBeenCalledWith('Blur - Song 2');
     expect(streamInserter.insertEphemeralTrack).toHaveBeenCalledTimes(1);
@@ -53,7 +53,9 @@ describe('executeSongRequest', () => {
     const deps: SongRequestDeps = { mediaSearchClient, streamInserter, tempDir, targetUserId: 'user-123' };
     jest.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(executeSongRequest(deps, 'nonexistent track')).resolves.toBeUndefined();
+    await expect(executeSongRequest(deps, 'nonexistent track')).resolves.toEqual({
+      ok: false, reason: 'mediaSearchFailed', message: 'not found',
+    });
     expect(streamInserter.insertEphemeralTrack).not.toHaveBeenCalled();
     const filesLeft = await fs.readdir(tempDir);
     expect(filesLeft).toEqual([]);
@@ -66,7 +68,9 @@ describe('executeSongRequest', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     const writeFileSpy = jest.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
 
-    await expect(executeSongRequest(deps, 'some query')).resolves.toBeUndefined();
+    await expect(executeSongRequest(deps, 'some query')).resolves.toEqual({
+      ok: false, reason: 'writeFailed', message: 'ENOSPC: no space left on device',
+    });
 
     expect(streamInserter.insertEphemeralTrack).not.toHaveBeenCalled();
     const filesLeft = await fs.readdir(tempDir);
@@ -80,7 +84,9 @@ describe('executeSongRequest', () => {
     const deps: SongRequestDeps = { mediaSearchClient, streamInserter, tempDir, targetUserId: 'user-123' };
     jest.spyOn(console, 'error').mockImplementation(() => {});
 
-    await executeSongRequest(deps, 'some query');
+    await expect(executeSongRequest(deps, 'some query')).resolves.toEqual({
+      ok: false, reason: 'noActiveStream', message: 'local stream is not active',
+    });
 
     const filesLeft = await fs.readdir(tempDir);
     expect(filesLeft).toEqual([]);

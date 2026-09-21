@@ -6,11 +6,12 @@ import { CurrencyConverter } from './currencyConverter';
 import { wrapAsync } from '../api/errorHandler';
 import { ApiError } from '../errors';
 import { InteractionRuleRepository } from './interactionRuleRepository';
+import { SongRequestResult } from './songRequestAction';
 
 export interface DonatelloWebhookDeps {
   callbackKey: string;
   ruleRepository: Pick<InteractionRuleRepository, 'listEnabledByUser'>;
-  executeSongRequest: (query: string) => Promise<void>;
+  executeSongRequest: (query: string) => Promise<SongRequestResult>;
   converter: CurrencyConverter;
   // MVP stopgap — see the design spec and AppConfig.donationTargetUserId.
   targetUserId: string;

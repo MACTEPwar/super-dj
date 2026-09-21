@@ -86,6 +86,56 @@ function RuleForm({ initial, onSubmit, isPending, error }: {
   );
 }
 
+// Amount is deliberately read from `rule.minAmount` on every render, never copied into local
+// state — so if the rule's own threshold is edited elsewhere, this field updates automatically
+// without any wiring here. It's the field's whole reason for being disabled: the test must always
+// simulate a donation right at the rule's real current threshold, never a stale or made-up one.
+function RuleTestPanel({ rule }: { rule: InteractionRule }) {
+  const { t } = useTranslation();
+  const [message, setMessage] = useState(
+    () => `!${rule.commandKeyword}:${t('donations.test.defaultQueryPlaceholder')}`,
+  );
+
+  const testMutation = useMutation({
+    mutationFn: () => interactionRulesApi.test(rule.id, message),
+    onSuccess: (data) => {
+      if (!data.matched) {
+        toast.error(t('donations.test.notMatched'));
+      } else if (data.result.ok) {
+        toast.success(t('donations.test.matched', { query: data.query }));
+      } else {
+        toast.error(t('donations.test.dispatchFailed', { message: data.result.message }));
+      }
+    },
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : t('donations.test.requestFailed')),
+  });
+
+  return (
+    <div className="mt-3 flex flex-wrap items-end gap-3 rounded bg-gray-50 p-3">
+      <div>
+        <label className="block text-xs font-medium text-gray-500">{t('donations.test.amount')}</label>
+        <input type="number" value={rule.minAmount} disabled className="mt-1 w-24 rounded border bg-gray-100 p-2 text-sm" />
+      </div>
+      <div className="min-w-[200px] flex-1">
+        <label className="block text-xs font-medium text-gray-500">{t('donations.test.message')}</label>
+        <input
+          type="text"
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          className="mt-1 w-full rounded border p-2 text-sm"
+        />
+      </div>
+      <button
+        onClick={() => testMutation.mutate()}
+        disabled={testMutation.isPending}
+        className="rounded bg-black px-3 py-2 text-sm text-white disabled:opacity-50"
+      >
+        {testMutation.isPending ? t('donations.test.running') : t('donations.test.run')}
+      </button>
+    </div>
+  );
+}
+
 export default function Donations() {
   const { t } = useTranslation();
   usePageTitle(t('donations.title'));
@@ -140,22 +190,25 @@ export default function Donations() {
       ) : (
         <ul className="divide-y rounded-lg border">
           {rulesQuery.data?.map((rule) => (
-            <li key={rule.id} className="flex items-center justify-between p-3">
-              <div>
-                <div className="font-medium">{t(ACTION_TYPE_LABELS[rule.actionType])}</div>
-                <div className="text-sm text-gray-500">
-                  {t('donations.triggerSummary', { amount: rule.minAmount, keyword: rule.commandKeyword })}
+            <li key={rule.id} className="p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="font-medium">{t(ACTION_TYPE_LABELS[rule.actionType])}</div>
+                  <div className="text-sm text-gray-500">
+                    {t('donations.triggerSummary', { amount: rule.minAmount, keyword: rule.commandKeyword })}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    onChange={() => updateMutation.mutate({ id: rule.id, input: { actionType: rule.actionType, enabled: !rule.enabled, minAmount: rule.minAmount, commandKeyword: rule.commandKeyword } })}
+                  />
+                  <button onClick={() => { setFormError(null); setDrawerState({ mode: 'edit', rule }); }} className="text-sm underline">{t('donations.edit')}</button>
+                  <button onClick={() => setConfirmingId(rule.id)} className="text-sm text-red-600">{t('donations.delete')}</button>
                 </div>
               </div>
-              <div className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={rule.enabled}
-                  onChange={() => updateMutation.mutate({ id: rule.id, input: { actionType: rule.actionType, enabled: !rule.enabled, minAmount: rule.minAmount, commandKeyword: rule.commandKeyword } })}
-                />
-                <button onClick={() => { setFormError(null); setDrawerState({ mode: 'edit', rule }); }} className="text-sm underline">{t('donations.edit')}</button>
-                <button onClick={() => setConfirmingId(rule.id)} className="text-sm text-red-600">{t('donations.delete')}</button>
-              </div>
+              <RuleTestPanel rule={rule} />
             </li>
           ))}
           {rulesQuery.data?.length === 0 && <li className="p-3 text-sm text-gray-500">{t('donations.empty')}</li>}

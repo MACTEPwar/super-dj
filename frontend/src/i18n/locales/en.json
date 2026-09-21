@@ -305,6 +305,17 @@
       "saveFailed": "Failed to save the rule",
       "invalidAmount": "Enter a whole number greater than 0",
       "invalidKeyword": "1-20 letters or digits, no spaces"
+    },
+    "test": {
+      "amount": "Amount (UAH)",
+      "message": "Message",
+      "run": "Test",
+      "running": "Testing…",
+      "defaultQueryPlaceholder": "Artist - Title",
+      "notMatched": "Rule did not match: the message doesn't contain the command (or the rule is disabled).",
+      "matched": "Matched! Request \"{{query}}\" sent.",
+      "dispatchFailed": "Matched, but the request failed: {{message}}",
+      "requestFailed": "Failed to run the test"
     }
   }
 }

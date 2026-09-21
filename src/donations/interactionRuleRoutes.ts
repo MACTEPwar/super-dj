@@ -4,6 +4,15 @@ import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { wrapAsync } from '../api/errorHandler';
 import { ApiError } from '../errors';
 import { InteractionRuleRepository } from './interactionRuleRepository';
+import { matchRules } from './ruleMatcher';
+import { DonationEvent } from './donationEvent';
+import { CurrencyConverter } from './currencyConverter';
+import { SongRequestResult } from './songRequestAction';
+
+export interface InteractionRuleTestDeps {
+  converter: CurrencyConverter;
+  executeSongRequest: (query: string) => Promise<SongRequestResult>;
+}
 
 const COMMAND_KEYWORD_PATTERN = /^[a-zA-Z0-9]{1,20}$/;
 // Only one action type exists today — validated explicitly (not just "any non-empty string") so
@@ -41,7 +50,11 @@ function validateRuleBody(body: unknown): { actionType: string; enabled: boolean
   return { actionType, enabled, minAmount, commandKeyword: commandKeyword.toLowerCase() };
 }
 
-export function createInteractionRuleRouter(authService: AuthService, ruleRepository: InteractionRuleRepository): Router {
+export function createInteractionRuleRouter(
+  authService: AuthService,
+  ruleRepository: InteractionRuleRepository,
+  testDeps: InteractionRuleTestDeps,
+): Router {
   const router = Router();
   const auth = requireAuth(authService);
   const userId = (req: AuthenticatedRequest) => req.user!.id;
@@ -65,6 +78,41 @@ export function createInteractionRuleRouter(authService: AuthService, ruleReposi
     const input = validateRuleBody({ actionType: existing.actionType, ...req.body });
     const rule = await ruleRepository.update(req.params.id, input);
     res.status(200).json(rule);
+  }));
+
+  // Simulates a real Donatello donation for exactly this rule, entirely bypassing Donatello: the
+  // synthetic event's actualAmount is always this rule's own minAmount (never lower, never
+  // editable from the frontend), so the only thing under test is whether `message` contains a
+  // command matching this rule's keyword. Runs the SAME matchRules() a real webhook call does —
+  // including its `enabled` check — so "not matched" here means a real donation with this exact
+  // message genuinely would not trigger either, not just that the test endpoint itself declined.
+  router.post('/:id/test', auth, requireJsonRequest, wrapAsync(async (req, res) => {
+    const existing = await ruleRepository.findById(req.params.id);
+    if (!existing || existing.userId !== userId(req as AuthenticatedRequest)) {
+      throw new ApiError(404, 'interaction rule not found');
+    }
+    const raw = (req.body ?? {}) as Record<string, unknown>;
+    const message = raw.message;
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      throw new ApiError(400, 'body.message must be a non-empty string');
+    }
+
+    const syntheticEvent: DonationEvent = {
+      clientName: 'Test',
+      message,
+      actualAmount: existing.minAmount,
+      actualCurrency: 'UAH',
+      isSubscription: false,
+      createdAt: Date.now(),
+    };
+    const [match] = matchRules(syntheticEvent, [existing], testDeps.converter);
+    if (!match) {
+      res.status(200).json({ matched: false });
+      return;
+    }
+
+    const result = await testDeps.executeSongRequest(match.query);
+    res.status(200).json({ matched: true, query: match.query, result });
   }));
 
   router.delete('/:id', auth, wrapAsync(async (req, res) => {

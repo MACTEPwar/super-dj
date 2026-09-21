@@ -40,11 +40,19 @@ function buildFakeRepository(seed: FakeRule[] = []) {
   };
 }
 
-function buildApp(ruleRepository: any, userId = 'user-1') {
+function buildTestDeps(overrides: Partial<{ converter: any; executeSongRequest: any }> = {}) {
+  return {
+    converter: { toUah: (amount: number) => amount },
+    executeSongRequest: jest.fn().mockResolvedValue({ ok: true }),
+    ...overrides,
+  };
+}
+
+function buildApp(ruleRepository: any, userId = 'user-1', testDeps = buildTestDeps()) {
   const authService: any = { getCurrentUser: jest.fn().mockResolvedValue({ id: userId, email: 'a@example.com' }) };
   const app = express();
   app.use(express.json());
-  app.use('/interaction-rules', createInteractionRuleRouter(authService, ruleRepository));
+  app.use('/interaction-rules', createInteractionRuleRouter(authService, ruleRepository, testDeps));
   app.use(errorHandler);
   return app;
 }
@@ -231,6 +239,98 @@ describe('interaction rule routes', () => {
 
       expect(res.status).toBe(400);
       expect(ruleRepository.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /interaction-rules/:id/test', () => {
+    const seedRule = { id: 'r1', userId: 'user-1', actionType: 'songRequest', enabled: true, minAmount: 100, commandKeyword: 'song' };
+
+    it('returns matched:false when the message does not contain the rule\'s command', async () => {
+      const ruleRepository = buildFakeRepository([seedRule]);
+      const testDeps = buildTestDeps();
+
+      const res = await request(buildApp(ruleRepository, 'user-1', testDeps))
+        .post('/interaction-rules/r1/test')
+        .send({ message: 'just a greeting, no command here' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ matched: false });
+      expect(testDeps.executeSongRequest).not.toHaveBeenCalled();
+    });
+
+    it('returns matched:false when the rule is disabled, mirroring real webhook behavior', async () => {
+      const ruleRepository = buildFakeRepository([{ ...seedRule, enabled: false }]);
+      const testDeps = buildTestDeps();
+
+      const res = await request(buildApp(ruleRepository, 'user-1', testDeps))
+        .post('/interaction-rules/r1/test')
+        .send({ message: '!song:Artist - Title' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ matched: false });
+      expect(testDeps.executeSongRequest).not.toHaveBeenCalled();
+    });
+
+    it('matches, calls executeSongRequest with the parsed query, and returns its result', async () => {
+      const ruleRepository = buildFakeRepository([seedRule]);
+      const testDeps = buildTestDeps({ executeSongRequest: jest.fn().mockResolvedValue({ ok: true }) });
+
+      const res = await request(buildApp(ruleRepository, 'user-1', testDeps))
+        .post('/interaction-rules/r1/test')
+        .send({ message: '!song:Artist - Title' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ matched: true, query: 'Artist - Title', result: { ok: true } });
+      expect(testDeps.executeSongRequest).toHaveBeenCalledWith('Artist - Title');
+    });
+
+    it('surfaces a failed executeSongRequest result without erroring the request', async () => {
+      const ruleRepository = buildFakeRepository([seedRule]);
+      const testDeps = buildTestDeps({
+        executeSongRequest: jest.fn().mockResolvedValue({ ok: false, reason: 'noActiveStream', message: 'local stream is not active' }),
+      });
+
+      const res = await request(buildApp(ruleRepository, 'user-1', testDeps))
+        .post('/interaction-rules/r1/test')
+        .send({ message: '!song:Artist - Title' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.result).toEqual({ ok: false, reason: 'noActiveStream', message: 'local stream is not active' });
+    });
+
+    it('404s when the rule does not exist', async () => {
+      const ruleRepository = buildFakeRepository();
+
+      const res = await request(buildApp(ruleRepository, 'user-1')).post('/interaction-rules/missing/test').send({ message: '!song:x' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('404s (not 403, not 500) when the rule belongs to another user', async () => {
+      const ruleRepository = buildFakeRepository([{ ...seedRule, userId: 'user-2' }]);
+
+      const res = await request(buildApp(ruleRepository, 'user-1')).post('/interaction-rules/r1/test').send({ message: '!song:x' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('400s when message is missing or not a string', async () => {
+      const ruleRepository = buildFakeRepository([seedRule]);
+
+      const res = await request(buildApp(ruleRepository, 'user-1')).post('/interaction-rules/r1/test').send({});
+
+      expect(res.status).toBe(400);
+    });
+
+    it('400s when Content-Type is not application/json', async () => {
+      const ruleRepository = buildFakeRepository([seedRule]);
+
+      const res = await request(buildApp(ruleRepository, 'user-1'))
+        .post('/interaction-rules/r1/test')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send('message=x');
+
+      expect(res.status).toBe(400);
     });
   });
 

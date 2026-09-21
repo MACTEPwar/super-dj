@@ -21,9 +21,20 @@ export interface InteractionRuleInput {
   commandKeyword: string;
 }
 
+export type SongRequestResult =
+  | { ok: true }
+  | { ok: false; reason: 'mediaSearchFailed' | 'writeFailed' | 'noActiveStream'; message: string };
+
+export type TestInteractionRuleResult =
+  | { matched: false }
+  | { matched: true; query: string; result: SongRequestResult };
+
 export const interactionRulesApi = {
   list: () => api.get<InteractionRule[]>('/interaction-rules'),
   create: (input: InteractionRuleInput) => api.post<InteractionRule>('/interaction-rules', input),
   update: (id: string, input: InteractionRuleInput) => api.put<InteractionRule>(`/interaction-rules/${id}`, input),
   remove: (id: string) => api.delete<Record<string, never>>(`/interaction-rules/${id}`),
+  // Simulates a donation of exactly this rule's own minAmount (server-enforced, never sent as a
+  // parameter here) — bypasses Donatello entirely, for testing a rule without spending real money.
+  test: (id: string, message: string) => api.post<TestInteractionRuleResult>(`/interaction-rules/${id}/test`, { message }),
 };

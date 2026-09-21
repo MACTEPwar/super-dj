@@ -602,6 +602,26 @@ export const openApiSpec = {
         },
       },
     },
+    '/interaction-rules/{id}/test': {
+      post: {
+        summary: 'Test a rule without a real Donatello donation: simulates a donation of exactly this rule\'s own minAmount (in UAH, not editable) carrying the given message, runs it through the same matching logic a real webhook call uses, and — on a match — actually dispatches the song request',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', description: 'e.g. "!song:Artist - Title"' } } },
+            },
+          },
+        },
+        responses: {
+          '200': { description: '{matched: false} if the message did not contain this rule\'s command (or the rule is disabled); {matched: true, query, result} otherwise, where result mirrors the real dispatch outcome' },
+          '400': { description: 'Missing/empty message' },
+          '401': { description: 'Not authenticated' },
+          '404': { description: 'Not your interaction rule, or not found' },
+        },
+      },
+    },
     '/webhooks/donatello': {
       post: {
         summary: 'Inbound Donatello.to donation event. NOT session-cookie authenticated — a server-to-server callback authenticated by a shared secret in the X-Key header instead. Always answers fast (200) once the payload is structurally valid and the key checks out; downstream failures (no rule matched, media fetch failed) are never reported back as a delivery failure.',

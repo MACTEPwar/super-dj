@@ -93,6 +93,31 @@ describe('Donations', () => {
     expect(interactionRulesApi.create).not.toHaveBeenCalled();
   });
 
+  it('shows the rule\'s minAmount in a disabled test-amount field that cannot be edited', async () => {
+    vi.mocked(interactionRulesApi.list).mockResolvedValue([RULE]);
+    renderPage();
+    await screen.findByText('Song request');
+
+    const amountInput = screen.getByRole('spinbutton') as HTMLInputElement;
+    expect(amountInput.disabled).toBe(true);
+    expect(amountInput.value).toBe('50');
+  });
+
+  it('pre-fills the test message with the rule\'s own command, and running the test sends the edited message', async () => {
+    vi.mocked(interactionRulesApi.list).mockResolvedValue([RULE]);
+    vi.mocked(interactionRulesApi.test).mockResolvedValue({ matched: true, query: 'Blur - Song 2', result: { ok: true } });
+    renderPage();
+    await screen.findByText('Song request');
+
+    const messageInput = screen.getByDisplayValue('!song:Artist - Title');
+    await userEvent.clear(messageInput);
+    await userEvent.type(messageInput, '!song:Blur - Song 2');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    await waitFor(() => expect(interactionRulesApi.test).toHaveBeenCalledWith('r1', '!song:Blur - Song 2'));
+  });
+
   it('deletes a rule after confirming', async () => {
     vi.mocked(interactionRulesApi.list)
       .mockResolvedValueOnce([RULE])
