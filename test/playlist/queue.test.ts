@@ -44,6 +44,16 @@ describe('PlaylistQueue', () => {
     expect(queue.next()?.name).toBe('b');
   });
 
+  it('insertNext queues multiple tracks in order instead of overwriting the previous one', () => {
+    const queue = new PlaylistQueue([track('a'), track('b'), track('c')]);
+    queue.insertNext(track('donation-1'));
+    queue.insertNext(track('donation-2'));
+    expect(queue.peekNext()?.name).toBe('donation-1');
+    expect(queue.next()?.name).toBe('donation-1');
+    expect(queue.next()?.name).toBe('donation-2');
+    expect(queue.next()?.name).toBe('b');
+  });
+
   it('setTracks keeps the current track in sync with its new position', () => {
     const queue = new PlaylistQueue([track('a'), track('b')]);
     queue.setTracks([track('z'), track('a'), track('b')]);

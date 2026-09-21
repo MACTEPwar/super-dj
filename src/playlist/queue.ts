@@ -5,7 +5,7 @@ export class PlaylistQueue {
   private position: number;
   private currentTrack: Track | undefined;
   private history: Track[] = [];
-  private insertedNext: Track | null = null;
+  private insertedQueue: Track[] = [];
 
   constructor(tracks: Track[]) {
     this.baseTracks = tracks;
@@ -18,18 +18,17 @@ export class PlaylistQueue {
   }
 
   peekNext(): Track | undefined {
-    if (this.insertedNext) return this.insertedNext;
+    if (this.insertedQueue.length > 0) return this.insertedQueue[0];
     if (this.baseTracks.length === 0) return undefined;
     return this.baseTracks[(this.position + 1) % this.baseTracks.length];
   }
 
   next(): Track | undefined {
-    if (this.baseTracks.length === 0 && !this.insertedNext) return undefined;
+    if (this.baseTracks.length === 0 && this.insertedQueue.length === 0) return undefined;
     if (this.currentTrack) this.history.push(this.currentTrack);
 
-    if (this.insertedNext) {
-      this.currentTrack = this.insertedNext;
-      this.insertedNext = null;
+    if (this.insertedQueue.length > 0) {
+      this.currentTrack = this.insertedQueue.shift();
       return this.currentTrack;
     }
 
@@ -49,7 +48,7 @@ export class PlaylistQueue {
   }
 
   insertNext(track: Track): void {
-    this.insertedNext = track;
+    this.insertedQueue.push(track);
   }
 
   setTracks(tracks: Track[]): void {
