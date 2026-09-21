@@ -29,6 +29,7 @@ const config: AppConfig = {
   mediaMtxAuthPort: 3001,
   maxConcurrentLocalStreams: 10,
   maxLocalStreamDurationMs: 12 * 60 * 60 * 1000,
+  donatelloCallbackKey: 'donatello-key',
 };
 
 describe('buildServer', () => {

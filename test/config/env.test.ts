@@ -9,6 +9,7 @@ describe('loadConfig', () => {
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATELLO_CALLBACK_KEY: 'donatello-key',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for optional values', () => {
@@ -34,6 +35,7 @@ describe('loadConfig — database', () => {
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATELLO_CALLBACK_KEY: 'donatello-key',
   } as NodeJS.ProcessEnv;
 
   it('throws when DATABASE_URL is missing', () => {
@@ -62,6 +64,7 @@ describe('loadConfig — multi-tenant additions', () => {
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATELLO_CALLBACK_KEY: 'donatello-key',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for uploadsDir, streamKeyEncryptionKey requirement, and fifoDir', () => {
@@ -90,6 +93,7 @@ describe('loadConfig — YouTube OAuth additions', () => {
     STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATELLO_CALLBACK_KEY: 'donatello-key',
   } as NodeJS.ProcessEnv;
 
   it('applies GOOGLE_OAUTH_CLIENT_ID/SECRET and APP_BASE_URL', () => {
@@ -122,6 +126,7 @@ describe('loadConfig — frontend origin', () => {
     DATABASE_URL: 'postgresql://u:p@localhost:5432/db', STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
     GOOGLE_OAUTH_CLIENT_ID: 'x', GOOGLE_OAUTH_CLIENT_SECRET: 'y', APP_BASE_URL: 'https://app.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATELLO_CALLBACK_KEY: 'donatello-key',
   } as NodeJS.ProcessEnv;
 
   it('applies FRONTEND_ORIGIN', () => {
@@ -145,7 +150,9 @@ describe('loadConfig — local-first streaming additions', () => {
   } as NodeJS.ProcessEnv;
 
   it('applies compose-network defaults for the MediaMTX endpoints and the caps', () => {
-    const config = loadConfig({ ...base, MEDIAMTX_AUTH_SECRET: 'shared' } as NodeJS.ProcessEnv);
+    const config = loadConfig({
+      ...base, MEDIAMTX_AUTH_SECRET: 'shared', DONATELLO_CALLBACK_KEY: 'donatello-key',
+    } as NodeJS.ProcessEnv);
     expect(config.mediaMtxRtmpUrl).toBe('rtmp://mediamtx:1935');
     expect(config.mediaMtxHlsUrl).toBe('http://mediamtx:8888');
     expect(config.mediaMtxAuthPort).toBe(3001);
@@ -163,6 +170,7 @@ describe('loadConfig — local-first streaming additions', () => {
     const config = loadConfig({
       ...base,
       MEDIAMTX_AUTH_SECRET: 'shared',
+      DONATELLO_CALLBACK_KEY: 'donatello-key',
       MEDIAMTX_RTMP_URL: 'rtmp://relay.internal:1935',
       MEDIAMTX_HLS_URL: 'http://relay.internal:8888',
       MEDIAMTX_AUTH_PORT: '4100',
@@ -174,5 +182,29 @@ describe('loadConfig — local-first streaming additions', () => {
     expect(config.mediaMtxAuthPort).toBe(4100);
     expect(config.maxConcurrentLocalStreams).toBe(3);
     expect(config.maxLocalStreamDurationMs).toBe(4 * 60 * 60 * 1000);
+  });
+});
+
+describe('loadConfig — Donatello donation callback', () => {
+  const base = {
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    GOOGLE_OAUTH_CLIENT_ID: 'client-id',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
+    APP_BASE_URL: 'https://app.example.com',
+    FRONTEND_ORIGIN: 'https://web.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
+  } as NodeJS.ProcessEnv;
+
+  it('applies DONATELLO_CALLBACK_KEY', () => {
+    const config = loadConfig({ ...base, DONATELLO_CALLBACK_KEY: 'donatello-key' } as NodeJS.ProcessEnv);
+    expect(config.donatelloCallbackKey).toBe('donatello-key');
+  });
+
+  // Required, never defaulted: this is the only thing that tells a real Donatello callback
+  // apart from anyone who guesses the webhook URL and forges a "donation" to trigger stream
+  // actions for free.
+  it('throws when DONATELLO_CALLBACK_KEY is missing', () => {
+    expect(() => loadConfig(base)).toThrow('DONATELLO_CALLBACK_KEY environment variable is required');
   });
 });

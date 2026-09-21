@@ -34,6 +34,12 @@ export interface AppConfig {
   mediaMtxAuthPort: number;
   maxConcurrentLocalStreams: number;
   maxLocalStreamDurationMs: number;
+  // Shared secret Donatello sends back as the `X-Key` header on every donation callback
+  // (their "Колбеки" tab), so we can tell a real donation from a forged request. Required,
+  // never defaulted, for the same reason MEDIAMTX_AUTH_SECRET is: a defaulted shared secret
+  // is a backdoor, and this is the only thing standing between a real donation and anyone
+  // who can guess our webhook URL triggering stream actions for free.
+  donatelloCallbackKey: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -44,6 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const appBaseUrl = env.APP_BASE_URL;
   const frontendOrigin = env.FRONTEND_ORIGIN;
   const mediaMtxAuthSecret = env.MEDIAMTX_AUTH_SECRET;
+  const donatelloCallbackKey = env.DONATELLO_CALLBACK_KEY;
 
   if (!databaseUrl) {
     throw new Error('DATABASE_URL environment variable is required');
@@ -68,6 +75,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!mediaMtxAuthSecret) {
     throw new Error('MEDIAMTX_AUTH_SECRET environment variable is required');
   }
+  if (!donatelloCallbackKey) {
+    throw new Error('DONATELLO_CALLBACK_KEY environment variable is required');
+  }
 
   return {
     port: env.PORT ? parseInt(env.PORT, 10) : 3000,
@@ -86,6 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     mediaMtxHlsUrl: env.MEDIAMTX_HLS_URL ?? 'http://mediamtx:8888',
     mediaMtxAuthSecret,
     mediaMtxAuthPort: parsePositiveInt(env.MEDIAMTX_AUTH_PORT, 3001),
+    donatelloCallbackKey,
     // Spec open question #8. Sized against one libx264 720p30 ultrafast encode per stream.
     maxConcurrentLocalStreams: parsePositiveInt(env.MAX_CONCURRENT_LOCAL_STREAMS, 10),
     // Spec open question #7. A local stream can now run with zero destinations and zero viewers,

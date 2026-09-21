@@ -21,6 +21,7 @@ services:
       MEDIAMTX_HLS_URL: http://mediamtx:8888
       MEDIAMTX_AUTH_SECRET: ${MEDIAMTX_AUTH_SECRET}
       MEDIAMTX_AUTH_PORT: "3001"
+      DONATELLO_CALLBACK_KEY: ${DONATELLO_CALLBACK_KEY}
     volumes:
       - uploads-data:/data/uploads
     depends_on:
