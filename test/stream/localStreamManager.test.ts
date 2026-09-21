@@ -2,6 +2,7 @@ import { StreamDestination } from '@prisma/client';
 import { LocalStreamManager } from '../../src/stream/localStreamManager';
 import { LocalRelaySession } from '../../src/stream/localRelayTarget';
 import { ApiError } from '../../src/errors';
+import { Track } from '../../src/playlist/types';
 
 const TOKEN = 'c'.repeat(32);
 
@@ -248,6 +249,23 @@ describe('LocalStreamManager lifecycle and status', () => {
     expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/b.mp3', 0);
     manager.playByName('user-1', 'a');
     expect(scene.buildOverlay).toHaveBeenCalled();
+  });
+
+  it('delegates insertEphemeralTrack to this user\'s own controller, and it plays on the next advance', async () => {
+    const { manager, audioRelay } = buildManager();
+    await manager.start('user-1', 'playlist-1');
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
+
+    manager.insertEphemeralTrack('user-1', ephemeralTrack);
+    await manager.next('user-1');
+
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/tmp/donation.mp3', 0);
+  });
+
+  it('insertEphemeralTrack throws when no local stream is active for that user', () => {
+    const { manager } = buildManager();
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
+    expect(() => manager.insertEphemeralTrack('user-1', ephemeralTrack)).toThrow('local stream is not active');
   });
 
   it('emits statusChanged with the userId whenever that user\'s controller changes state', async () => {

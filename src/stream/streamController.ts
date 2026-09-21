@@ -169,6 +169,7 @@ export class StreamController {
     child.once('close', () => {
       if (generation !== this.sessionGeneration) return;
       if (this.state !== 'streaming') return;
+      track._onFinished?.();
       this.advanceToNextTrack();
     });
   }
@@ -357,6 +358,13 @@ export class StreamController {
   playByName(name: string): void {
     const track = this.deps.library.findByName(name);
     if (!track) throw new ApiError(404, `track not found: ${name}`);
+    this.deps.queue.insertNext(track);
+    this.deps.onStatusChanged?.();
+  }
+
+  // Like playByName, but the caller already has a Track object in hand (an ephemeral, DB-less
+  // track built by the donation song-request flow) instead of a name to look up in the library.
+  insertEphemeralTrack(track: Track): void {
     this.deps.queue.insertNext(track);
     this.deps.onStatusChanged?.();
   }

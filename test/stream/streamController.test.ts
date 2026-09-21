@@ -498,6 +498,47 @@ describe('StreamController', () => {
     expect(() => controller.playByName('missing')).toThrow(ApiError);
   });
 
+  it('insertEphemeralTrack() inserts into the queue without switching immediately', async () => {
+    const { deps, queue, audioRelay } = buildDeps();
+    const controller = new StreamController(deps);
+    await controller.start();
+    audioRelay.switchTrack.mockClear();
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
+
+    controller.insertEphemeralTrack(ephemeralTrack);
+
+    expect(queue.insertNext).toHaveBeenCalledWith(ephemeralTrack);
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+  });
+
+  it('calls a track\'s _onFinished exactly once, right when its own decode process closes', async () => {
+    const { deps, queue, children } = buildDeps();
+    const onFinished = jest.fn();
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+    const controller = new StreamController(deps);
+    await controller.start(); // feeds 'a' -> children[0]
+
+    queue.next.mockReturnValueOnce(ephemeralTrack);
+    children[0].emitClose(0); // 'a' ends -> advances onto ephemeralTrack -> children[1]
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onFinished).not.toHaveBeenCalled(); // ephemeralTrack is now playing, not finished yet
+
+    children[1].emitClose(0); // ephemeralTrack ends
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it('a regular library track (no _onFinished) closes without throwing', async () => {
+    const { deps, children } = buildDeps();
+    const controller = new StreamController(deps);
+    await controller.start();
+
+    expect(() => children[0].emitClose(0)).not.toThrow();
+  });
+
   it('stop() tears down the audio relay, canvas feeder and encoder', async () => {
     const { deps, audioRelay, canvasFeeder, encoder } = buildDeps();
     const controller = new StreamController(deps);

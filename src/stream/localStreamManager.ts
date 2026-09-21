@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { StreamDestination } from '@prisma/client';
 import { PlaylistQueue } from '../playlist/queue';
+import { Track } from '../playlist/types';
 import { StreamController } from './streamController';
 import { SessionState } from './types';
 import { ApiError } from '../errors';
@@ -267,6 +268,10 @@ export class LocalStreamManager extends EventEmitter {
 
   playByName(userId: string, name: string): void {
     this.require(userId).controller.playByName(name);
+  }
+
+  insertEphemeralTrack(userId: string, track: Track): void {
+    this.require(userId).controller.insertEphemeralTrack(track);
   }
 
   /**
