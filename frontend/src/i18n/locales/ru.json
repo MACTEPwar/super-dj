@@ -7,6 +7,7 @@
     "destinations": "Направления",
     "templates": "Шаблоны",
     "stream": "Стрим",
+    "donations": "Донаты",
     "signOut": "Выйти"
   },
   "confirmDialog": {
@@ -277,5 +278,33 @@
   },
   "drawer": {
     "close": "Закрыть"
+  },
+  "donations": {
+    "title": "Донаты",
+    "subtitle": "Правила, которые превращают донат на Donatello в действие на стриме.",
+    "add": "+ Добавить правило",
+    "empty": "Правил пока нет.",
+    "loading": "Загрузка…",
+    "triggerSummary": "Донат ≥ {{amount}} грн + команда «!{{keyword}}»",
+    "actionSongRequest": "Заказ песни",
+    "edit": "Изменить",
+    "delete": "Удалить",
+    "deleteConfirmTitle": "Удалить это правило?",
+    "deleteConfirmDescription": "Донаты больше не будут запускать это действие.",
+    "deleteFailed": "Не удалось удалить правило",
+    "form": {
+      "createTitle": "Новое правило",
+      "editTitle": "Изменить правило",
+      "actionType": "Действие",
+      "minAmount": "Минимальная сумма доната (грн)",
+      "commandKeyword": "Команда",
+      "commandKeywordHint": "Только буквы и цифры, без пробелов.",
+      "instructionPreview": "Зрители смогут заказать песню, написав это в сообщении доната: !{{keyword}}:Исполнитель - Название",
+      "save": "Сохранить",
+      "saving": "Сохранение…",
+      "saveFailed": "Не удалось сохранить правило",
+      "invalidAmount": "Введите целое число больше 0",
+      "invalidKeyword": "1-20 букв или цифр, без пробелов"
+    }
   }
 }

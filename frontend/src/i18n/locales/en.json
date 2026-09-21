@@ -7,6 +7,7 @@
     "destinations": "Destinations",
     "templates": "Templates",
     "stream": "Stream",
+    "donations": "Donations",
     "signOut": "Sign out"
   },
   "confirmDialog": {
@@ -277,5 +278,33 @@
   },
   "drawer": {
     "close": "Close"
+  },
+  "donations": {
+    "title": "Donations",
+    "subtitle": "Rules that turn a Donatello donation into a live action.",
+    "add": "+ Add rule",
+    "empty": "No rules yet.",
+    "loading": "Loading…",
+    "triggerSummary": "Donation ≥ {{amount}} UAH + command \"!{{keyword}}\"",
+    "actionSongRequest": "Song request",
+    "edit": "Edit",
+    "delete": "Delete",
+    "deleteConfirmTitle": "Delete this rule?",
+    "deleteConfirmDescription": "Donations will no longer trigger this action.",
+    "deleteFailed": "Failed to delete the rule",
+    "form": {
+      "createTitle": "New rule",
+      "editTitle": "Edit rule",
+      "actionType": "Action",
+      "minAmount": "Minimum donation amount (UAH)",
+      "commandKeyword": "Command",
+      "commandKeywordHint": "Letters and digits only, no spaces.",
+      "instructionPreview": "Viewers will be able to request a song by writing this in their donation message: !{{keyword}}:Artist - Title",
+      "save": "Save",
+      "saving": "Saving…",
+      "saveFailed": "Failed to save the rule",
+      "invalidAmount": "Enter a whole number greater than 0",
+      "invalidKeyword": "1-20 letters or digits, no spaces"
+    }
   }
 }

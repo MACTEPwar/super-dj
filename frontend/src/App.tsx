@@ -13,6 +13,7 @@ import Destinations from './pages/Destinations';
 import Stream from './pages/Stream';
 import Templates from './pages/Templates';
 import TemplateEditor from './pages/TemplateEditor';
+import Donations from './pages/Donations';
 
 const queryClient = new QueryClient();
 
@@ -40,6 +41,7 @@ export default function App() {
                 <Route path="/local-stream" element={<Navigate to="/stream" replace />} />
                 <Route path="/templates" element={<Templates />} />
                 <Route path="/templates/:id" element={<TemplateEditor />} />
+                <Route path="/donations" element={<Donations />} />
               </Route>
             </Route>
           </Routes>

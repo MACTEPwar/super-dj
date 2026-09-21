@@ -11,6 +11,7 @@ export function Sidebar() {
     { to: '/playlists', label: t('sidebar.playlists') },
     { to: '/destinations', label: t('sidebar.destinations') },
     { to: '/templates', label: t('sidebar.templates') },
+    { to: '/donations', label: t('sidebar.donations') },
     { to: '/stream', label: t('sidebar.stream') },
   ];
   return (
