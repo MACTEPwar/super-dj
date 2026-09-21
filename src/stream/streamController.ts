@@ -169,7 +169,17 @@ export class StreamController {
     child.once('close', () => {
       if (generation !== this.sessionGeneration) return;
       if (this.state !== 'streaming') return;
-      track._onFinished?.();
+      // Self-disarming: track objects can be re-fed (e.g. previous() pops an ephemeral track back
+      // out of PlaylistQueue's history and plays it again) — clearing the hook before invoking it
+      // guarantees it can never fire a second time for the same track, even across a later re-feed
+      // whose own close event would otherwise find it still armed.
+      const onFinished = track._onFinished;
+      track._onFinished = undefined;
+      try {
+        onFinished?.();
+      } catch (err) {
+        console.error('a track\'s _onFinished hook threw', err);
+      }
       this.advanceToNextTrack();
     });
   }

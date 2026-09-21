@@ -531,12 +531,77 @@ describe('StreamController', () => {
     expect(onFinished).toHaveBeenCalledTimes(1);
   });
 
-  it('a regular library track (no _onFinished) closes without throwing', async () => {
-    const { deps, children } = buildDeps();
+  it('does not fire _onFinished a second time when previous() re-feeds the same ephemeral track (regression: PlaylistQueue.next() pushes the finished track into history, and previous() can pop it back out and re-feed it through a fresh decode child)', async () => {
+    const { deps, queue, children } = buildDeps();
+    const onFinished = jest.fn();
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+    const controller = new StreamController(deps);
+    await controller.start(); // feeds 'a' -> children[0]
+
+    queue.next.mockReturnValueOnce(ephemeralTrack);
+    children[0].emitClose(0); // 'a' ends -> advances onto ephemeralTrack -> children[1]
+    await Promise.resolve();
+    await Promise.resolve();
+
+    children[1].emitClose(0); // ephemeralTrack ends -> onFinished fires (1st time) -> advances to 'b'
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onFinished).toHaveBeenCalledTimes(1);
+
+    // previous() pops the (mocked) ephemeralTrack back out and re-feeds it through a brand-new
+    // decode child — the hook must have already disarmed itself, or this second close fires it again.
+    queue.previous.mockReturnValueOnce(ephemeralTrack);
+    await controller.previous();
+    const replayedChild = children[children.length - 1];
+    replayedChild.emitClose(0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a throwing _onFinished hook skip auto-advance or crash the process', async () => {
+    const { deps, queue, audioRelay, children } = buildDeps();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const onFinished = jest.fn(() => { throw new Error('boom'); });
+      const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+      const controller = new StreamController(deps);
+      await controller.start(); // feeds 'a' -> children[0]
+
+      queue.next.mockReturnValueOnce(ephemeralTrack);
+      children[0].emitClose(0); // 'a' ends -> advances onto ephemeralTrack -> children[1]
+      await Promise.resolve();
+      await Promise.resolve();
+
+      audioRelay.switchTrack.mockClear();
+      expect(() => children[1].emitClose(0)).not.toThrow(); // ephemeralTrack ends; its hook throws
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(onFinished).toHaveBeenCalledTimes(1);
+      // advanceToNextTrack() must still have run despite the throw — the next track ('b', the
+      // default queue.next() return) was fed rather than the stream silently stalling on 'E'.
+      expect(audioRelay.switchTrack).toHaveBeenCalledWith('/music/b.mp3', 0);
+      expect(controller.status().state).toBe('streaming');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('a regular library track (no _onFinished) closes without throwing, and never invokes the NEXT track\'s hook', async () => {
+    const { deps, queue, children } = buildDeps();
+    const onFinished = jest.fn();
+    const nextTrack: Track = { name: 'b', audioPath: '/music/b.mp3', coverPath: null, _onFinished: onFinished };
+    queue.next.mockReturnValueOnce(nextTrack);
     const controller = new StreamController(deps);
     await controller.start();
 
     expect(() => children[0].emitClose(0)).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFinished).not.toHaveBeenCalled();
   });
 
   it('stop() tears down the audio relay, canvas feeder and encoder', async () => {
