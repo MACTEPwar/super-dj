@@ -24,6 +24,6 @@ export interface InteractionRuleInput {
 export const interactionRulesApi = {
   list: () => api.get<InteractionRule[]>('/interaction-rules'),
   create: (input: InteractionRuleInput) => api.post<InteractionRule>('/interaction-rules', input),
-  update: (id: string, input: Partial<InteractionRuleInput>) => api.put<InteractionRule>(`/interaction-rules/${id}`, input),
+  update: (id: string, input: InteractionRuleInput) => api.put<InteractionRule>(`/interaction-rules/${id}`, input),
   remove: (id: string) => api.delete<Record<string, never>>(`/interaction-rules/${id}`),
 };

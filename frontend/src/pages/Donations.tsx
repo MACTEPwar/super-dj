@@ -110,7 +110,10 @@ export default function Donations() {
       queryClient.invalidateQueries({ queryKey: ['interaction-rules'] });
       setDrawerState(null);
     },
-    onError: (err) => setFormError(err instanceof ApiError ? err.message : t('donations.form.saveFailed')),
+    onError: (err) => {
+      setFormError(err instanceof ApiError ? err.message : t('donations.form.saveFailed'));
+      toast.error(err instanceof ApiError ? err.message : t('donations.form.saveFailed'));
+    },
   });
 
   const deleteMutation = useMutation({

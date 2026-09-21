@@ -530,6 +530,93 @@ export const openApiSpec = {
         },
       },
     },
+    '/interaction-rules': {
+      post: {
+        summary: 'Create a donation-triggered interaction rule (e.g. a song request: a donation containing !<keyword>:<query> at or above minAmount plays that query once)',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['actionType', 'enabled', 'minAmount', 'commandKeyword'],
+                properties: {
+                  actionType: { type: 'string', enum: ['songRequest'] },
+                  enabled: { type: 'boolean' },
+                  minAmount: { type: 'integer', minimum: 1, description: 'Threshold in UAH; must be a positive whole number' },
+                  commandKeyword: { type: 'string', pattern: '^[a-zA-Z0-9]{1,20}$', description: 'Stored lowercased, without the leading ! (e.g. "song", not "!song")' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': { description: 'Rule created', content: { 'application/json': { schema: { $ref: '#/components/schemas/InteractionRule' } } } },
+          '400': { description: 'Missing/invalid actionType, enabled, minAmount or commandKeyword' },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+      get: {
+        summary: 'List the authenticated user\'s interaction rules',
+        responses: {
+          '200': { description: 'Rule list', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/InteractionRule' } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/interaction-rules/{id}': {
+      put: {
+        summary: 'Replace an interaction rule (full replace, same validation as create; actionType defaults to the rule\'s own current value when omitted)',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['enabled', 'minAmount', 'commandKeyword'],
+                properties: {
+                  actionType: { type: 'string', enum: ['songRequest'] },
+                  enabled: { type: 'boolean' },
+                  minAmount: { type: 'integer', minimum: 1 },
+                  commandKeyword: { type: 'string', pattern: '^[a-zA-Z0-9]{1,20}$' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Rule updated', content: { 'application/json': { schema: { $ref: '#/components/schemas/InteractionRule' } } } },
+          '400': { description: 'Missing/invalid fields' },
+          '401': { description: 'Not authenticated' },
+          '404': { description: 'Not your interaction rule, or not found' },
+        },
+      },
+      delete: {
+        summary: 'Delete an interaction rule',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Rule deleted' },
+          '401': { description: 'Not authenticated' },
+          '404': { description: 'Not your interaction rule, or not found' },
+        },
+      },
+    },
+    '/webhooks/donatello': {
+      post: {
+        summary: 'Inbound Donatello.to donation event. NOT session-cookie authenticated — a server-to-server callback authenticated by a shared secret in the X-Key header instead. Always answers fast (200) once the payload is structurally valid and the key checks out; downstream failures (no rule matched, media fetch failed) are never reported back as a delivery failure.',
+        parameters: [{ name: 'X-Key', in: 'header', required: true, schema: { type: 'string' }, description: 'Shared secret, compared against DONATELLO_CALLBACK_KEY with a timing-safe comparison' }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', description: 'Donatello\'s own donation event payload' } } },
+        },
+        responses: {
+          '200': { description: 'Accepted' },
+          '400': { description: 'Structurally invalid donation payload' },
+          '401': { description: 'Missing or invalid X-Key header' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
@@ -683,6 +770,19 @@ export const openApiSpec = {
           privacyStatus: { type: 'string', nullable: true },
           latencyPreference: { type: 'string', nullable: true },
           createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      InteractionRule: {
+        type: 'object',
+        description: 'A per-user rule matching a donation message to a triggered action (today, always a song request).',
+        properties: {
+          id: { type: 'string' },
+          actionType: { type: 'string', enum: ['songRequest'] },
+          enabled: { type: 'boolean' },
+          minAmount: { type: 'integer', description: 'Threshold in UAH' },
+          commandKeyword: { type: 'string', description: 'Stored lowercased, without the leading !' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
         },
       },
       ColorValue: {

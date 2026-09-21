@@ -65,6 +65,18 @@ describe('buildServer', () => {
     expect((await request(app).post('/destinations/d1/stream/start').send({ playlistId: 'p1' })).status).toBe(404);
     expect((await request(app).get('/stream-sessions')).status).toBe(404);
   });
+
+  it('requires authentication for the interaction-rules routes', async () => {
+    const { app } = buildServer(config, fakeSpawner());
+    const res = await request(app).get('/interaction-rules');
+    expect(res.status).toBe(401);
+  });
+
+  it('requires the X-Key header for the Donatello webhook route', async () => {
+    const { app } = buildServer(config, fakeSpawner());
+    const res = await request(app).post('/webhooks/donatello').send({});
+    expect(res.status).toBe(401);
+  });
 });
 
 describe('createSpawner', () => {

@@ -785,6 +785,30 @@ recovery that re-fetches `index.m3u8`, which is what makes MediaMTX mint a fresh
 connection) opens in a shared `Drawer` component (a slide-out panel built on the same Radix `Dialog`
 primitive) rather than being inlined on the page.
 
+**Donation-triggered song requests.** A per-user `InteractionRule` (Prisma model: `actionType`
+today always `'songRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
+Donatello.to trigger a one-off track play: a donation message containing `!<keyword>:<query>` at
+or above the rule's `minAmount` (converted to UAH) fetches audio for `<query>` from the streamer's
+own external media-search service and inserts it as a temporary next-up track in the running
+local stream, playing once and never persisted to the user's library. The whole module lives in
+`src/donations/`: `donatelloWebhookRoutes.ts` (`POST /webhooks/donatello` — the inbound event,
+authenticated by a shared `X-Key` header rather than the session cookie, since Donatello is not a
+browser), `donationEvent.ts` (payload parsing), `ruleMatcher.ts` (`parseCommand`/`matchRules` —
+keyword/threshold matching against a user's enabled rules), `currencyConverter.ts`,
+`mediaSearchClient.ts` (the external media-search HTTP client), `songRequestAction.ts`
+(`executeSongRequest` — fetches audio, writes it to a dedicated temp dir, and calls
+`LocalStreamManager.insertEphemeralTrack`; every failure is swallowed and logged, since a donation
+has no user-facing feedback channel by design), `tempFileCleanup.ts` (the sweep backstop — see
+"Configuration" below), and `interactionRuleRepository.ts`/`interactionRuleRoutes.ts` (CRUD,
+mounted at `/interaction-rules`, cookie-authenticated and owner-scoped like every other resource
+route). `frontend/src/pages/Donations.tsx` + `frontend/src/api/interactionRules.ts` are the rules
+management UI. This feature also changed `PlaylistQueue` (`src/playlist/queue.ts`) from a
+single-slot "next track override" into a real FIFO (`insertedQueue`, drained by `shift()`), so
+multiple donation requests queue up and play in the order they arrived rather than the newest one
+clobbering the last. **MVP scope note:** `DONATION_TARGET_USER_ID` hard-codes which single
+account's stream every donation is routed to (see "Configuration" below) — there is no per-donor
+or per-channel routing yet.
+
 ## Layout
 
 ```
@@ -853,11 +877,19 @@ src/
                             happy-path-only entry point both /templates/{id}/preview and the live
                             pipeline call), blankOverlay.ts (hand-built transparent-PNG fallback,
                             independent of satori/resvg)
+  donations/                donatelloWebhookRoutes.ts (POST /webhooks/donatello, X-Key
+                            authenticated), donationEvent.ts (payload parsing), ruleMatcher.ts
+                            (parseCommand/matchRules), currencyConverter.ts, mediaSearchClient.ts
+                            (external media-search HTTP client), songRequestAction.ts
+                            (executeSongRequest — fetch, temp-write, insertEphemeralTrack),
+                            tempFileCleanup.ts (age-based sweep backstop),
+                            interactionRuleRepository.ts (Prisma) / interactionRuleRoutes.ts
+                            (mounted at /interaction-rules)
 prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
                             StreamDestination — incl. the reused youtubeLiveStreamId,
                             OAuthConnection, OAuthState, StreamSession +
                             StreamSessionDestination — kept under their old names, now read as
-                            saved PRESETS, StreamTemplate) + migrations/
+                            saved PRESETS, StreamTemplate, InteractionRule) + migrations/
 docker/mediamtx.yml         the local relay's config: every non-RTMP/HLS surface off,
                             authMethod: http, one regex path, no all_others (see "Local relay")
 test/                       mirrors src/; unit tests only — plus infra/mediamtxConfig.test.ts,
@@ -869,11 +901,13 @@ frontend/                   React + Vite SPA
     api/                    typed API client (fetch wrappers + type definitions; localStream.ts
                             covers /local-stream/* — start, transport, the destination toggle, the
                             combined status/SSE payload and the preview URLs;
-                            streamPresets.ts covers /stream-presets)
+                            streamPresets.ts covers /stream-presets; interactionRules.ts covers
+                            /interaction-rules)
     pages/                  route page components (incl. Stream.tsx — THE stream page: start form,
                             preset picker, transport controls, destination checklist, embedded
                             preview; Templates.tsx list/create/delete,
-                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor)
+                            TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor;
+                            Donations.tsx — InteractionRule list/create/edit/delete)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
                             AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal;
                             DestinationToggles.tsx — the checklist, purely local intent, no
@@ -1074,6 +1108,23 @@ top of this same CRUD API. `POST /templates/{id}/preview`
 (`image/png`), not persisted — a render failure here is a real HTTP error (500), unlike the live
 stream pipeline which falls back to a blank overlay instead of failing the request.
 
+`POST /interaction-rules` (`actionType`, `enabled`, `minAmount`, `commandKeyword` — every field
+required and validated: `actionType` must be a known type (only `songRequest` today),
+`minAmount` a positive whole number, `commandKeyword` 1-20 letters/digits, stored lowercased and
+**bare, without a leading `!`**), `GET /interaction-rules`, `PUT /interaction-rules/{id}` (same
+validation, full replace — a partial body is rejected, not merged, except `actionType` which
+defaults to the existing rule's own value when omitted), `DELETE /interaction-rules/{id}` — cookie-
+authenticated and owner-scoped (404 if the rule isn't the caller's) like every other resource
+route. Backs the donation song-request feature's per-user rule set — see "Donation-triggered song
+requests" above.
+
+`POST /webhooks/donatello` — the inbound Donatello.to donation event. **Not session-cookie
+authenticated** (Donatello is a server-to-server caller, not a browser): a shared secret is
+compared against the `X-Key` request header (`timingSafeEqual`), 401 on a missing or wrong key.
+Answers `200` fast, before any rule matching or media fetch, so Donatello never sees our own
+downstream decisions (no rule matched, the media fetch failed) as a delivery failure and retries
+forever; a structurally invalid payload is the only case that 400s.
+
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
 ## Development commands
@@ -1105,7 +1156,12 @@ Data API v3 enabled, an external, manual, one-time setup step), `FRONTEND_ORIGIN
 externally-reachable origin, used for CORS policy), `MEDIAMTX_AUTH_SECRET` (guards the unpublished
 `authHTTP` endpoint MediaMTX calls; it is also interpolated into the `mediamtx` service's
 `MTX_AUTHHTTPADDRESS`, so both containers read the same value from the environment — required and
-never defaulted, because a defaulted shared secret is a backdoor).
+never defaulted, because a defaulted shared secret is a backdoor), `DONATELLO_CALLBACK_KEY` (the
+shared secret `POST /webhooks/donatello` compares against the inbound `X-Key` header),
+`DONATION_TARGET_USER_ID` (the single account id every donation-triggered song request is routed
+to — MVP has no per-donor/per-channel routing, see "Donation-triggered song requests" above), and
+`MEDIA_SEARCH_SERVICE_URL` (base URL of the external media-search service `songRequestAction.ts`
+fetches audio from). The app throws at boot if any of the three is unset.
 Optional: `PORT` (3000), `SESSION_TTL_DAYS` (30), `UPLOADS_DIR` (`/data/uploads`), `FIFO_DIR`
 (`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`, `MEDIAMTX_RTMP_URL`
 (`rtmp://mediamtx:1935`), `MEDIAMTX_HLS_URL` (`http://mediamtx:8888`), `MEDIAMTX_AUTH_PORT` (3001),

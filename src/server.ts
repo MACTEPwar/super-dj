@@ -151,13 +151,18 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   const mediaSearchClient = new HttpMediaSearchClient(config.mediaSearchServiceUrl);
   const currencyConverter = new StubCurrencyConverter();
 
-  // 30-minute staleness threshold, swept every 10 minutes — a defense-in-depth fallback for the
-  // direct cleanup hook in songRequestAction.ts (see that file and the design spec). NOTE: this
-  // value must stay comfortably longer than any realistic time a donation-requested track can sit
-  // queued-but-unplayed — the sweep reaps by file age with no liveness/in-queue check, so a track
-  // still waiting in a long queue past this threshold would be deleted before it ever plays (see
-  // the design spec's carried-forward note from the Task 5 review).
-  const tempFileCleanupSweep = startTempFileCleanupSweep(donationTempDir, 30 * 60 * 1000, 10 * 60 * 1000);
+  // 12-hour staleness threshold, swept every 10 minutes — a slow backstop for crash-leftover files,
+  // not the primary reclaimer: the direct cleanup hook in songRequestAction.ts (`_onFinished`)
+  // deletes a track's temp file as soon as it actually finishes playing, in the normal case. The
+  // sweep reaps by file age alone, with no liveness/in-queue check, so it must stay comfortably
+  // longer than any realistic time a donation-requested track can sit queued-but-unplayed — the
+  // queue (PlaylistQueue) is an unbounded FIFO, so a long current track, several queued requests
+  // ahead of it, or a paused stream can easily leave a legitimately-queued track's temp file more
+  // than 30 minutes old while it is still waiting its turn. 12 hours trades a slower reap of actual
+  // crash leftovers for eliminating that false-positive deletion. A more thorough fix (a live
+  // temp-path tracking set consulted before reaping) is a known follow-up, deliberately not done
+  // here.
+  const tempFileCleanupSweep = startTempFileCleanupSweep(donationTempDir, 12 * 60 * 60 * 1000, 10 * 60 * 1000);
 
   // The destination-free half of the pipeline — everything a stream needs that has no destination
   // concept in it. LocalStreamManager below is constructed by spreading this same value, not a

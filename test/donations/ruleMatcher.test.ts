@@ -35,9 +35,11 @@ describe('matchRules', () => {
     createdAt: 123,
   };
 
+  const now = new Date();
+
   const rule = (overrides: Partial<InteractionRule>): InteractionRule => ({
     id: 'r1', userId: 'u1', actionType: 'songRequest', enabled: true,
-    minAmount: 400, commandKeyword: 'song', createdAt: new Date(), updatedAt: new Date(),
+    minAmount: 400, commandKeyword: 'song', createdAt: now, updatedAt: now,
     ...overrides,
   });
 

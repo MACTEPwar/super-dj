@@ -19,8 +19,8 @@ describe('interactionRules API', () => {
         id: 'rule1',
         actionType: 'songRequest',
         enabled: true,
-        minAmount: 5.0,
-        commandKeyword: '!sr',
+        minAmount: 5,
+        commandKeyword: 'sr',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
       },
@@ -28,8 +28,8 @@ describe('interactionRules API', () => {
         id: 'rule2',
         actionType: 'songRequest',
         enabled: false,
-        minAmount: 10.0,
-        commandKeyword: '!songrequest',
+        minAmount: 10,
+        commandKeyword: 'songrequest',
         createdAt: '2026-01-02T00:00:00Z',
         updatedAt: '2026-01-02T00:00:00Z',
       },
@@ -37,7 +37,7 @@ describe('interactionRules API', () => {
     const rules = await interactionRulesApi.list();
     expect(rules).toHaveLength(2);
     expect(rules[0].id).toBe('rule1');
-    expect(rules[0].commandKeyword).toBe('!sr');
+    expect(rules[0].commandKeyword).toBe('sr');
     const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toContain('/interaction-rules');
   });
@@ -47,27 +47,27 @@ describe('interactionRules API', () => {
       id: 'rule1',
       actionType: 'songRequest',
       enabled: true,
-      minAmount: 5.0,
-      commandKeyword: '!sr',
+      minAmount: 5,
+      commandKeyword: 'sr',
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
     });
     const rule = await interactionRulesApi.create({
       actionType: 'songRequest',
       enabled: true,
-      minAmount: 5.0,
-      commandKeyword: '!sr',
+      minAmount: 5,
+      commandKeyword: 'sr',
     });
     expect(rule.id).toBe('rule1');
-    expect(rule.commandKeyword).toBe('!sr');
+    expect(rule.commandKeyword).toBe('sr');
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toContain('/interaction-rules');
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body)).toEqual({
       actionType: 'songRequest',
       enabled: true,
-      minAmount: 5.0,
-      commandKeyword: '!sr',
+      minAmount: 5,
+      commandKeyword: 'sr',
     });
   });
 
@@ -76,18 +76,28 @@ describe('interactionRules API', () => {
       id: 'rule1',
       actionType: 'songRequest',
       enabled: false,
-      minAmount: 10.0,
-      commandKeyword: '!sr',
+      minAmount: 10,
+      commandKeyword: 'sr',
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-02T00:00:00Z',
     });
-    const rule = await interactionRulesApi.update('rule1', { enabled: false, minAmount: 10.0 });
+    const rule = await interactionRulesApi.update('rule1', {
+      actionType: 'songRequest',
+      enabled: false,
+      minAmount: 10,
+      commandKeyword: 'sr',
+    });
     expect(rule.id).toBe('rule1');
     expect(rule.enabled).toBe(false);
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toContain('/interaction-rules/rule1');
     expect(init.method).toBe('PUT');
-    expect(JSON.parse(init.body)).toEqual({ enabled: false, minAmount: 10.0 });
+    expect(JSON.parse(init.body)).toEqual({
+      actionType: 'songRequest',
+      enabled: false,
+      minAmount: 10,
+      commandKeyword: 'sr',
+    });
   });
 
   it('interactionRulesApi.remove DELETEs /interaction-rules/{id}', async () => {
