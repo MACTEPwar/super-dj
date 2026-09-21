@@ -40,6 +40,13 @@ export interface AppConfig {
   // is a backdoor, and this is the only thing standing between a real donation and anyone
   // who can guess our webhook URL triggering stream actions for free.
   donatelloCallbackKey: string;
+  // MVP stopgap: exactly one account uses this feature, so the webhook's target user is a fixed
+  // id rather than a per-user token in the URL. Tracked as a known follow-up in the design spec —
+  // replace with real per-user webhook routing the moment a second user exists.
+  donationTargetUserId: string;
+  // Base URL of the streamer's own media-search microservice (GET {url}/download/audio?query=).
+  // Never hardcode this — it points at a specific internal host that will differ per deployment.
+  mediaSearchServiceUrl: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -51,6 +58,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const frontendOrigin = env.FRONTEND_ORIGIN;
   const mediaMtxAuthSecret = env.MEDIAMTX_AUTH_SECRET;
   const donatelloCallbackKey = env.DONATELLO_CALLBACK_KEY;
+  const donationTargetUserId = env.DONATION_TARGET_USER_ID;
+  const mediaSearchServiceUrl = env.MEDIA_SEARCH_SERVICE_URL;
 
   if (!databaseUrl) {
     throw new Error('DATABASE_URL environment variable is required');
@@ -78,6 +87,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!donatelloCallbackKey) {
     throw new Error('DONATELLO_CALLBACK_KEY environment variable is required');
   }
+  if (!donationTargetUserId) {
+    throw new Error('DONATION_TARGET_USER_ID environment variable is required');
+  }
+  if (!mediaSearchServiceUrl) {
+    throw new Error('MEDIA_SEARCH_SERVICE_URL environment variable is required');
+  }
 
   return {
     port: env.PORT ? parseInt(env.PORT, 10) : 3000,
@@ -97,6 +112,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     mediaMtxAuthSecret,
     mediaMtxAuthPort: parsePositiveInt(env.MEDIAMTX_AUTH_PORT, 3001),
     donatelloCallbackKey,
+    donationTargetUserId,
+    mediaSearchServiceUrl,
     // Spec open question #8. Sized against one libx264 720p30 ultrafast encode per stream.
     maxConcurrentLocalStreams: parsePositiveInt(env.MAX_CONCURRENT_LOCAL_STREAMS, 10),
     // Spec open question #7. A local stream can now run with zero destinations and zero viewers,

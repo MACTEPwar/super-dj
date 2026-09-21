@@ -10,6 +10,8 @@ describe('loadConfig', () => {
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
     DONATELLO_CALLBACK_KEY: 'donatello-key',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for optional values', () => {
@@ -36,6 +38,8 @@ describe('loadConfig — database', () => {
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
     DONATELLO_CALLBACK_KEY: 'donatello-key',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('throws when DATABASE_URL is missing', () => {
@@ -65,6 +69,8 @@ describe('loadConfig — multi-tenant additions', () => {
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
     DONATELLO_CALLBACK_KEY: 'donatello-key',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('applies defaults for uploadsDir, streamKeyEncryptionKey requirement, and fifoDir', () => {
@@ -94,6 +100,8 @@ describe('loadConfig — YouTube OAuth additions', () => {
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
     DONATELLO_CALLBACK_KEY: 'donatello-key',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('applies GOOGLE_OAUTH_CLIENT_ID/SECRET and APP_BASE_URL', () => {
@@ -127,6 +135,8 @@ describe('loadConfig — frontend origin', () => {
     GOOGLE_OAUTH_CLIENT_ID: 'x', GOOGLE_OAUTH_CLIENT_SECRET: 'y', APP_BASE_URL: 'https://app.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
     DONATELLO_CALLBACK_KEY: 'donatello-key',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('applies FRONTEND_ORIGIN', () => {
@@ -147,6 +157,8 @@ describe('loadConfig — local-first streaming additions', () => {
     GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('applies compose-network defaults for the MediaMTX endpoints and the caps', () => {
@@ -194,6 +206,8 @@ describe('loadConfig — Donatello donation callback', () => {
     APP_BASE_URL: 'https://app.example.com',
     FRONTEND_ORIGIN: 'https://web.example.com',
     MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATION_TARGET_USER_ID: 'user-123',
+    MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
   } as NodeJS.ProcessEnv;
 
   it('applies DONATELLO_CALLBACK_KEY', () => {
@@ -206,5 +220,38 @@ describe('loadConfig — Donatello donation callback', () => {
   // actions for free.
   it('throws when DONATELLO_CALLBACK_KEY is missing', () => {
     expect(() => loadConfig(base)).toThrow('DONATELLO_CALLBACK_KEY environment variable is required');
+  });
+});
+
+describe('loadConfig — donation song request', () => {
+  const base = {
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+    STREAM_KEY_ENCRYPTION_KEY: 'a'.repeat(64),
+    GOOGLE_OAUTH_CLIENT_ID: 'client-id',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
+    APP_BASE_URL: 'https://app.example.com',
+    FRONTEND_ORIGIN: 'https://web.example.com',
+    MEDIAMTX_AUTH_SECRET: 'shared',
+    DONATELLO_CALLBACK_KEY: 'donatello-key',
+  } as NodeJS.ProcessEnv;
+
+  it('applies DONATION_TARGET_USER_ID and MEDIA_SEARCH_SERVICE_URL', () => {
+    const config = loadConfig({
+      ...base,
+      DONATION_TARGET_USER_ID: 'user-123',
+      MEDIA_SEARCH_SERVICE_URL: 'http://192.168.14.26:8010',
+    } as NodeJS.ProcessEnv);
+    expect(config.donationTargetUserId).toBe('user-123');
+    expect(config.mediaSearchServiceUrl).toBe('http://192.168.14.26:8010');
+  });
+
+  it('throws when DONATION_TARGET_USER_ID is missing', () => {
+    expect(() => loadConfig({ ...base, MEDIA_SEARCH_SERVICE_URL: 'http://x' } as NodeJS.ProcessEnv))
+      .toThrow('DONATION_TARGET_USER_ID environment variable is required');
+  });
+
+  it('throws when MEDIA_SEARCH_SERVICE_URL is missing', () => {
+    expect(() => loadConfig({ ...base, DONATION_TARGET_USER_ID: 'user-123' } as NodeJS.ProcessEnv))
+      .toThrow('MEDIA_SEARCH_SERVICE_URL environment variable is required');
   });
 });

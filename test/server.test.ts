@@ -30,6 +30,8 @@ const config: AppConfig = {
   maxConcurrentLocalStreams: 10,
   maxLocalStreamDurationMs: 12 * 60 * 60 * 1000,
   donatelloCallbackKey: 'donatello-key',
+  donationTargetUserId: 'user-123',
+  mediaSearchServiceUrl: 'http://192.168.14.26:8010',
 };
 
 describe('buildServer', () => {
