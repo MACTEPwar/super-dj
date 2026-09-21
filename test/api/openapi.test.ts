@@ -23,6 +23,8 @@ function buildApp() {
     templateRendererDeps: { fontPath: '/fonts/test.ttf', fontFamily: 'Test', defaultCoverPath: '/assets/default-cover.png' },
     templateImageService: {} as any,
     streamPresetRepository: {} as any,
+    interactionRuleRepository: {} as any,
+    donatelloWebhookDeps: { callbackKey: 'test-key', converter: { toUah: jest.fn() }, targetUserId: 'user-1', executeSongRequest: jest.fn() },
     frontendOrigin: 'https://web.example.com',
   });
 }

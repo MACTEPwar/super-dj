@@ -22,6 +22,9 @@ import { createTemplateRouter, TemplateRendererDeps } from '../templates/templat
 import { TemplateImageService } from '../templates/templateImageService';
 import { StreamPresetRepository } from '../stream/streamPresetRepository';
 import { createStreamPresetRouter } from '../stream/streamPresetRoutes';
+import { InteractionRuleRepository } from '../donations/interactionRuleRepository';
+import { createInteractionRuleRouter } from '../donations/interactionRuleRoutes';
+import { createDonatelloWebhookRouter, DonatelloWebhookDeps } from '../donations/donatelloWebhookRoutes';
 import { errorHandler } from './errorHandler';
 import { openApiSpec } from './openapi';
 
@@ -41,6 +44,8 @@ export interface AppDeps {
   templateRendererDeps: TemplateRendererDeps;
   templateImageService: TemplateImageService;
   streamPresetRepository: StreamPresetRepository;
+  interactionRuleRepository: InteractionRuleRepository;
+  donatelloWebhookDeps: Omit<DonatelloWebhookDeps, 'ruleRepository'>;
   frontendOrigin: string;
 }
 
@@ -58,6 +63,8 @@ export function createApp(deps: AppDeps): Express {
   app.use('/destinations', createOAuthRouter(deps.authService, deps.oauthProviderAdapters, deps.oauthStateRepository, deps.oauthConnectionRepository, deps.destinationRepository, deps.destinationEncryptionKey));
   app.use('/local-stream', createLocalStreamRouter(deps.authService, deps.localStreamManager, deps.previewFetch));
   app.use('/stream-presets', createStreamPresetRouter(deps.authService, deps.streamPresetRepository, deps.playlistRepository, deps.templateRepository, deps.destinationRepository));
+  app.use('/interaction-rules', createInteractionRuleRouter(deps.authService, deps.interactionRuleRepository));
+  app.use('/webhooks/donatello', createDonatelloWebhookRouter({ ...deps.donatelloWebhookDeps, ruleRepository: deps.interactionRuleRepository }));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));

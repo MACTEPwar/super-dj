@@ -25,6 +25,13 @@ import { PreviewFetch } from './stream/localStreamPreviewRoutes';
 import { TemplateRepository } from './templates/templateRepository';
 import { TemplateImageService } from './templates/templateImageService';
 import { StreamPresetRepository } from './stream/streamPresetRepository';
+import { InteractionRuleRepository } from './donations/interactionRuleRepository';
+import { StubCurrencyConverter } from './donations/currencyConverter';
+import { HttpMediaSearchClient } from './donations/mediaSearchClient';
+import { executeSongRequest } from './donations/songRequestAction';
+import { startTempFileCleanupSweep } from './donations/tempFileCleanup';
+import * as os from 'os';
+import * as path from 'path';
 import { Spawner, ChildProcessLike, ChildProcessWithPipes, PipeSpawner } from './ffmpeg/types';
 import { createApp } from './api/app';
 
@@ -139,6 +146,18 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const templateRepository = new TemplateRepository(prisma);
   const streamPresetRepository = new StreamPresetRepository(prisma);
+  const interactionRuleRepository = new InteractionRuleRepository(prisma);
+  const donationTempDir = path.join(os.tmpdir(), 'super-dj-donation-songs');
+  const mediaSearchClient = new HttpMediaSearchClient(config.mediaSearchServiceUrl);
+  const currencyConverter = new StubCurrencyConverter();
+
+  // 30-minute staleness threshold, swept every 10 minutes — a defense-in-depth fallback for the
+  // direct cleanup hook in songRequestAction.ts (see that file and the design spec). NOTE: this
+  // value must stay comfortably longer than any realistic time a donation-requested track can sit
+  // queued-but-unplayed — the sweep reaps by file age with no liveness/in-queue check, so a track
+  // still waiting in a long queue past this threshold would be deleted before it ever plays (see
+  // the design spec's carried-forward note from the Task 5 review).
+  const tempFileCleanupSweep = startTempFileCleanupSweep(donationTempDir, 30 * 60 * 1000, 10 * 60 * 1000);
 
   // The destination-free half of the pipeline — everything a stream needs that has no destination
   // concept in it. LocalStreamManager below is constructed by spreading this same value, not a
@@ -195,8 +214,18 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     templateRendererDeps,
     templateImageService,
     streamPresetRepository,
+    interactionRuleRepository,
+    donatelloWebhookDeps: {
+      callbackKey: config.donatelloCallbackKey,
+      converter: currencyConverter,
+      targetUserId: config.donationTargetUserId,
+      executeSongRequest: (query: string) => executeSongRequest(
+        { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
+        query,
+      ),
+    },
     frontendOrigin: config.frontendOrigin,
   });
 
-  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort };
+  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep };
 }
