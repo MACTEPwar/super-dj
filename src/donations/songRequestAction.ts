@@ -28,9 +28,15 @@ export async function executeSongRequest(deps: SongRequestDeps, query: string): 
     return;
   }
 
-  await fs.mkdir(deps.tempDir, { recursive: true });
   const filePath = path.join(deps.tempDir, `${randomUUID()}.mp3`);
-  await fs.writeFile(filePath, audioBuffer);
+  try {
+    await fs.mkdir(deps.tempDir, { recursive: true });
+    await fs.writeFile(filePath, audioBuffer);
+  } catch (err) {
+    console.error(`song request failed: could not write temp file ${filePath}`, err);
+    await fs.unlink(filePath).catch(() => {});
+    return;
+  }
 
   const track: Track = {
     name: `🎁 Заказ: ${query}`,
@@ -47,6 +53,8 @@ export async function executeSongRequest(deps: SongRequestDeps, query: string): 
     deps.streamInserter.insertEphemeralTrack(deps.targetUserId, track);
   } catch (err) {
     console.error('song request failed: no active local stream to insert into', err);
-    await fs.unlink(filePath).catch(() => {});
+    await fs.unlink(filePath).catch((unlinkErr) => {
+      console.error(`failed to delete temp donation-song file ${filePath}`, unlinkErr);
+    });
   }
 }

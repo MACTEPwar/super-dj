@@ -55,6 +55,23 @@ describe('executeSongRequest', () => {
 
     await expect(executeSongRequest(deps, 'nonexistent track')).resolves.toBeUndefined();
     expect(streamInserter.insertEphemeralTrack).not.toHaveBeenCalled();
+    const filesLeft = await fs.readdir(tempDir);
+    expect(filesLeft).toEqual([]);
+  });
+
+  it('logs and does nothing when writing the temp file fails', async () => {
+    const mediaSearchClient = { fetchAudio: jest.fn().mockResolvedValue(Buffer.from([1, 2, 3])) };
+    const streamInserter = { insertEphemeralTrack: jest.fn() };
+    const deps: SongRequestDeps = { mediaSearchClient, streamInserter, tempDir, targetUserId: 'user-123' };
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const writeFileSpy = jest.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
+
+    await expect(executeSongRequest(deps, 'some query')).resolves.toBeUndefined();
+
+    expect(streamInserter.insertEphemeralTrack).not.toHaveBeenCalled();
+    const filesLeft = await fs.readdir(tempDir);
+    expect(filesLeft).toEqual([]);
+    writeFileSpy.mockRestore();
   });
 
   it('deletes the temp file if inserting into the stream throws (no active session)', async () => {
