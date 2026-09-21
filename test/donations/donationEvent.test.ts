@@ -57,4 +57,28 @@ describe('parseDonatelloPayload', () => {
     const { isSubscription, ...rest } = validBody;
     expect(() => parseDonatelloPayload(rest)).toThrow('isSubscription must be a boolean');
   });
+
+  it('rejects a non-timestamp createdAt', () => {
+    expect(() => parseDonatelloPayload({ ...validBody, createdAt: 'not-a-timestamp' }))
+      .toThrow('createdAt is not a valid timestamp');
+  });
+
+  it('rejects an actualAmount that is neither string nor number', () => {
+    expect(() => parseDonatelloPayload({ ...validBody, actualAmount: true }))
+      .toThrow('actualAmount must be a string or number');
+    expect(() => parseDonatelloPayload({ ...validBody, actualAmount: {} }))
+      .toThrow('actualAmount must be a string or number');
+  });
+
+  it('rejects a non-string actualCurrency', () => {
+    expect(() => parseDonatelloPayload({ ...validBody, actualCurrency: 123 }))
+      .toThrow('actualCurrency must be a string');
+  });
+
+  it('rejects a createdAt that is neither string nor number', () => {
+    expect(() => parseDonatelloPayload({ ...validBody, createdAt: true }))
+      .toThrow('createdAt must be a string or number');
+    expect(() => parseDonatelloPayload({ ...validBody, createdAt: {} }))
+      .toThrow('createdAt must be a string or number');
+  });
 });

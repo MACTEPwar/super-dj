@@ -44,12 +44,17 @@ export function parseDonatelloPayload(body: unknown): DonationEvent {
     throw new InvalidDonationPayloadError('actualAmount is not a valid number');
   }
 
+  const createdAt = Number(raw.createdAt);
+  if (!Number.isFinite(createdAt)) {
+    throw new InvalidDonationPayloadError('createdAt is not a valid timestamp');
+  }
+
   return {
     clientName: raw.clientName,
     message: raw.message,
     actualAmount,
     actualCurrency: raw.actualCurrency,
     isSubscription: raw.isSubscription,
-    createdAt: Number(raw.createdAt),
+    createdAt,
   };
 }
