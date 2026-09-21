@@ -19,6 +19,7 @@ model User {
   oauthStates        OAuthState[]
   streamSessions     StreamSession[]
   streamTemplates    StreamTemplate[]
+  interactionRules   InteractionRule[]
 }
 
 model Session {
@@ -155,4 +156,22 @@ model StreamTemplate {
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   streamSessions StreamSession[]
+}
+
+model InteractionRule {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Only "songRequest" exists today. A real string field (not a boolean) so a second action type
+  // is additive to this table, not a migration that reshapes existing rows.
+  actionType     String
+  enabled        Boolean  @default(false)
+  // Always whole UAH for MVP — see CurrencyConverter (Task 1) and the design spec.
+  minAmount      Int
+  // Stored bare, without the leading "!" — the rule-matching engine adds it when parsing.
+  commandKeyword String   @default("song")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId])
 }
