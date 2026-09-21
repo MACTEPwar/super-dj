@@ -72,4 +72,18 @@ describe('matchRules', () => {
     const result = matchRules(baseEvent, [rule({ id: 'r1' }), rule({ id: 'r2', minAmount: 1000 })], identityConverter);
     expect(result.map((m) => m.rule.id)).toEqual(['r1']);
   });
+
+  it('matches multiple rules that both genuinely qualify', () => {
+    const result = matchRules(
+      baseEvent,
+      [rule({ id: 'r1', minAmount: 400 }), rule({ id: 'r2', minAmount: 300 })],
+      identityConverter,
+    );
+    expect(result.map((m) => m.rule.id).sort()).toEqual(['r1', 'r2']);
+  });
+
+  it('matches regardless of case differences between the rule keyword and the message command', () => {
+    const result = matchRules(baseEvent, [rule({ commandKeyword: 'SONG' })], identityConverter);
+    expect(result.map((m) => m.rule.id)).toEqual(['r1']);
+  });
 });
