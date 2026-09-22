@@ -6,6 +6,13 @@ export class PlaylistQueue {
   private currentTrack: Track | undefined;
   private history: Track[] = [];
   private insertedQueue: Track[] = [];
+  // A SEPARATE FIFO from insertedQueue — donation song requests never touch position/history/
+  // insertedQueue at all (see StreamController's interrupt/resume mechanism). Keeping them apart
+  // means playByName's "play after the current track ends, join history normally" semantics are
+  // completely unaffected by the donation flow's "interrupt immediately, never enter history"
+  // semantics — two genuinely different behaviors sharing one FIFO would have meant every read of
+  // insertedQueue had to reason about which kind of entry it might be.
+  private donationQueue: Track[] = [];
 
   constructor(tracks: Track[]) {
     this.baseTracks = tracks;
@@ -49,6 +56,29 @@ export class PlaylistQueue {
 
   insertNext(track: Track): void {
     this.insertedQueue.push(track);
+  }
+
+  // The base-playlist index most recently reached by REAL advancement — i.e. never moved by a
+  // donation track, which is never part of baseTracks. Lets the overlay build sensible
+  // before/after context around a donation track that isn't itself findable in the playlist's own
+  // track array (see StreamController.feedCurrentTrack and streamScene.ts's buildOverlay).
+  positionInBase(): number {
+    return this.position;
+  }
+
+  enqueueDonation(track: Track): void {
+    this.donationQueue.push(track);
+  }
+
+  hasDonationPending(): boolean {
+    return this.donationQueue.length > 0;
+  }
+
+  // Pops directly off the donation FIFO with NO other side effect — position/history/currentTrack
+  // are untouched, so queue.current() keeps pointing at whatever real playlist track a donation
+  // interruption is standing in front of, for the whole time donation tracks are playing.
+  shiftDonation(): Track | undefined {
+    return this.donationQueue.shift();
   }
 
   setTracks(tracks: Track[]): void {

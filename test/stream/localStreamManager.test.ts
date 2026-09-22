@@ -251,15 +251,17 @@ describe('LocalStreamManager lifecycle and status', () => {
     expect(scene.buildOverlay).toHaveBeenCalled();
   });
 
-  it('delegates insertEphemeralTrack to this user\'s own controller, and it plays on the next advance', async () => {
+  it('delegates insertEphemeralTrack to this user\'s own controller, and it interrupts playback immediately', async () => {
     const { manager, audioRelay } = buildManager();
     await manager.start('user-1', 'playlist-1');
     const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
 
     manager.insertEphemeralTrack('user-1', ephemeralTrack);
-    await manager.next('user-1');
+    await settle();
 
     expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/tmp/donation.mp3', 0);
+    // A donation track can't be skipped — next() must reject while it's playing.
+    await expect(manager.next('user-1')).rejects.toThrow('cannot skip a donation-requested track');
   });
 
   it('insertEphemeralTrack throws when no local stream is active for that user', () => {

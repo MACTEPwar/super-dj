@@ -60,4 +60,38 @@ describe('PlaylistQueue', () => {
     expect(queue.current()?.name).toBe('a');
     expect(queue.next()?.name).toBe('b');
   });
+
+  describe('donation queue', () => {
+    it('is separate from insertNext\'s FIFO and does not affect next()/peekNext()', () => {
+      const queue = new PlaylistQueue([track('a'), track('b')]);
+      queue.enqueueDonation(track('donation-1'));
+      expect(queue.peekNext()?.name).toBe('b');
+      expect(queue.next()?.name).toBe('b');
+    });
+
+    it('shiftDonation drains in FIFO order and does not touch current()/history/position', () => {
+      const queue = new PlaylistQueue([track('a'), track('b'), track('c')]);
+      queue.enqueueDonation(track('donation-1'));
+      queue.enqueueDonation(track('donation-2'));
+
+      expect(queue.hasDonationPending()).toBe(true);
+      expect(queue.shiftDonation()?.name).toBe('donation-1');
+      expect(queue.current()?.name).toBe('a');
+      expect(queue.positionInBase()).toBe(0);
+
+      expect(queue.shiftDonation()?.name).toBe('donation-2');
+      expect(queue.hasDonationPending()).toBe(false);
+      expect(queue.shiftDonation()).toBeUndefined();
+      expect(queue.current()?.name).toBe('a');
+    });
+
+    it('positionInBase tracks real advancement only, never a donation pull', () => {
+      const queue = new PlaylistQueue([track('a'), track('b'), track('c')]);
+      queue.next();
+      expect(queue.positionInBase()).toBe(1);
+      queue.enqueueDonation(track('donation-1'));
+      queue.shiftDonation();
+      expect(queue.positionInBase()).toBe(1);
+    });
+  });
 });

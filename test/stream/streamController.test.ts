@@ -30,6 +30,10 @@ function buildDeps() {
     previous: jest.fn().mockReturnValue(tracks[0]),
     insertNext: jest.fn(),
     peekNext: jest.fn().mockReturnValue(tracks[1]),
+    positionInBase: jest.fn().mockReturnValue(0),
+    enqueueDonation: jest.fn(),
+    hasDonationPending: jest.fn().mockReturnValue(false),
+    shiftDonation: jest.fn(),
   };
   const children: FakeChild[] = [];
   const audioRelay = {
@@ -375,6 +379,40 @@ describe('StreamController', () => {
         jest.useRealTimers();
       }
     });
+
+    it('a donation interruption in progress survives a crash: the reconnect resumes the donation track itself, not queue.current() (the track it interrupted)', async () => {
+      const { deps, encoder, audioRelay, queue } = buildDeps();
+      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(0);
+        const controller = new StreamController(deps);
+        await controller.start(); // interrupts 'a' (queue.current() stays 'a' throughout)
+
+        const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
+        queue.shiftDonation.mockReturnValueOnce(donation);
+        controller.insertEphemeralTrack(donation);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        jest.setSystemTime(3_000); // 3s into the donation track when the encoder dies
+        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
+        onExit(1);
+
+        // next()/previous() must still reject during the reconnecting window — a donation track
+        // is exactly as non-skippable while reconnecting as while actually playing.
+        await expect(controller.next()).rejects.toThrow('cannot skip a donation-requested track');
+
+        audioRelay.switchTrack.mockClear();
+        await jest.advanceTimersByTimeAsync(5000);
+
+        // Resumes the donation track at its captured offset — NOT queue.current() ('a') from 0,
+        // which is what a naive re-derive would have fed instead.
+        expect(audioRelay.switchTrack).toHaveBeenCalledWith(donation.audioPath, 3);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   it('pause() switches the audio relay to silence and renders a frozen timer text, then resume() seeks the audio relay back', async () => {
@@ -398,6 +436,32 @@ describe('StreamController', () => {
     expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 12.345);
     expect(controller.status().state).toBe('streaming');
 
+    nowSpy.mockRestore();
+  });
+
+  it('pause()/resume() while a donation track is playing act on the donation track itself, not the track it interrupted', async () => {
+    const { deps, queue, audioRelay } = buildDeps();
+    const nowSpy = jest.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(0);
+    const controller = new StreamController(deps);
+    await controller.start(); // interrupts 'a' — queue.current() stays 'a' the whole time below
+
+    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
+    queue.shiftDonation.mockReturnValueOnce(donation);
+    controller.insertEphemeralTrack(donation);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    nowSpy.mockReturnValue(4_000);
+    controller.pause();
+    audioRelay.switchTrack.mockClear();
+
+    nowSpy.mockReturnValue(9_000);
+    await controller.resume();
+
+    // Resumed the DONATION track at 4s — not queue.current() ('a'), which pause()/resume() would
+    // have incorrectly used before nowPlayingTrack was introduced.
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation.audioPath, 4);
     nowSpy.mockRestore();
   });
 
@@ -498,17 +562,147 @@ describe('StreamController', () => {
     expect(() => controller.playByName('missing')).toThrow(ApiError);
   });
 
-  it('insertEphemeralTrack() inserts into the queue without switching immediately', async () => {
+  it('insertEphemeralTrack() enqueues onto the donation queue and interrupts whatever is playing immediately', async () => {
     const { deps, queue, audioRelay } = buildDeps();
     const controller = new StreamController(deps);
     await controller.start();
     audioRelay.switchTrack.mockClear();
     const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
+    queue.shiftDonation.mockReturnValueOnce(ephemeralTrack);
 
     controller.insertEphemeralTrack(ephemeralTrack);
+    await Promise.resolve();
+    await Promise.resolve();
 
-    expect(queue.insertNext).toHaveBeenCalledWith(ephemeralTrack);
+    expect(queue.enqueueDonation).toHaveBeenCalledWith(ephemeralTrack);
+    expect(audioRelay.switchTrack).toHaveBeenCalledWith(ephemeralTrack.audioPath, 0);
+  });
+
+  it('a second donation arriving while the first one is already playing just queues behind it, without re-interrupting', async () => {
+    const { deps, queue, audioRelay } = buildDeps();
+    const controller = new StreamController(deps);
+    await controller.start();
+    const donation1: Track = { name: 'donation 1', audioPath: '/tmp/d1.mp3', coverPath: null };
+    const donation2: Track = { name: 'donation 2', audioPath: '/tmp/d2.mp3', coverPath: null };
+    queue.shiftDonation.mockReturnValueOnce(donation1);
+
+    controller.insertEphemeralTrack(donation1);
+    await Promise.resolve();
+    await Promise.resolve();
+    audioRelay.switchTrack.mockClear();
+    queue.hasDonationPending.mockReturnValue(true);
+
+    controller.insertEphemeralTrack(donation2);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(queue.enqueueDonation).toHaveBeenCalledWith(donation2);
+    // Still playing donation1 — the second arrival must not switch anything itself.
     expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+  });
+
+  it('resumes the interrupted track at its captured elapsed position once the donation queue drains', async () => {
+    jest.useFakeTimers();
+    try {
+      jest.setSystemTime(0);
+      const { deps, queue, audioRelay, children } = buildDeps();
+      const controller = new StreamController(deps);
+      await controller.start(); // now playing tracks[0] ('a')
+      jest.setSystemTime(12_345);
+      const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
+      queue.shiftDonation.mockReturnValueOnce(donation).mockReturnValueOnce(undefined);
+      queue.hasDonationPending.mockReturnValue(false);
+
+      controller.insertEphemeralTrack(donation);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation.audioPath, 0);
+
+      // The donation track finishes naturally.
+      children[children.length - 1].emitClose();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // 12.345s had elapsed on tracks[0] ('a') at the moment it was interrupted.
+      expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 12.345);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('plays multiple queued donation tracks back to back, in FIFO order, before resuming the interrupted track', async () => {
+    const { deps, queue, audioRelay, children } = buildDeps();
+    const controller = new StreamController(deps);
+    await controller.start();
+    const donation1: Track = { name: 'donation 1', audioPath: '/tmp/d1.mp3', coverPath: null };
+    const donation2: Track = { name: 'donation 2', audioPath: '/tmp/d2.mp3', coverPath: null };
+    queue.shiftDonation.mockReturnValueOnce(donation1);
+    queue.hasDonationPending.mockReturnValue(false);
+
+    controller.insertEphemeralTrack(donation1);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation1.audioPath, 0);
+
+    // donation2 arrives while donation1 is still playing — just queues behind it.
+    queue.hasDonationPending.mockReturnValue(true);
+    controller.insertEphemeralTrack(donation2);
+
+    // donation1 finishes naturally — donation2 must play next, NOT the interrupted track yet.
+    queue.shiftDonation.mockReturnValueOnce(donation2);
+    children[children.length - 1].emitClose();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation2.audioPath, 0);
+
+    // donation2 finishes naturally, and now the donation queue is empty — resumes the original.
+    queue.hasDonationPending.mockReturnValue(false);
+    children[children.length - 1].emitClose();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', expect.any(Number));
+  });
+
+  it('a donation arriving while paused wakes the stream and plays it right away', async () => {
+    const { deps, queue, audioRelay } = buildDeps();
+    const controller = new StreamController(deps);
+    await controller.start();
+    controller.pause();
+    audioRelay.switchTrack.mockClear();
+    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
+    queue.shiftDonation.mockReturnValueOnce(donation);
+
+    controller.insertEphemeralTrack(donation);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(audioRelay.switchTrack).toHaveBeenCalledWith(donation.audioPath, 0);
+  });
+
+  it('a donation arriving while idle just queues — nothing plays until a stream is actually started', () => {
+    const { deps, queue, audioRelay } = buildDeps();
+    const controller = new StreamController(deps);
+    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
+
+    controller.insertEphemeralTrack(donation);
+
+    expect(queue.enqueueDonation).toHaveBeenCalledWith(donation);
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+  });
+
+  it('next()/previous() reject while a donation track is playing — a donation track cannot be skipped', async () => {
+    const { deps, queue } = buildDeps();
+    const controller = new StreamController(deps);
+    await controller.start();
+    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
+    queue.shiftDonation.mockReturnValueOnce(donation);
+
+    controller.insertEphemeralTrack(donation);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(controller.next()).rejects.toThrow('cannot skip a donation-requested track');
+    await expect(controller.previous()).rejects.toThrow('cannot skip a donation-requested track');
   });
 
   it('calls a track\'s _onFinished exactly once, right when its own decode process closes', async () => {

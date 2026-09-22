@@ -789,23 +789,74 @@ primitive) rather than being inlined on the page.
 today always `'songRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
 Donatello.to trigger a one-off track play: a donation message containing `!<keyword>:<query>` at
 or above the rule's `minAmount` (converted to UAH) fetches audio for `<query>` from the streamer's
-own external media-search service and inserts it as a temporary next-up track in the running
-local stream, playing once and never persisted to the user's library. The whole module lives in
+own external media-search service and **interrupts whatever is currently playing to play it
+immediately** — not queued to play "next" after the current track ends. Once it (and any donation
+tracks that queued up behind it — see below) finishes, the track it interrupted resumes at the
+exact position it was cut off at, never restarted from 0. The whole module lives in
 `src/donations/`: `donatelloWebhookRoutes.ts` (`POST /webhooks/donatello` — the inbound event,
 authenticated by a shared `X-Key` header rather than the session cookie, since Donatello is not a
 browser), `donationEvent.ts` (payload parsing), `ruleMatcher.ts` (`parseCommand`/`matchRules` —
 keyword/threshold matching against a user's enabled rules), `currencyConverter.ts`,
 `mediaSearchClient.ts` (the external media-search HTTP client), `songRequestAction.ts`
 (`executeSongRequest` — fetches audio, writes it to a dedicated temp dir, and calls
-`LocalStreamManager.insertEphemeralTrack`; every failure is swallowed and logged, since a donation
-has no user-facing feedback channel by design), `tempFileCleanup.ts` (the sweep backstop — see
-"Configuration" below), and `interactionRuleRepository.ts`/`interactionRuleRoutes.ts` (CRUD,
-mounted at `/interaction-rules`, cookie-authenticated and owner-scoped like every other resource
-route). `frontend/src/pages/Donations.tsx` + `frontend/src/api/interactionRules.ts` are the rules
-management UI. This feature also changed `PlaylistQueue` (`src/playlist/queue.ts`) from a
-single-slot "next track override" into a real FIFO (`insertedQueue`, drained by `shift()`), so
-multiple donation requests queue up and play in the order they arrived rather than the newest one
-clobbering the last. **MVP scope note:** `DONATION_TARGET_USER_ID` hard-codes which single
+`LocalStreamManager.insertEphemeralTrack`; resolves a `SongRequestResult` rather than throwing on
+failure, so both the real webhook path — which only logs it — and the interaction-rule "Test"
+button — which reports it back to the caller — can share one implementation),
+`songRequestQueue.ts` (`SongRequestQueue` — see below), `tempFileCleanup.ts` (the sweep backstop —
+see "Configuration" below), and `interactionRuleRepository.ts`/`interactionRuleRoutes.ts` (CRUD
+plus `POST /interaction-rules/{id}/test`, mounted at `/interaction-rules`, cookie-authenticated and
+owner-scoped like every other resource route). `frontend/src/pages/Donations.tsx` +
+`frontend/src/api/interactionRules.ts` are the rules management UI, including a per-rule "Test"
+panel that calls the `/test` route directly — bypassing Donatello entirely — with the rule's own
+`minAmount` (not editable client-side) and an editable message defaulted to a working `!keyword:`
+command.
+
+**The interrupt-and-resume mechanism (`StreamController`).** `insertEphemeralTrack` enqueues onto
+`PlaylistQueue`'s `donationQueue` — a FIFO kept entirely SEPARATE from `insertedQueue` (which
+`playByName` still uses, unchanged: queued to play after the current track ends, joins `history`
+normally). The first donation track of an "episode" (i.e. arriving while `interruptedForDonation`
+is null) captures whatever is actually playing right now — `StreamController.nowPlayingTrack`, its
+own field tracking what's audible, deliberately NOT `PlaylistQueue.current()` — plus its elapsed
+position, stores that as `interruptedForDonation`, and switches to the donation track immediately;
+a donation arriving while one is already playing just extends the FIFO, no re-interruption. Once
+the whole `donationQueue` drains, the captured track resumes via `feedCurrentTrack(track,
+elapsedSeconds)` — the same `-ss`-seek path `pause()`/`resume()`/reconnect already use.
+`PlaylistQueue.current()`/`position`/`history` are **never touched** by any of this — a donation
+track is never part of playlist "previous" navigation, and the playlist's own resume point survives
+the whole interruption untouched. This has real consequences elsewhere in `StreamController`, all
+addressed the same way — read `nowPlayingTrack` (falling back to `queue.current()` only when it's
+genuinely unset), never `queue.current()` directly:
+- **`next()`/`previous()` reject with 409 while `interruptedForDonation` is set** — a donation
+  track can never be skipped, by design.
+- **`pause()`/`resume()`** act on the donation track itself when one is playing, not on
+  `queue.current()` (the track it interrupted) — resuming from the wrong one would silently abandon
+  the donation track mid-playback.
+- **A crash/reconnect mid-donation-track restores the SAME donation track at its captured offset**,
+  not `queue.current()` from 0 — `interruptedForDonation` is restored immediately after `teardown()`
+  in `handleUnexpectedExit`, before the 'reconnecting' state is even entered, so `next()`/`previous()`
+  stay rejected for the whole reconnect window too (closing the "queue moved during the wait" case
+  `performReconnect`'s plain-playlist path exists to handle — it genuinely cannot apply here).
+- **A donation arriving while `paused` wakes the stream and plays it immediately** — a donation
+  is meant to be heard right away, not wait for a manual resume.
+- The overlay's playlist-window element uses `PlaylistQueue.positionInBase()` (the base-playlist
+  index most recently reached by REAL advancement, untouched by donation pulls) plus
+  `overlayText.ts`'s `buildEphemeralPlaylistWindowLines()` to show sensible before/current/after
+  context around a donation track — it would otherwise render as a completely empty window for as
+  long as any donation track plays, since the track is never findable by name in the playlist's own
+  snapshot (the bug the ordinary `buildPlaylistWindowLines()` has for any track not in `tracks`).
+
+**Donation ordering is by arrival, not by download speed (`songRequestQueue.ts`).** Two donations
+racing on the external media-search HTTP fetch could otherwise insert — and therefore play — in
+whichever order their downloads happened to finish, not the order the donations actually arrived
+in. `SongRequestQueue.enqueue()` chains every request onto one promise tail, so a query is not even
+started (its own `fetchAudio()` call not fired) until every request enqueued ahead of it has fully
+resolved — deliberately fully sequential rather than "download in parallel, deliver in order":
+simpler, and ordering is what was asked for, not throughput. `server.ts` constructs ONE
+`SongRequestQueue` instance and hands the same `enqueue` function to both the real webhook path and
+the interaction-rule "Test" button, so a manual test and a real donation queued moments apart still
+resolve in the order they were actually issued.
+
+**MVP scope note:** `DONATION_TARGET_USER_ID` hard-codes which single
 account's stream every donation is routed to (see "Configuration" below) — there is no per-donor
 or per-channel routing yet.
 
@@ -882,6 +933,8 @@ src/
                             (parseCommand/matchRules), currencyConverter.ts, mediaSearchClient.ts
                             (external media-search HTTP client), songRequestAction.ts
                             (executeSongRequest — fetch, temp-write, insertEphemeralTrack),
+                            songRequestQueue.ts (SongRequestQueue — serializes donation-triggered
+                            requests so play order matches arrival order, not download speed),
                             tempFileCleanup.ts (age-based sweep backstop),
                             interactionRuleRepository.ts (Prisma) / interactionRuleRoutes.ts
                             (mounted at /interaction-rules)

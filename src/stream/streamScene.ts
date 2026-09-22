@@ -8,7 +8,7 @@ import { CanvasPlacement, GifOverlayConfig } from '../ffmpeg/persistentEncoderAr
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
 import { getImageFrameCount } from '../ffmpeg/imageFrameCount';
-import { buildPlaylistWindowLines } from '../ffmpeg/overlayText';
+import { buildPlaylistWindowLines, buildEphemeralPlaylistWindowLines } from '../ffmpeg/overlayText';
 import { Spawner, PipeSpawner } from '../ffmpeg/types';
 import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
@@ -72,7 +72,10 @@ export interface StreamScene {
   playlistName: string;
   tracks: Track[];
   library: LibraryLike;
-  buildOverlay: (track: Track) => Promise<NowPlayingOverlay>;
+  // baseAnchorIndex is PlaylistQueue.positionInBase() — required only when `track` is a donation
+  // track that isn't itself in this scene's playlist; optional otherwise (StreamController always
+  // supplies it, but it's ignored whenever the track IS found in the playlist by name).
+  buildOverlay: (track: Track, baseAnchorIndex?: number) => Promise<NowPlayingOverlay>;
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: (target: RtmpTarget) => PersistentEncoder;
@@ -227,9 +230,15 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
     ? path.join(deps.fifoDir, `super-dj-overlay-above-${sceneId}.png`)
     : undefined;
 
-  const buildOverlay = async (track: Track): Promise<NowPlayingOverlay> => {
+  const buildOverlay = async (track: Track, baseAnchorIndex?: number): Promise<NowPlayingOverlay> => {
     const currentIndex = tracks.findIndex((t) => t.name === track.name);
-    const playlistLines = buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
+    // A donation-requested track is never in this playlist's own snapshot — falling through to
+    // buildPlaylistWindowLines would always miss and render an empty window for as long as it
+    // plays. baseAnchorIndex (PlaylistQueue.positionInBase()) is what StreamController passes for
+    // exactly this case — the base-playlist track the donation is standing in front of.
+    const playlistLines = currentIndex >= 0
+      ? buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER)
+      : buildEphemeralPlaylistWindowLines(tracks, baseAnchorIndex ?? -1, track.name, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
     const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
     const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => renderTemplatePng({

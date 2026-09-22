@@ -127,6 +127,22 @@ describe('buildStreamScene — overlay building', () => {
     expect(overlay.overlayPngAbove).toBeUndefined();
   });
 
+  it('windows the playlist lines around a base anchor for a donation track not in the playlist', async () => {
+    const { deps } = buildDeps();
+    const scene = await buildStreamScene(deps, params); // tracks: a, b
+    await scene.buildOverlay({ name: '🎁 Заказ: Blur - Song 2', audioPath: '/tmp/donation.mp3', coverPath: null }, 0);
+    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
+    expect(call.playlistLines).toEqual(['  a', '▶ 🎁 Заказ: Blur - Song 2', '  b']);
+  });
+
+  it('shows just the donation track when no base anchor is supplied at all', async () => {
+    const { deps } = buildDeps();
+    const scene = await buildStreamScene(deps, params);
+    await scene.buildOverlay({ name: '🎁 Заказ: Blur - Song 2', audioPath: '/tmp/donation.mp3', coverPath: null });
+    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
+    expect(call.playlistLines).toEqual(['▶ 🎁 Заказ: Blur - Song 2']);
+  });
+
   it('splits a timer element out of the baked picture and returns its position instead', async () => {
     const { deps, templateRepository } = buildDeps();
     templateRepository.findById.mockResolvedValue({
