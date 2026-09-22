@@ -57,12 +57,22 @@
   },
   "addTrackDrawer": {
     "title": "Add Track",
+    "tabUpload": "Upload file",
+    "tabService": "Add via service",
     "audioFile": "Audio file",
     "coverFile": "Cover image (optional)",
     "namePlaceholder": "Track name (optional — defaults to file name)",
     "upload": "Upload",
     "uploading": "Uploading…",
-    "failed": "Upload failed"
+    "failed": "Upload failed",
+    "queryLabel": "Search query",
+    "search": "Search",
+    "searching": "Searching…",
+    "searchFailed": "Search failed",
+    "add": "Add",
+    "adding": "Adding…",
+    "confirmFailed": "Failed to add the track",
+    "tryAnother": "Try another query"
   },
   "playlists": {
     "title": "Playlists",
@@ -90,6 +100,7 @@
     "remove": "Remove",
     "emptyTracks": "No tracks in this playlist yet — add some below.",
     "addTracksHeading": "Add tracks",
+    "addNewTrack": "+ Add new track",
     "add": "Add",
     "allAdded": "All tracks are already in this playlist."
   },
