@@ -39,6 +39,60 @@ export const openApiSpec = {
         },
       },
     },
+    '/tracks/search-preview': {
+      post: {
+        summary: 'Fetch a candidate track from the streamer\'s own external media-search service into a temporary preview, without saving it to the library yet',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['query'], properties: { query: { type: 'string' } } } } },
+        },
+        responses: {
+          '200': { description: 'Preview created', content: { 'application/json': { schema: { type: 'object', properties: { previewId: { type: 'string' } } } } } },
+          '400': { description: 'Missing/empty query' },
+          '401': { description: 'Not authenticated' },
+          '502': { description: 'The external media-search service failed or returned nothing usable' },
+        },
+      },
+    },
+    '/tracks/preview/{previewId}': {
+      get: {
+        summary: 'Stream a pending preview\'s audio (for an in-browser <audio> player) — never cached, since the same id can be discarded and reused for a different query',
+        parameters: [{ name: 'previewId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'audio/mpeg' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your preview' },
+          '404': { description: 'Preview not found, or its temp file has already been swept' },
+        },
+      },
+      delete: {
+        summary: 'Discard a pending preview and delete its temp file — no-op equivalent if it was about to be swept anyway',
+        parameters: [{ name: 'previewId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Discarded' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your preview' },
+          '404': { description: 'Preview not found, or already expired' },
+        },
+      },
+    },
+    '/tracks/from-preview/{previewId}': {
+      post: {
+        summary: 'Confirm a pending preview into a real, permanent library track — same pipeline POST /tracks uses, just starting from an already-fetched temp file instead of an upload',
+        parameters: [{ name: 'previewId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: false,
+          content: { 'multipart/form-data': { schema: { type: 'object', properties: { name: { type: 'string' }, cover: { type: 'string', format: 'binary' } } } } },
+        },
+        responses: {
+          '200': { description: 'Track created', content: { 'application/json': { schema: { $ref: '#/components/schemas/TrackSummary' } } } },
+          '400': { description: 'Unsupported or oversized cover file' },
+          '401': { description: 'Not authenticated' },
+          '403': { description: 'Not your preview' },
+          '404': { description: 'Preview not found, or already expired' },
+        },
+      },
+    },
     '/tracks/{id}': {
       patch: {
         summary: 'Set (or clear) this track\'s per-track overlay override — colors applied on top of the selected template while this track is playing',
