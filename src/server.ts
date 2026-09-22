@@ -7,6 +7,8 @@ import { SessionRepository } from './auth/sessionRepository';
 import { AuthService } from './auth/authService';
 import { TrackRepository } from './tracks/trackRepository';
 import { TrackUploadService } from './tracks/trackUploadService';
+import { TrackPreviewRegistry } from './tracks/trackPreviewRegistry';
+import { TrackPreviewService } from './tracks/trackPreviewService';
 import { PlaylistRepository } from './playlists/playlistRepository';
 import { DestinationRepository } from './destinations/destinationRepository';
 import { OAuthConnectionRepository } from './destinations/oauthConnectionRepository';
@@ -150,6 +152,17 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   const interactionRuleRepository = new InteractionRuleRepository(prisma);
   const donationTempDir = path.join(os.tmpdir(), 'super-dj-donation-songs');
   const mediaSearchClient = new HttpMediaSearchClient(config.mediaSearchServiceUrl);
+
+  const trackPreviewRegistry = new TrackPreviewRegistry();
+  const previewTempDir = path.join(os.tmpdir(), 'super-dj-track-previews');
+  const trackPreviewService = new TrackPreviewService({
+    mediaSearchClient, registry: trackPreviewRegistry, trackUploadService, previewTempDir,
+  });
+  // Much shorter-lived than the donation sweep (12h) — an unconfirmed preview is a forgotten
+  // draft the moment the streamer navigates away, not a track a stream might still be about to
+  // play, so there's no reason to hold onto it for hours.
+  const previewCleanupSweep = startTempFileCleanupSweep(previewTempDir, 60 * 60 * 1000, 10 * 60 * 1000);
+
   const currencyConverter = new StubCurrencyConverter();
 
   // 12-hour staleness threshold, swept every 10 minutes — a slow backstop for crash-leftover files,
@@ -217,6 +230,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     authService,
     trackRepository,
     trackUploadService,
+    trackPreviewService,
     playlistRepository,
     destinationRepository,
     destinationEncryptionKey: config.streamKeyEncryptionKey,
@@ -239,5 +253,5 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     frontendOrigin: config.frontendOrigin,
   });
 
-  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep };
+  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep, previewCleanupSweep };
 }

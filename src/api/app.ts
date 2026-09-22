@@ -6,6 +6,7 @@ import { createAuthRouter } from '../auth/authRoutes';
 import { TrackRepository } from '../tracks/trackRepository';
 import { TrackUploadService } from '../tracks/trackUploadService';
 import { createTrackRouter } from '../tracks/trackRoutes';
+import { TrackPreviewService } from '../tracks/trackPreviewService';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { createPlaylistRouter } from '../playlists/playlistRoutes';
 import { DestinationRepository } from '../destinations/destinationRepository';
@@ -32,6 +33,7 @@ export interface AppDeps {
   authService: AuthService;
   trackRepository: TrackRepository;
   trackUploadService: TrackUploadService;
+  trackPreviewService: TrackPreviewService;
   playlistRepository: PlaylistRepository;
   destinationRepository: DestinationRepository;
   destinationEncryptionKey: string;
@@ -54,7 +56,7 @@ export function createApp(deps: AppDeps): Express {
   app.use(cors({ origin: deps.frontendOrigin, credentials: true }));
   app.use(express.json());
   app.use('/auth', createAuthRouter(deps.authService));
-  app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository));
+  app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository, deps.trackPreviewService));
   app.use('/playlists', createPlaylistRouter(deps.authService, deps.playlistRepository, deps.trackRepository));
   // Both routers share this prefix safely today because createDestinationRouter has no GET /:id —
   // adding one would shadow createOAuthRouter's GET /:provider/oauth/{start,callback}. Keep that

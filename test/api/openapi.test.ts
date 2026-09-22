@@ -5,12 +5,14 @@ function buildApp() {
   const authService: any = { register: jest.fn(), login: jest.fn(), logout: jest.fn(), getCurrentUser: jest.fn() };
   const trackRepository: any = {};
   const trackUploadService: any = {};
+  const trackPreviewService: any = {};
   const playlistRepository: any = {};
   const destinationRepository: any = {};
   return createApp({
     authService,
     trackRepository,
     trackUploadService,
+    trackPreviewService,
     playlistRepository,
     destinationRepository,
     destinationEncryptionKey: 'a'.repeat(64),
