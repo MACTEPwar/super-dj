@@ -204,10 +204,17 @@ git commit -m "refactor(media): move mediaSearchClient out of donations into a s
 - Test: `test/tracks/trackPreviewRegistry.test.ts`
 
 **Interfaces:**
-- Produces: `TrackPreviewEntry { userId: string; tempFilePath: string; createdAt: number }`,
+- Produces: `TrackPreviewEntry { userId: string; query: string; tempFilePath: string; createdAt: number }`,
   `TrackPreviewRegistry` with `register(previewId: string, entry: TrackPreviewEntry): void`,
   `get(previewId: string): TrackPreviewEntry | undefined`, `delete(previewId: string): void`.
 - Consumes: nothing — pure in-memory data structure, no dependencies.
+
+**Why `query` is stored here:** the eventual confirmed track needs a sensible default name if the
+streamer clears the name field. `TrackUploadService.upload()`'s own fallback (basename of
+`originalname`) is meaningless for a preview-sourced track — `originalname` there is a synthetic
+`${previewId}.mp3`, not anything derived from what was actually searched for (see Task 3's
+`confirm()`). Storing the original query text right here, at registration time, is the only place
+that value naturally exists.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -222,13 +229,13 @@ describe('TrackPreviewRegistry', () => {
 
   it('returns exactly what was registered under an id', () => {
     const registry = new TrackPreviewRegistry();
-    registry.register('p1', { userId: 'user-1', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
-    expect(registry.get('p1')).toEqual({ userId: 'user-1', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+    registry.register('p1', { userId: 'user-1', query: 'Blur - Song 2', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+    expect(registry.get('p1')).toEqual({ userId: 'user-1', query: 'Blur - Song 2', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
   });
 
   it('delete removes the entry', () => {
     const registry = new TrackPreviewRegistry();
-    registry.register('p1', { userId: 'user-1', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+    registry.register('p1', { userId: 'user-1', query: 'x', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
     registry.delete('p1');
     expect(registry.get('p1')).toBeUndefined();
   });
@@ -240,8 +247,8 @@ describe('TrackPreviewRegistry', () => {
 
   it('keeps entries for different ids independent', () => {
     const registry = new TrackPreviewRegistry();
-    registry.register('p1', { userId: 'user-1', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
-    registry.register('p2', { userId: 'user-2', tempFilePath: '/tmp/p2.mp3', createdAt: 2000 });
+    registry.register('p1', { userId: 'user-1', query: 'x', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+    registry.register('p2', { userId: 'user-2', query: 'y', tempFilePath: '/tmp/p2.mp3', createdAt: 2000 });
     expect(registry.get('p1')?.userId).toBe('user-1');
     expect(registry.get('p2')?.userId).toBe('user-2');
   });
@@ -263,6 +270,10 @@ Expected: FAIL — `Cannot find module '../../src/tracks/trackPreviewRegistry'`.
 // An unconfirmed preview is a forgotten draft, not state worth surviving a process restart.
 export interface TrackPreviewEntry {
   userId: string;
+  // The original search text — TrackPreviewService.confirm() defaults the track's name to this
+  // when the streamer clears the name field, since the temp file's own "originalname" is a
+  // synthetic ${previewId}.mp3, not anything meaningful to fall back to.
+  query: string;
   tempFilePath: string;
   createdAt: number;
 }
@@ -361,6 +372,7 @@ describe('TrackPreviewService', () => {
       expect(fsPromises.writeFile).toHaveBeenCalledWith(`${previewTempDir}/preview-1.mp3`, Buffer.from([1, 2, 3]));
       const entry = registry.get('preview-1');
       expect(entry?.userId).toBe('user-1');
+      expect(entry?.query).toBe('Blur - Song 2');
       expect(entry?.tempFilePath).toBe(`${previewTempDir}/preview-1.mp3`);
     });
 
@@ -376,7 +388,7 @@ describe('TrackPreviewService', () => {
   describe('getPreviewPath', () => {
     it('returns the temp path for an owned, still-existing preview', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'user-1', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'user-1', query: 'My Song', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       (fsPromises.access as jest.Mock).mockResolvedValue(undefined);
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
 
@@ -392,7 +404,7 @@ describe('TrackPreviewService', () => {
 
     it('throws 403 for a preview owned by someone else', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'someone-else', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'someone-else', query: 'x', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
 
       await expect(service.getPreviewPath('user-1', 'preview-1')).rejects.toMatchObject({ status: 403 });
@@ -400,7 +412,7 @@ describe('TrackPreviewService', () => {
 
     it('throws 404 and clears the stale entry when the temp file was already swept', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'user-1', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'user-1', query: 'My Song', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       (fsPromises.access as jest.Mock).mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
 
@@ -412,7 +424,7 @@ describe('TrackPreviewService', () => {
   describe('confirm', () => {
     it('wraps the temp file as an UploadedFile and delegates to trackUploadService.upload, then clears the registry entry', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'user-1', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'user-1', query: 'My Song', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       (fsPromises.access as jest.Mock).mockResolvedValue(undefined);
       const statSpy = jest.spyOn(fsPromises, 'stat').mockResolvedValue({ size: 4242 } as never);
       trackUploadService.upload.mockResolvedValue({ id: 't1', name: 'My Song', durationSeconds: 10, hasCover: false });
@@ -432,22 +444,55 @@ describe('TrackPreviewService', () => {
 
     it('passes the cover file through untouched when one is given', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'user-1', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'user-1', query: 'My Song', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       (fsPromises.access as jest.Mock).mockResolvedValue(undefined);
       const statSpy = jest.spyOn(fsPromises, 'stat').mockResolvedValue({ size: 10 } as never);
       trackUploadService.upload.mockResolvedValue({ id: 't1', name: 'x', durationSeconds: 1, hasCover: true });
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
       const cover = { originalname: 'cover.png', path: '/tmp/cover', size: 100 };
 
-      await service.confirm('user-1', 'preview-1', undefined, cover);
+      await service.confirm('user-1', 'preview-1', 'a chosen name', cover);
 
-      expect(trackUploadService.upload).toHaveBeenCalledWith('user-1', undefined, expect.anything(), cover);
+      expect(trackUploadService.upload).toHaveBeenCalledWith('user-1', 'a chosen name', expect.anything(), cover);
+      statSpy.mockRestore();
+    });
+
+    // Regression test for the real bug this exact case produced during design review: the temp
+    // file's own "originalname" is a synthetic `${previewId}.mp3`, never anything derived from
+    // what was actually searched for — falling through to TrackUploadService.upload()'s OWN
+    // filename-based default would have named the track after a random UUID instead of the song
+    // the streamer actually searched for and listened to.
+    it('defaults the name to the original search query when name is omitted (not to the synthetic temp filename)', async () => {
+      const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
+      registry.register('preview-1', { userId: 'user-1', query: 'Blur - Song 2', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      (fsPromises.access as jest.Mock).mockResolvedValue(undefined);
+      const statSpy = jest.spyOn(fsPromises, 'stat').mockResolvedValue({ size: 10 } as never);
+      trackUploadService.upload.mockResolvedValue({ id: 't1', name: 'Blur - Song 2', durationSeconds: 1, hasCover: false });
+      const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
+
+      await service.confirm('user-1', 'preview-1', undefined, undefined);
+
+      expect(trackUploadService.upload).toHaveBeenCalledWith('user-1', 'Blur - Song 2', expect.anything(), undefined);
+      statSpy.mockRestore();
+    });
+
+    it('also defaults the name when an empty string is given (a streamer who clears the field, not just omits it)', async () => {
+      const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
+      registry.register('preview-1', { userId: 'user-1', query: 'Blur - Song 2', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      (fsPromises.access as jest.Mock).mockResolvedValue(undefined);
+      const statSpy = jest.spyOn(fsPromises, 'stat').mockResolvedValue({ size: 10 } as never);
+      trackUploadService.upload.mockResolvedValue({ id: 't1', name: 'Blur - Song 2', durationSeconds: 1, hasCover: false });
+      const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
+
+      await service.confirm('user-1', 'preview-1', '', undefined);
+
+      expect(trackUploadService.upload).toHaveBeenCalledWith('user-1', 'Blur - Song 2', expect.anything(), undefined);
       statSpy.mockRestore();
     });
 
     it('404s for a preview owned by someone else, without calling upload', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'someone-else', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'someone-else', query: 'x', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
 
       await expect(service.confirm('user-1', 'preview-1', undefined, undefined)).rejects.toMatchObject({ status: 403 });
@@ -458,7 +503,7 @@ describe('TrackPreviewService', () => {
   describe('discard', () => {
     it('removes the registry entry and unlinks the temp file', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'user-1', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'user-1', query: 'My Song', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       (fsPromises.unlink as jest.Mock).mockResolvedValue(undefined);
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
 
@@ -470,7 +515,7 @@ describe('TrackPreviewService', () => {
 
     it('swallows ENOENT if the file was already gone', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
-      registry.register('preview-1', { userId: 'user-1', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
+      registry.register('preview-1', { userId: 'user-1', query: 'My Song', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       (fsPromises.unlink as jest.Mock).mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });
 
@@ -533,7 +578,7 @@ export class TrackPreviewService {
     await fs.mkdir(this.deps.previewTempDir, { recursive: true });
     await fs.writeFile(tempFilePath, audioBuffer);
 
-    this.deps.registry.register(previewId, { userId, tempFilePath, createdAt: Date.now() });
+    this.deps.registry.register(previewId, { userId, query, tempFilePath, createdAt: Date.now() });
     return { previewId };
   }
 
@@ -561,10 +606,19 @@ export class TrackPreviewService {
     coverFile: UploadedFile | undefined,
   ): Promise<TrackSummary> {
     const tempFilePath = await this.getPreviewPath(userId, previewId);
+    // getPreviewPath just ownership-checked and confirmed this entry exists — safe to read again
+    // directly for its query, without repeating those checks.
+    const entry = this.deps.registry.get(previewId)!;
     const stat = await fs.stat(tempFilePath);
     const audioFile: UploadedFile = { originalname: `${previewId}.mp3`, path: tempFilePath, size: stat.size };
+    // Never pass an empty/undefined name through to TrackUploadService.upload() — its OWN
+    // filename-based fallback would name the track after `audioFile.originalname` above, which is
+    // a synthetic ${previewId}.mp3, not anything derived from what the streamer actually searched
+    // for and listened to. Defaulting here, to the original query, is what makes an emptied name
+    // field produce a sensible track name instead of a random UUID.
+    const trackName = name && name.trim().length > 0 ? name : entry.query;
 
-    const summary = await this.deps.trackUploadService.upload(userId, name, audioFile, coverFile);
+    const summary = await this.deps.trackUploadService.upload(userId, trackName, audioFile, coverFile);
     this.deps.registry.delete(previewId);
     return summary;
   }
@@ -1789,11 +1843,15 @@ verbatim):
 added by typing a text query: `POST /tracks/search-preview` fetches audio from the same external
 media-search service the donation feature uses (`src/media/mediaSearchClient.ts` — moved out of
 `src/donations/` when this landed, since it's no longer donation-specific) into a temporary file,
-registers it in `TrackPreviewRegistry` (in-memory, same discipline as `MediaMtxAuthRegistry`), and
-returns a `previewId` the frontend streams back through `GET /tracks/preview/{previewId}` for an
-in-browser `<audio>` preview — nothing is saved to the library yet. `POST /tracks/from-preview/
-{previewId}` hands that SAME temp file to the existing `TrackUploadService.upload()` unchanged (no
-second fetch from the external service). An unconfirmed preview is reaped by a second
+registers it in `TrackPreviewRegistry` (in-memory, same discipline as `MediaMtxAuthRegistry` —
+including the original search query text, not just the temp path: `TrackUploadService.upload()`'s
+own filename-based name fallback is meaningless here, since the temp file's `originalname` is a
+synthetic `${previewId}.mp3`, so `TrackPreviewService.confirm()` defaults an empty/omitted name to
+the registry's stored query instead), and returns a `previewId` the frontend streams back through
+`GET /tracks/preview/{previewId}` for an in-browser `<audio>` preview — nothing is saved to the
+library yet. `POST /tracks/from-preview/{previewId}` hands that SAME temp file to the existing
+`TrackUploadService.upload()` unchanged (no second fetch from the external service). An
+unconfirmed preview is reaped by a second
 `startTempFileCleanupSweep` instance (1 hour max age — much shorter than the donation feature's 12
 hours, since an abandoned preview is a forgotten draft, not a track a stream might still play).
 `AddTrackDrawer.tsx` gained a tab switcher (upload / search); the playlist editor page reuses the

@@ -61,19 +61,25 @@ can be wrapped in without any change to that class).
 
 - `search(userId, query): Promise<{ previewId: string }>` — calls `mediaSearchClient.fetchAudio
   (query)`, writes the bytes to `path.join(previewTempDir, `${previewId}.mp3`)`, registers
-  `{userId, tempFilePath, createdAt: Date.now()}`, returns the id. Lets `MediaSearchError` propagate
-  as-is (the route layer maps it to a 502/504 the frontend can show — see "Error handling" below;
-  unlike the donation flow, a preview has a live human waiting for the answer, so failures must
-  never be swallowed here).
+  `{userId, query, tempFilePath, createdAt: Date.now()}`, returns the id. Lets `MediaSearchError`
+  propagate as-is (the route layer maps it to a 502/504 the frontend can show — see "Error
+  handling" below; unlike the donation flow, a preview has a live human waiting for the answer, so
+  failures must never be swallowed here). `query` is stored on the registry entry, not just used
+  and discarded, specifically so `confirm()` below has a sensible name to fall back to.
 - `getPreviewPath(userId, previewId): string` — looks up the registry entry, throws `ApiError(404,
   'preview not found or expired')` if missing, `ApiError(403, 'not your preview')` if the owner
   doesn't match. Used by both the streaming route and the confirm route.
 - `confirm(userId, previewId, name, coverFile): Promise<TrackSummary>` — resolves the path via
-  `getPreviewPath`, wraps it as an `UploadedFile` (`originalname: `${query-or-name}.mp3`, path,
-  size` via `fs.stat`), calls `trackUploadService.upload(...)`, deletes the registry entry. The
-  temp file itself does NOT need explicit deletion here — `TrackUploadService.upload()`'s
-  `moveFile` already relocates (renames) it into permanent storage, so there is nothing left at the
-  temp path afterward.
+  `getPreviewPath`, wraps it as an `UploadedFile` (`originalname: `${previewId}.mp3`, path, size`
+  via `fs.stat`), calls `trackUploadService.upload(userId, trackName, audioFile, coverFile)` where
+  `trackName` is `name` if it's a non-empty string, otherwise the registry entry's own `query` —
+  **never `name` unchecked**. `TrackUploadService.upload()`'s own filename-based default (basename
+  of `originalname`) would otherwise name the track after the synthetic `${previewId}.mp3` — a
+  random UUID, not anything the streamer actually searched for or listened to — the exact failure
+  mode a streamer clearing the name field before confirming would hit. Deletes the registry entry
+  on success. The temp file itself does NOT need explicit deletion here — `TrackUploadService.
+  upload()`'s `moveFile` already relocates (renames) it into permanent storage, so there is nothing
+  left at the temp path afterward.
 - `discard(userId, previewId): void` — looks up + ownership-checks, deletes the registry entry and
   unlinks the temp file (best-effort, swallow ENOENT).
 
@@ -161,3 +167,23 @@ tests with `tracksApi` mocked, matching `AddTrackDrawer.test.tsx`'s existing pat
   grows a "list candidates" endpoint — not part of this plan.
 - **Preview TTL (1 hour)** is a starting guess, not a measured value — revisit if streamers report
   losing an in-progress preview to the sweep during normal use.
+
+**Reviewed and explicitly accepted, not fixed** (raised during design review, deliberately left as
+known limitations rather than engineered around — the 1-hour sweep is the backstop for all of
+these):
+- **No discard call fires when the drawer's service tab is abandoned** — switching to the "Upload"
+  tab while a preview is pending unmounts the component holding its `previewId`, and closing the
+  whole drawer (✕/Escape/overlay click) doesn't call `discard` either. The temp file and registry
+  entry just sit until the sweep reaps them. Only the explicit "Другой запрос" button calls
+  `discard`.
+- **Switching away from the Upload tab mid-request, then having it resolve later, can still close
+  the drawer out from under the streamer** (`onSuccess` fires regardless of which tab is now
+  active) — a new edge case this feature introduces by giving the drawer a second tab to switch to
+  in the first place. Not mitigated.
+- **A double-click on "Добавить" can race `confirm()` against itself** — the second call's
+  `moveFile` finds the temp file already gone (the first call already renamed it into permanent
+  storage) and surfaces as a generic error rather than a clean "already added" response.
+- **A track added from the playlist editor is created in the library immediately on confirm**, even
+  if the playlist page's own "Save" is never pressed afterward — consistent with how uploading
+  already behaves from the Library page, but a streamer navigating away without saving may not
+  expect a new library track to already exist.
