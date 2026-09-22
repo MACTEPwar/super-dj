@@ -31,4 +31,41 @@ describe('TrackPreviewRegistry', () => {
     expect(registry.get('p1')?.userId).toBe('user-1');
     expect(registry.get('p2')?.userId).toBe('user-2');
   });
+
+  describe('pruneOlderThan', () => {
+    it('removes an entry older than maxAgeMs', () => {
+      const registry = new TrackPreviewRegistry();
+      registry.register('p1', { userId: 'user-1', query: 'x', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+
+      registry.pruneOlderThan(60 * 60 * 1000, 1000 + 60 * 60 * 1000 + 1);
+
+      expect(registry.get('p1')).toBeUndefined();
+    });
+
+    it('keeps an entry younger than maxAgeMs', () => {
+      const registry = new TrackPreviewRegistry();
+      registry.register('p1', { userId: 'user-1', query: 'x', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+
+      registry.pruneOlderThan(60 * 60 * 1000, 1000 + 60 * 60 * 1000 - 1);
+
+      expect(registry.get('p1')).toEqual({ userId: 'user-1', query: 'x', tempFilePath: '/tmp/p1.mp3', createdAt: 1000 });
+    });
+
+    it('is a harmless no-op on an empty registry', () => {
+      const registry = new TrackPreviewRegistry();
+
+      expect(() => registry.pruneOlderThan(60 * 60 * 1000, 999999)).not.toThrow();
+    });
+
+    it('prunes only the stale entries in a mixed-age registry, leaving fresh ones', () => {
+      const registry = new TrackPreviewRegistry();
+      registry.register('stale', { userId: 'user-1', query: 'old', tempFilePath: '/tmp/stale.mp3', createdAt: 0 });
+      registry.register('fresh', { userId: 'user-1', query: 'new', tempFilePath: '/tmp/fresh.mp3', createdAt: 59 * 60 * 1000 });
+
+      registry.pruneOlderThan(60 * 60 * 1000, 60 * 60 * 1000 + 1);
+
+      expect(registry.get('stale')).toBeUndefined();
+      expect(registry.get('fresh')).toBeDefined();
+    });
+  });
 });

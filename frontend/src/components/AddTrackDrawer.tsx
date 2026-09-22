@@ -95,7 +95,18 @@ function ServiceTab({ onOpenChange, onAdded }: { onOpenChange: (open: boolean) =
       onOpenChange(false);
       resetState();
     },
-    onError: (err) => setError(err instanceof ApiError ? err.message : t('addTrackDrawer.confirmFailed')),
+    onError: (err) => {
+      // A 404 here means the preview expired or was already reaped (e.g. by the registry's own
+      // prune sweep) — the dead <audio> element on screen can never be confirmed, so bounce back
+      // to the query-input state (NOT resetState(), which would also throw away the streamer's
+      // already-typed query — unnecessary friction on top of an already-annoying dead end).
+      if (err instanceof ApiError && err.status === 404) {
+        setPreviewId(null);
+        setError(t('addTrackDrawer.previewExpired'));
+        return;
+      }
+      setError(err instanceof ApiError ? err.message : t('addTrackDrawer.confirmFailed'));
+    },
   });
 
   function resetState() {

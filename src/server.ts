@@ -162,6 +162,18 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   // draft the moment the streamer navigates away, not a track a stream might still be about to
   // play, so there's no reason to hold onto it for hours.
   const previewCleanupSweep = startTempFileCleanupSweep(previewTempDir, 60 * 60 * 1000, 10 * 60 * 1000);
+  // The file sweep above reaps the temp file on disk but never touches TrackPreviewRegistry's
+  // in-memory Map — since the common abandonment paths (switching drawer tabs, closing the drawer)
+  // never call discardPreview, every abandoned preview would otherwise leave a permanent entry in
+  // this process-lifetime Map. Same 1-hour/10-minute cadence as previewCleanupSweep, deliberately,
+  // so both age out together rather than drifting apart under two separately-tuned constants.
+  const previewRegistryPruneSweep = (() => {
+    const timer = setInterval(() => {
+      trackPreviewRegistry.pruneOlderThan(60 * 60 * 1000);
+    }, 10 * 60 * 1000);
+    timer.unref();
+    return { stop: () => clearInterval(timer) };
+  })();
 
   const currencyConverter = new StubCurrencyConverter();
 
@@ -253,5 +265,5 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
     frontendOrigin: config.frontendOrigin,
   });
 
-  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep, previewCleanupSweep };
+  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep, previewCleanupSweep, previewRegistryPruneSweep };
 }

@@ -52,6 +52,13 @@ describe('API docs', () => {
     expect(res.body.paths).toHaveProperty(['/local-stream/destinations/{destinationId}']);
   });
 
+  it('documents the track-preview routes', async () => {
+    const res = await request(buildApp()).get('/openapi.json');
+    expect(res.body.paths).toHaveProperty(['/tracks/search-preview']);
+    expect(res.body.paths).toHaveProperty(['/tracks/preview/{previewId}']);
+    expect(res.body.paths).toHaveProperty(['/tracks/from-preview/{previewId}']);
+  });
+
   // Full cutover: leaving these reachable would let a caller start a destination-bound encode that
   // bypasses the local stream, which is exactly the invariant the local-first rework establishes.
   it('no longer documents the removed per-destination and session stream APIs', async () => {

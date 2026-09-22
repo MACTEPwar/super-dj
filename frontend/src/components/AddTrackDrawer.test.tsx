@@ -85,6 +85,23 @@ describe('AddTrackDrawer — service tab', () => {
     expect(await screen.findByText('media search service returned 502: not found')).toBeInTheDocument();
   });
 
+  it('confirming an expired/missing preview (404) resets to the query-input state with a localized message', async () => {
+    vi.mocked(tracksApi.searchPreview).mockResolvedValue({ previewId: 'p1' });
+    vi.mocked(tracksApi.previewUrl).mockReturnValue('http://api.test/tracks/preview/p1');
+    vi.mocked(tracksApi.confirmPreview).mockRejectedValue(new ApiError(404, 'preview not found or expired'));
+    openServiceTab();
+
+    await userEvent.type(screen.getByLabelText('Search query'), 'Blur - Song 2');
+    await userEvent.click(screen.getByText('Search'));
+    await screen.findByTestId('preview-audio');
+
+    await userEvent.click(screen.getByText('Add'));
+
+    expect(await screen.findByText('Preview expired — search again')).toBeInTheDocument();
+    expect(screen.getByLabelText('Search query')).toBeInTheDocument();
+    expect(screen.queryByTestId('preview-audio')).not.toBeInTheDocument();
+  });
+
   it('"try another query" discards the current preview and returns to the search form', async () => {
     vi.mocked(tracksApi.searchPreview).mockResolvedValue({ previewId: 'p1' });
     vi.mocked(tracksApi.discardPreview).mockResolvedValue({});

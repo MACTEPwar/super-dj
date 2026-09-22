@@ -72,6 +72,7 @@
     "add": "Add",
     "adding": "Adding…",
     "confirmFailed": "Failed to add the track",
+    "previewExpired": "Preview expired — search again",
     "tryAnother": "Try another query"
   },
   "playlists": {

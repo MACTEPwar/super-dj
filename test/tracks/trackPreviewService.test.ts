@@ -2,7 +2,6 @@ import * as fsPromises from 'fs/promises';
 import { TrackPreviewService } from '../../src/tracks/trackPreviewService';
 import { TrackPreviewRegistry } from '../../src/tracks/trackPreviewRegistry';
 import { MediaSearchError } from '../../src/media/mediaSearchClient';
-import { ApiError } from '../../src/errors';
 
 jest.mock('fs/promises', () => {
   const actual = jest.requireActual('fs/promises');
@@ -151,7 +150,7 @@ describe('TrackPreviewService', () => {
       expect(trackUploadService.upload).toHaveBeenCalledWith('user-1', 'Blur - Song 2', expect.anything(), undefined);
     });
 
-    it('404s for a preview owned by someone else, without calling upload', async () => {
+    it('403s for a preview owned by someone else, without calling upload', async () => {
       const { mediaSearchClient, registry, trackUploadService, generateId } = buildDeps();
       registry.register('preview-1', { userId: 'someone-else', query: 'x', tempFilePath: '/tmp/x/preview-1.mp3', createdAt: Date.now() });
       const service = new TrackPreviewService({ mediaSearchClient, registry, trackUploadService, previewTempDir, generateId });

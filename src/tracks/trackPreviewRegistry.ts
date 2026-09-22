@@ -25,4 +25,16 @@ export class TrackPreviewRegistry {
   delete(previewId: string): void {
     this.previews.delete(previewId);
   }
+
+  // Backstop for the common abandonment paths (switching drawer tabs, closing the drawer) that
+  // never call discardPreview — without this, every abandoned preview leaves a permanent entry in
+  // this process-lifetime Map. Mirrors the temp-file sweep's own age-based reap, but for the
+  // in-memory registry entry rather than the file on disk.
+  pruneOlderThan(maxAgeMs: number, now: number = Date.now()): void {
+    for (const [previewId, entry] of this.previews) {
+      if (now - entry.createdAt > maxAgeMs) {
+        this.previews.delete(previewId);
+      }
+    }
+  }
 }
