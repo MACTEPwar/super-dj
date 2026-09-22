@@ -904,16 +904,23 @@ playlist's in-memory, unsaved-until-"Save" track list — with no separate "add 
 call of its own; nothing reaches `PUT /playlists/{id}/tracks` until the page's existing Save
 button is pressed.
 
-Three things were raised and explicitly accepted during design review rather than engineered
-around (see `docs/superpowers/specs/2026-09-22-track-library-via-media-service-design.md`'s
-"Reviewed and explicitly accepted, not fixed" section for the full reasoning), all backstopped by
-the same 1-hour sweep rather than fixed at the source: abandoning a pending preview by switching
-the drawer's tab or closing the drawer outright (rather than clicking "Другой запрос"/try-another-
+Four things were raised and explicitly accepted during design review rather than engineered around
+(see `docs/superpowers/specs/2026-09-22-track-library-via-media-service-design.md`'s "Reviewed and
+explicitly accepted, not fixed" section for the full reasoning). Three are backstopped by the same
+1-hour sweep rather than fixed at the source: abandoning a pending preview by switching the
+drawer's tab or closing the drawer outright (rather than clicking "Другой запрос"/try-another-
 query, the only path that calls `discardPreview`) leaves the temp file and registry entry to be
 reaped by the sweep; a double-click on "Добавить"/confirm can race `confirm()` against itself,
 since the second call's `moveFile` finds the temp file the first call already renamed away; and a
 track added from the playlist editor is created in the library immediately on confirm even if the
-playlist page's own "Save" is never pressed afterward.
+playlist page's own "Save" is never pressed afterward. **The fourth is NOT sweep-backstopped and
+is currently unmitigated:** switching away from the Upload tab while its own upload request is
+still in flight, then having that request resolve later, can still close the whole drawer out from
+under the streamer — `onSuccess` fires and calls `onOpenChange(false)` regardless of which tab is
+now active, since it's wired on `UploadTab`'s own `useMutation` independently of which tab is
+currently rendered. This is a new edge case the tab switcher itself introduces (a single-tab drawer
+had nothing to switch away *to* mid-request) and is a genuine UX surprise, not a self-healing one
+like the other three.
 
 ## Layout
 
