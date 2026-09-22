@@ -27,7 +27,7 @@ import { TemplateImageService } from './templates/templateImageService';
 import { StreamPresetRepository } from './stream/streamPresetRepository';
 import { InteractionRuleRepository } from './donations/interactionRuleRepository';
 import { StubCurrencyConverter } from './donations/currencyConverter';
-import { HttpMediaSearchClient } from './donations/mediaSearchClient';
+import { HttpMediaSearchClient } from './media/mediaSearchClient';
 import { executeSongRequest } from './donations/songRequestAction';
 import { SongRequestQueue } from './donations/songRequestQueue';
 import { startTempFileCleanupSweep } from './donations/tempFileCleanup';

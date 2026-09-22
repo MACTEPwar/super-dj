@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Track } from '../playlist/types';
-import { MediaSearchClient } from './mediaSearchClient';
+import { MediaSearchClient } from '../media/mediaSearchClient';
 
 export interface StreamInserter {
   insertEphemeralTrack(userId: string, track: Track): void;
