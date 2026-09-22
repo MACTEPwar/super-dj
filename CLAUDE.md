@@ -860,6 +860,61 @@ resolve in the order they were actually issued.
 account's stream every donation is routed to (see "Configuration" below) — there is no per-donor
 or per-channel routing yet.
 
+**Adding library tracks via the media-search service.** Alongside uploading a file, a track can be
+added by typing a text query and previewing the result before it's ever saved to the library.
+`POST /tracks/search-preview` (`{query}`, 400 on a missing/empty string) fetches audio for it from
+the same external media-search service the donation feature uses — `MediaSearchClient`/
+`HttpMediaSearchClient`/`MediaSearchError` moved out of `src/donations/` into `src/media/
+mediaSearchClient.ts` when this landed, since the client itself was never donation-specific, and
+both features now share the one `HttpMediaSearchClient` instance `server.ts` constructs off
+`MEDIA_SEARCH_SERVICE_URL` — no new env var was needed. The fetched audio is written to a
+dedicated temp dir (`path.join(os.tmpdir(), 'super-dj-track-previews')`) and registered in
+`TrackPreviewRegistry` (`src/tracks/trackPreviewRegistry.ts` — in-memory `previewId -> {userId,
+query, tempFilePath, createdAt}`, the same discipline as `MediaMtxAuthRegistry`); a
+`MediaSearchError` from the client maps to a 502 carrying the upstream service's own `detail`
+text. The registry keeps the **original query text**, not just the temp path, for a concrete
+reason: `TrackUploadService.upload()`'s own filename-based name fallback is meaningless for a
+preview file, since its `originalname` is a synthetic `${previewId}.mp3` rather than anything a
+streamer actually typed — so `TrackPreviewService.confirm()` (`src/tracks/trackPreviewService.ts`)
+defaults an empty/omitted name to the registry's stored query instead of falling through to that
+synthetic filename. The frontend streams the temp file straight back for an in-browser `<audio>`
+preview via `GET /tracks/preview/{previewId}` (owner-checked, 404/403 like every other resource
+route, `Cache-Control: no-store`) — **nothing is saved to the library yet** at this point.
+`POST /tracks/from-preview/{previewId}` hands that SAME temp file to the existing
+`TrackUploadService.upload()` **completely unchanged** — no second fetch from the external
+service, no parallel upload code path — and it's that function's own pre-existing `moveFile`
+(a `rename`, falling back to copy+unlink across filesystems) that actually consumes the temp file,
+moving it into `{UPLOADS_DIR}/{userId}/{trackId}/` exactly as a normal upload would.
+`DELETE /tracks/preview/{previewId}` discards an unconfirmed preview explicitly (unlinks the temp
+file, drops the registry entry); a preview abandoned without that explicit discard is reaped by a
+**second** `startTempFileCleanupSweep` instance (`server.ts`, alongside the pre-existing donation
+one, both stopped on shutdown) pointed at that same temp dir — 1 hour max age, 10 min interval,
+deliberately much shorter than the donation feature's 12-hour sweep, since an abandoned preview is
+a forgotten draft the streamer navigated away from, not a track a running stream might still be
+about to play.
+
+`AddTrackDrawer.tsx` (`frontend/src/components/`) gained a tab switcher — "Upload" (`UploadTab`,
+the pre-existing flow, unchanged) and "Через сервис" (`ServiceTab`: query -> search -> listen to
+the preview `<audio>` -> optional name/cover -> confirm). Its `onUploaded: () => void` prop was
+renamed to **`onAdded: (track: Track) => void`** (a breaking change propagated to both call sites,
+`pages/Library.tsx` and the new one in `pages/PlaylistEditor.tsx`), because the playlist editor
+needs the confirmed track's id/name back, not just an "something changed, go refetch" signal: it
+stages the returned track straight into the page's own **pre-existing** local `addTrack()` — the
+playlist's in-memory, unsaved-until-"Save" track list — with no separate "add to playlist" API
+call of its own; nothing reaches `PUT /playlists/{id}/tracks` until the page's existing Save
+button is pressed.
+
+Three things were raised and explicitly accepted during design review rather than engineered
+around (see `docs/superpowers/specs/2026-09-22-track-library-via-media-service-design.md`'s
+"Reviewed and explicitly accepted, not fixed" section for the full reasoning), all backstopped by
+the same 1-hour sweep rather than fixed at the source: abandoning a pending preview by switching
+the drawer's tab or closing the drawer outright (rather than clicking "Другой запрос"/try-another-
+query, the only path that calls `discardPreview`) leaves the temp file and registry entry to be
+reaped by the sweep; a double-click on "Добавить"/confirm can race `confirm()` against itself,
+since the second call's `moveFile` finds the temp file the first call already renamed away; and a
+track added from the playlist editor is created in the library immediately on confirm even if the
+playlist page's own "Save" is never pressed afterward.
+
 ## Layout
 
 ```
@@ -874,7 +929,13 @@ src/
                             passwordHash.ts (bcrypt hash/verify)
   tracks/                   trackRepository.ts (Prisma), trackUploadService.ts (multer file ->
                             {UPLOADS_DIR}/{userId}/{trackId}/, ffprobe duration cached on create),
-                            trackRoutes.ts
+                            trackPreviewRegistry.ts (in-memory previewId -> {userId, query,
+                            tempFilePath, createdAt}, same discipline as MediaMtxAuthRegistry),
+                            trackPreviewService.ts (search/getPreviewPath/confirm/discard — the
+                            add-a-track-by-search-query flow, see "Adding library tracks via the
+                            media-search service" below), trackRoutes.ts (incl.
+                            POST /search-preview, GET /preview/:previewId,
+                            POST /from-preview/:previewId, DELETE /preview/:previewId)
   playlists/                playlistRepository.ts (Prisma, ordered PlaylistTrack join),
                             playlistRoutes.ts
   destinations/             destinationRepository.ts (Prisma), destinationRoutes.ts,
@@ -886,6 +947,11 @@ src/
                             (interface + DestinationLifecyclePhase), customRtmpProvider.ts /
                             youtubeProvider.ts (StreamDestinationProvider impls)
   crypto/streamKeyCipher.ts AES-256-GCM encrypt/decrypt for stream keys at rest
+  media/mediaSearchClient.ts MediaSearchClient/HttpMediaSearchClient/MediaSearchError — the
+                            external media-search HTTP client, shared by
+                            donations/songRequestAction.ts and tracks/trackPreviewService.ts
+                            (moved here out of donations/ when the track-library-via-media-service
+                            feature landed, since it's no longer donation-specific)
   stream/                   localStreamManager.ts (the one manager: per-userId StreamController +
                             per-userId Map<destinationId, DestinationForward>; concurrency/duration
                             caps, auth-registry lifecycle, 'starting'/previewReady),
@@ -930,9 +996,9 @@ src/
                             independent of satori/resvg)
   donations/                donatelloWebhookRoutes.ts (POST /webhooks/donatello, X-Key
                             authenticated), donationEvent.ts (payload parsing), ruleMatcher.ts
-                            (parseCommand/matchRules), currencyConverter.ts, mediaSearchClient.ts
-                            (external media-search HTTP client), songRequestAction.ts
-                            (executeSongRequest — fetch, temp-write, insertEphemeralTrack),
+                            (parseCommand/matchRules), currencyConverter.ts, songRequestAction.ts
+                            (executeSongRequest — fetch, temp-write, insertEphemeralTrack; fetches
+                            through media/mediaSearchClient.ts, above),
                             songRequestQueue.ts (SongRequestQueue — serializes donation-triggered
                             requests so play order matches arrival order, not download speed),
                             tempFileCleanup.ts (age-based sweep backstop),
@@ -955,14 +1021,19 @@ frontend/                   React + Vite SPA
                             covers /local-stream/* — start, transport, the destination toggle, the
                             combined status/SSE payload and the preview URLs;
                             streamPresets.ts covers /stream-presets; interactionRules.ts covers
-                            /interaction-rules)
+                            /interaction-rules; tracks.ts covers /tracks incl.
+                            searchPreview/previewUrl/confirmPreview/discardPreview)
     pages/                  route page components (incl. Stream.tsx — THE stream page: start form,
                             preset picker, transport controls, destination checklist, embedded
                             preview; Templates.tsx list/create/delete,
                             TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor;
-                            Donations.tsx — InteractionRule list/create/edit/delete)
+                            Donations.tsx — InteractionRule list/create/edit/delete;
+                            PlaylistEditor.tsx — reuses AddTrackDrawer to stage a newly-added
+                            track into its own local, unsaved-until-"Save" track list)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
-                            AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal;
+                            AddTrackDrawer — two tabs, "Upload" (UploadTab) and "Через сервис"
+                            (ServiceTab, search/preview/confirm against /tracks/search-preview
+                            etc.), CreatePlaylistDrawer, AddDestinationModal;
                             DestinationToggles.tsx — the checklist, purely local intent, no
                             backend calls of its own; DestinationSettingsDrawer.tsx — the
                             commit-time settings step, one section per destination that needs one;
@@ -1213,8 +1284,11 @@ never defaulted, because a defaulted shared secret is a backdoor), `DONATELLO_CA
 shared secret `POST /webhooks/donatello` compares against the inbound `X-Key` header),
 `DONATION_TARGET_USER_ID` (the single account id every donation-triggered song request is routed
 to — MVP has no per-donor/per-channel routing, see "Donation-triggered song requests" above), and
-`MEDIA_SEARCH_SERVICE_URL` (base URL of the external media-search service `songRequestAction.ts`
-fetches audio from). The app throws at boot if any of the three is unset.
+`MEDIA_SEARCH_SERVICE_URL` (base URL of the external media-search service — fetched from by both
+`songRequestAction.ts`'s donation-triggered song requests and `TrackPreviewService.search()`'s
+add-a-track-by-query flow, see "Adding library tracks via the media-search service" above; no new
+env var was needed when the latter was added, since both share one `HttpMediaSearchClient`
+instance constructed once in `server.ts`). The app throws at boot if any of the three is unset.
 Optional: `PORT` (3000), `SESSION_TTL_DAYS` (30), `UPLOADS_DIR` (`/data/uploads`), `FIFO_DIR`
 (`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`, `MEDIAMTX_RTMP_URL`
 (`rtmp://mediamtx:1935`), `MEDIAMTX_HLS_URL` (`http://mediamtx:8888`), `MEDIAMTX_AUTH_PORT` (3001),
