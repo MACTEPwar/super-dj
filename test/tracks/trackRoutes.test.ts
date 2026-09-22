@@ -5,18 +5,21 @@ import * as os from 'os';
 import * as path from 'path';
 import { createTrackRouter } from '../../src/tracks/trackRoutes';
 import { errorHandler } from '../../src/api/errorHandler';
+import { MediaSearchError } from '../../src/media/mediaSearchClient';
+import { ApiError } from '../../src/errors';
 
-function buildApp(overrides: { getCurrentUser?: any; uploadService?: any; trackRepository?: any } = {}) {
+function buildApp(overrides: { getCurrentUser?: any; uploadService?: any; trackRepository?: any; trackPreviewService?: any } = {}) {
   const authService: any = {
     getCurrentUser: overrides.getCurrentUser ?? jest.fn().mockResolvedValue({ id: 'user-1', email: 'a@example.com' }),
   };
   const uploadService: any = overrides.uploadService ?? { upload: jest.fn() };
   const trackRepository: any = overrides.trackRepository ?? { listByUser: jest.fn(), findById: jest.fn(), deleteById: jest.fn() };
+  const trackPreviewService: any = overrides.trackPreviewService ?? { search: jest.fn(), getPreviewPath: jest.fn(), confirm: jest.fn(), discard: jest.fn() };
   const app = express();
   app.use(express.json());
-  app.use('/tracks', createTrackRouter(authService, uploadService, trackRepository));
+  app.use('/tracks', createTrackRouter(authService, uploadService, trackRepository, trackPreviewService));
   app.use(errorHandler);
-  return { app, uploadService, trackRepository };
+  return { app, uploadService, trackRepository, trackPreviewService };
 }
 
 describe('track routes', () => {
@@ -191,5 +194,104 @@ describe('track routes', () => {
     const res = await request(app).patch('/tracks/t1').send({});
     expect(res.status).toBe(400);
     expect(trackRepository.updateOverlayOverride).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /tracks/search-preview', () => {
+  it('400s when query is missing or not a string', async () => {
+    const { app, trackPreviewService } = buildApp();
+    const res = await request(app).post('/tracks/search-preview').send({});
+    expect(res.status).toBe(400);
+    expect(trackPreviewService.search).not.toHaveBeenCalled();
+  });
+
+  it('400s when query is an empty string', async () => {
+    const { app, trackPreviewService } = buildApp();
+    const res = await request(app).post('/tracks/search-preview').send({ query: '   ' });
+    expect(res.status).toBe(400);
+    expect(trackPreviewService.search).not.toHaveBeenCalled();
+  });
+
+  it('200s with the previewId on success', async () => {
+    const trackPreviewService: any = { search: jest.fn().mockResolvedValue({ previewId: 'p1' }) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).post('/tracks/search-preview').send({ query: 'Blur - Song 2' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ previewId: 'p1' });
+    expect(trackPreviewService.search).toHaveBeenCalledWith('user-1', 'Blur - Song 2');
+  });
+
+  it('maps a MediaSearchError from the service to 502 with its message', async () => {
+    const trackPreviewService: any = { search: jest.fn().mockRejectedValue(new MediaSearchError('media search service returned 502: not found')) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).post('/tracks/search-preview').send({ query: 'nonexistent' });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('media search service returned 502: not found');
+  });
+});
+
+describe('GET /tracks/preview/:previewId', () => {
+  it('streams the preview file for its owner', async () => {
+    const trackPreviewService: any = { getPreviewPath: jest.fn().mockResolvedValue(__filename) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).get('/tracks/preview/p1');
+    expect(res.status).toBe(200);
+    expect(trackPreviewService.getPreviewPath).toHaveBeenCalledWith('user-1', 'p1');
+  });
+
+  it('404s when the service throws 404', async () => {
+    const trackPreviewService: any = { getPreviewPath: jest.fn().mockRejectedValue(new ApiError(404, 'preview not found or expired')) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).get('/tracks/preview/missing');
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /tracks/from-preview/:previewId', () => {
+  it('confirms the preview and returns the resulting track summary', async () => {
+    const trackPreviewService: any = { confirm: jest.fn().mockResolvedValue({ id: 't1', name: 'My Song', durationSeconds: 10, hasCover: false }) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).post('/tracks/from-preview/p1').field('name', 'My Song');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: 't1', name: 'My Song', durationSeconds: 10, hasCover: false });
+    expect(trackPreviewService.confirm).toHaveBeenCalledWith('user-1', 'p1', 'My Song', undefined);
+  });
+
+  it('passes an attached cover file through', async () => {
+    const trackPreviewService: any = { confirm: jest.fn().mockResolvedValue({ id: 't1', name: 'x', durationSeconds: 1, hasCover: true }) };
+    const { app } = buildApp({ trackPreviewService });
+    await request(app).post('/tracks/from-preview/p1').attach('cover', Buffer.from('fake-png'), 'cover.png');
+    expect(trackPreviewService.confirm).toHaveBeenCalledWith('user-1', 'p1', undefined, expect.objectContaining({ originalname: 'cover.png' }));
+  });
+
+  it('rejects an unsupported cover format', async () => {
+    const { app, trackPreviewService } = buildApp();
+    const res = await request(app).post('/tracks/from-preview/p1').attach('cover', Buffer.from('data'), 'cover.gif');
+    expect(res.status).toBe(400);
+    expect(trackPreviewService.confirm).not.toHaveBeenCalled();
+  });
+
+  it('404s when the service throws 404', async () => {
+    const trackPreviewService: any = { confirm: jest.fn().mockRejectedValue(new ApiError(404, 'preview not found or expired')) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).post('/tracks/from-preview/missing');
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('DELETE /tracks/preview/:previewId', () => {
+  it('discards an owned preview', async () => {
+    const trackPreviewService: any = { discard: jest.fn().mockResolvedValue(undefined) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).delete('/tracks/preview/p1');
+    expect(res.status).toBe(200);
+    expect(trackPreviewService.discard).toHaveBeenCalledWith('user-1', 'p1');
+  });
+
+  it('404s when the service throws 404', async () => {
+    const trackPreviewService: any = { discard: jest.fn().mockRejectedValue(new ApiError(404, 'preview not found or expired')) };
+    const { app } = buildApp({ trackPreviewService });
+    const res = await request(app).delete('/tracks/preview/missing');
+    expect(res.status).toBe(404);
   });
 });
