@@ -1,9 +1,12 @@
 import { WindowRow } from '../playlist/window';
 
-export const INSERT_ANIMATION_MS = 600;
-const GAP_END_MS = 360;
-const FADE_IN_START_MS = 240;
-const SLIDE_IN_PX = 24;
+// Tuned 2026-09-24 from 600/360/240/24 via an interactive preview the user picked values from
+// (600->800 total, 24->36px slide); GAP_END_MS/FADE_IN_START_MS keep the original 60%/40% split
+// of the total so the animation's shape is unchanged, just stretched.
+export const INSERT_ANIMATION_MS = 800;
+const GAP_END_MS = 480;
+const FADE_IN_START_MS = 320;
+const SLIDE_IN_PX = 36;
 // The new row's box grows to 1.5 x fontSize. That is above its natural single-line height (~1.2x),
 // so the gap finishes opening a little early, but no row-height model is ever needed: the flex
 // column pushes everything below it down by exactly the row's real height.

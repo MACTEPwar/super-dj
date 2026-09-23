@@ -58,16 +58,16 @@ describe('PlaylistWindowFeeder', () => {
     feeder.close();
   });
 
-  it('animate: ~600ms, at most one render in flight, ends on the settled TO frame', async () => {
+  it('animate: ~800ms, at most one render in flight, ends on the settled TO frame', async () => {
     const { feeder, pipe, renderFrame, requests, advance } = setup();
     let inFlight = 0; let maxInFlight = 0;
     renderFrame.mockImplementation(async (req: any) => { requests.push(req); inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await new Promise((r) => setTimeout(r, 20)); inFlight--; return Buffer.alloc(FRAME, 200); });
     feeder.attach(pipe);
     let finished = false;
     const done = feeder.animate(PLAN).then(() => { finished = true; });
-    await advance(500);
+    await advance(650);
     expect(finished).toBe(false);
-    await advance(300);
+    await advance(350);
     await done;
     expect(maxInFlight).toBe(1);
     expect(requests.length).toBeGreaterThan(5);

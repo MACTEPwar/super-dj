@@ -45,14 +45,14 @@ describe('animated rows', () => {
   it('t=0: the new row has zero height and is invisible; the pushed-out row is fully visible below', () => {
     const rows = animatedRowsAt(t, 0);
     expect(rows.map((r) => r.key)).toEqual(['b:0', 'b:1', 'i:0', 'b:2', 'b:3']);
-    expect(byKey(rows, 'i:0')).toMatchObject({ maxHeightFactor: 0, opacity: 0, offsetX: 24 });
+    expect(byKey(rows, 'i:0')).toMatchObject({ maxHeightFactor: 0, opacity: 0, offsetX: 36 });
     expect(byKey(rows, 'b:3')).toMatchObject({ opacity: 1 });
     expect(Object.keys(byKey(rows, 'b:2'))).toEqual(['key', 'text']); // kept rows untouched
   });
 
-  it('by 360ms the gap is fully open and the pushed-out row gone; the content only starts after 240ms', () => {
-    expect(byKey(animatedRowsAt(t, 200), 'i:0').opacity).toBe(0);
-    const rows = animatedRowsAt(t, 360);
+  it('by 480ms the gap is fully open and the pushed-out row gone; the content only starts after 320ms', () => {
+    expect(byKey(animatedRowsAt(t, 250), 'i:0').opacity).toBe(0);
+    const rows = animatedRowsAt(t, 480);
     expect(byKey(rows, 'i:0').maxHeightFactor).toBeCloseTo(1.5);
     expect(byKey(rows, 'b:3').opacity).toBe(0);
   });
@@ -64,7 +64,7 @@ describe('animated rows', () => {
 
   it('gap growth is monotonic and never overshoots', () => {
     let last = -1;
-    for (let ms = 0; ms <= 600; ms += 20) {
+    for (let ms = 0; ms <= INSERT_ANIMATION_MS; ms += 20) {
       const f = byKey(animatedRowsAt(t, ms), 'i:0')?.maxHeightFactor ?? 1.5;
       expect(f).toBeGreaterThanOrEqual(last);
       expect(f).toBeLessThanOrEqual(1.5);
