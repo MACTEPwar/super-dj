@@ -22,4 +22,12 @@ export class UserRepository {
   findById(id: string): Promise<User | null> {
     return this.prisma.user.findUnique({ where: { id } });
   }
+
+  findByRequestPageToken(token: string): Promise<User | null> {
+    return this.prisma.user.findUnique({ where: { requestPageToken: token } });
+  }
+
+  async setRequestPageToken(userId: string, token: string | null): Promise<void> {
+    await this.prisma.user.update({ where: { id: userId }, data: { requestPageToken: token } });
+  }
 }
