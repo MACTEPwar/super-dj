@@ -91,4 +91,62 @@ describe('PlaylistQueue', () => {
       expect(queue.previous()?.name).toBe('z');
     });
   });
+
+  describe('windowSnapshot', () => {
+    const names = (rows: { text: string }[]) => rows.map((r) => r.text);
+    const base = () => new PlaylistQueue(['a', 'b', 'c', 'd', 'e'].map(track));
+
+    it('shows base context around a base current track', () => {
+      const q = base();
+      q.next(); q.next(); // c
+      expect(names(q.windowSnapshot(2, 7))).toEqual(['  a', '  b', '▶ c', '  d', '  e']);
+      expect(q.windowSnapshot(2, 7).map((r) => r.key)).toEqual(['b:0', 'b:1', 'b:2', 'b:3', 'b:4']);
+    });
+
+    it('lists queued inserted tracks right after the current one (C1)', () => {
+      const q = base();
+      q.insertNext(track('z'));
+      expect(names(q.windowSnapshot(2, 7))).toEqual(['▶ a', '  z', '  b', '  c', '  d', '  e']);
+      expect(q.windowSnapshot(2, 7)[1].key).toBe('i:0');
+    });
+
+    it('caps the after-section, inserted rows first', () => {
+      const q = base();
+      q.insertNext(track('y'));
+      q.insertNext(track('z'));
+      expect(names(q.windowSnapshot(0, 3))).toEqual(['▶ a', '  y', '  z', '  b']);
+    });
+
+    it('an inserted current track keeps its key and anchors before-context on positionInBase', () => {
+      const q = base();
+      q.next(); // b
+      q.insertNext(track('z'));
+      q.next(); // z
+      const rows = q.windowSnapshot(2, 7);
+      expect(names(rows)).toEqual(['  a', '  b', '▶ z', '  c', '  d', '  e']);
+      expect(rows[2]).toEqual({ key: 'i:0', text: '▶ z', isCurrent: true });
+    });
+
+    it('two inserts of the same Track object are two distinct rows (B9)', () => {
+      const q = base();
+      const z = track('z');
+      q.insertNext(z);
+      q.insertNext(z);
+      const keys = q.windowSnapshot(0, 7).map((r) => r.key);
+      expect(keys.slice(1, 3)).toEqual(['i:0', 'i:1']);
+    });
+
+    it('previous() restores the key the track had', () => {
+      const q = base();
+      q.insertNext(track('z'));
+      q.next(); // z (i:0)
+      q.next(); // b
+      q.previous(); // back to z
+      expect(q.windowSnapshot(0, 0)).toEqual([{ key: 'i:0', text: '▶ z', isCurrent: true }]);
+    });
+
+    it('empty playlist -> no rows', () => {
+      expect(new PlaylistQueue([]).windowSnapshot(2, 7)).toEqual([]);
+    });
+  });
 });
