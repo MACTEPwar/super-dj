@@ -326,6 +326,9 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
         : undefined,
       gifOverlays,
       canvasPlacement,
+      // Wired to a real value in a later task (the playlist-window insert-burst layer); this
+      // task's PersistentEncoderParams change only requires the key to be explicitly decided.
+      playlistWindow: undefined,
     }),
     createPulseVisualizer: equalizerElement
       ? () => new PulseVisualizer({

@@ -13,7 +13,7 @@ export interface PersistentEncoderParams {
   equalizer?: EqualizerConfig;
   gifOverlays?: GifOverlayConfig[];
   canvasPlacement?: CanvasPlacement;
-  playlistWindow?: PlaylistWindowLayerConfig;
+  playlistWindow: PlaylistWindowLayerConfig | undefined;
 }
 
 // Spawned once in StreamController.start() and never restarted for the life of the session —
