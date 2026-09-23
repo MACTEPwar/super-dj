@@ -4,9 +4,11 @@ import userEvent from '@testing-library/user-event';
 import { Route, Routes } from 'react-router-dom';
 import Donations from './Donations';
 import { interactionRulesApi } from '../api/interactionRules';
+import { requestPageApi, requestPageUrl } from '../api/requestPage';
 import { renderWithProviders } from '../test/renderWithProviders';
 
 vi.mock('../api/interactionRules');
+vi.mock('../api/requestPage');
 
 function renderPage() {
   return renderWithProviders(
@@ -28,7 +30,10 @@ const RULE = {
 };
 
 describe('Donations', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(requestPageApi.get).mockResolvedValue({ token: null });
+  });
 
   it("lists the user's rules", async () => {
     vi.mocked(interactionRulesApi.list).mockResolvedValue([RULE]);
@@ -132,5 +137,36 @@ describe('Donations', () => {
 
     expect(interactionRulesApi.remove).toHaveBeenCalledWith('r1');
     await waitFor(() => expect(screen.getByText('No rules yet.')).toBeInTheDocument());
+  });
+
+  it('shows the share link and creates one', async () => {
+    vi.mocked(interactionRulesApi.list).mockResolvedValue([]);
+    vi.mocked(requestPageApi.get).mockResolvedValueOnce({ token: null }).mockResolvedValueOnce({ token: 'f'.repeat(32) });
+    vi.mocked(requestPageApi.rotate).mockResolvedValue({ token: 'f'.repeat(32) });
+    vi.mocked(requestPageUrl).mockImplementation((t: string) => `https://app.example/r/${t}`);
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Create link' }));
+    expect(requestPageApi.rotate).toHaveBeenCalled();
+    expect(await screen.findByText(`https://app.example/r/${'f'.repeat(32)}`)).toBeInTheDocument();
+  });
+
+  it('warns when no enabled libraryTrackRequest rule exists', async () => {
+    vi.mocked(interactionRulesApi.list).mockResolvedValue([RULE]);
+    vi.mocked(requestPageApi.get).mockResolvedValue({ token: 'f'.repeat(32) });
+    renderPage();
+    expect(await screen.findByText(/No enabled "Exact track" rule/)).toBeInTheDocument();
+  });
+
+  it('creates a libraryTrackRequest rule, swapping the untouched default keyword', async () => {
+    vi.mocked(interactionRulesApi.list).mockResolvedValue([]);
+    vi.mocked(interactionRulesApi.create).mockResolvedValue({ ...RULE, actionType: 'libraryTrackRequest', commandKeyword: 'track' });
+    renderPage();
+    await userEvent.click(await screen.findByText('+ Add rule'));
+    await userEvent.selectOptions(screen.getByRole('combobox'), 'libraryTrackRequest');
+    const amount = screen.getByRole('spinbutton');
+    await userEvent.clear(amount);
+    await userEvent.type(amount, '50');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(interactionRulesApi.create).toHaveBeenCalledWith({ actionType: 'libraryTrackRequest', enabled: true, minAmount: 50, commandKeyword: 'track' }));
   });
 });
