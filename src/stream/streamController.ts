@@ -382,15 +382,17 @@ export class StreamController {
 
   // The ONE "queue this next" path: plays after the current track ends, never interrupts, joins
   // history normally unless ephemeral (see PlaylistQueue.next()). Used by playByName and by every
-  // donation request (free-text via songRequestAction.ts, exact via libraryTrackRequestAction.ts).
+  // donation request (free-text via songRequestAction.ts, exact via libraryTrackRequestAction.ts,
+  // Phase A).
   enqueueTrack(track: Track): void {
     this.deps.queue.insertNext(track);
     this.deps.onStatusChanged?.();
   }
 
   status(): StreamStatus {
-    // Only while a session exists: an idle/errored controller keeps its queue (the entry survives
-    // stop()), and reporting queue.current() then would claim a track is playing when none is.
+    // Only while a session exists: an idle or errored controller keeps its own queue
+    // (LocalStreamManager retains only an errored entry — an idle one is discarded on stop()), and
+    // reporting queue.current() then would claim a track is playing when none is.
     const live = this.state === 'streaming' || this.state === 'paused' || this.state === 'reconnecting';
     return {
       state: this.state,

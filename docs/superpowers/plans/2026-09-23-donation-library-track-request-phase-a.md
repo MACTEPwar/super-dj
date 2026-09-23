@@ -490,6 +490,18 @@ git commit -m "feat(request-page): public token-gated live playlist endpoint"
 - Consumes: `StreamInserter` from `songRequestAction.ts` (`enqueueTrack(userId, track)`, Phase B); `TrackRepository.findById`.
 - Produces: `extractTrackId(query: string): string | null`; `executeLibraryTrackRequest(deps: LibraryTrackRequestDeps, query: string): Promise<LibraryTrackRequestResult>`; `LibraryTrackRequestResult = { ok: true } | { ok: false; reason: 'trackIdMissing' | 'trackNotFound' | 'noActiveStream'; message: string }`.
 
+**Known pre-existing gap this task inherits (not introduced here, and not fixed by A11's "`error` is
+not live" rule above — that rule only governs the public page's display, not `enqueueTrack` itself):**
+`LocalStreamManager.require()` currently accepts a retained `error`-state entry, so `enqueueTrack()`
+does NOT throw for a session that ended in `error` — it silently queues into a controller that will
+never play anything, and `executeLibraryTrackRequest` reports `{ ok: true }` for a track nobody will
+ever hear. The old `insertEphemeralTrack` had the exact same gap, so this is not new — but this task
+adds a second call site (`libraryTrackRequestAction.ts`, alongside Phase B's `songRequestAction.ts`)
+that inherits it. Decide explicitly when implementing this task whether `require()` should reject an
+`error`-state session (matching the A11 "not live" intent) or whether this stays deliberately
+deferred — don't let it pass unnoticed just because the public page's own `live` flag already says
+`false` for `error`.
+
 - [ ] **Step 1: Failing tests**
 
 ```ts

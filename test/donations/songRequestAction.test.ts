@@ -31,9 +31,7 @@ describe('executeSongRequest', () => {
     expect(track.coverPath).toBeNull();
     expect(await fs.readFile(track.audioPath)).toEqual(audioBytes);
     expect(typeof track._onFinished).toBe('function');
-    const inserted = streamInserter.enqueueTrack.mock.calls[0][1];
-    expect(inserted.ephemeral).toBe(true);
-    expect(typeof inserted._onFinished).toBe('function');
+    expect(track.ephemeral).toBe(true);
   });
 
   it('deletes the temp file when _onFinished is called', async () => {

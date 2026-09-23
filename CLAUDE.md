@@ -792,7 +792,8 @@ or above the rule's `minAmount` (converted to UAH) fetches audio for `<query>` f
 own external media-search service and is **queued to play next**, exactly like `play`-by-name: it
 plays once the current track ends, never cutting it off (it used to interrupt and resume; that was
 removed — see `docs/superpowers/specs/2026-09-23-donation-library-track-request-design.md`, Phase
-B). The whole module lives in
+B). A donation arriving while the stream is `paused` no longer wakes it either — it just queues,
+and plays once the streamer manually resumes. The whole module lives in
 `src/donations/`: `donatelloWebhookRoutes.ts` (`POST /webhooks/donatello` — the inbound event,
 authenticated by a shared `X-Key` header rather than the session cookie, since Donatello is not a
 browser), `donationEvent.ts` (payload parsing), `ruleMatcher.ts` (`parseCommand`/`matchRules` —

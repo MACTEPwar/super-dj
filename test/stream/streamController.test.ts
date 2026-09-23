@@ -635,7 +635,7 @@ describe('StreamController', () => {
   it('calls a track\'s _onFinished exactly once, right when its own decode process closes', async () => {
     const { deps, queue, children } = buildDeps();
     const onFinished = jest.fn();
-    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
     const controller = new StreamController(deps);
     await controller.start(); // feeds 'a' -> children[0]
 
@@ -652,10 +652,10 @@ describe('StreamController', () => {
     expect(onFinished).toHaveBeenCalledTimes(1);
   });
 
-  it('does not fire _onFinished a second time when previous() re-feeds the same ephemeral track (regression: PlaylistQueue.next() pushes the finished track into history, and previous() can pop it back out and re-feed it through a fresh decode child)', async () => {
+  it('a re-fed track whose hook already fired never fires it again (defense in depth)', async () => {
     const { deps, queue, children } = buildDeps();
     const onFinished = jest.fn();
-    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
     const controller = new StreamController(deps);
     await controller.start(); // feeds 'a' -> children[0]
 
@@ -686,7 +686,7 @@ describe('StreamController', () => {
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const onFinished = jest.fn(() => { throw new Error('boom'); });
-      const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+      const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
       const controller = new StreamController(deps);
       await controller.start(); // feeds 'a' -> children[0]
 
