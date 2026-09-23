@@ -1031,10 +1031,24 @@ export async function renderPlaylistWindowFrame(req: PlaylistWindowFrameRequest)
 Run: `npx jest test/render` then `npm run build` (must emit `dist/render/playlistWindowRenderWorker.js`).
 Expected: PASS; the file exists.
 
-- [ ] **Step 5: Real worker-boundary + gradient check (CLAUDE.md "Verify against real binaries")** — in the Docker image (real fonts), after `npm run build`:
+- [ ] **Step 5: Real worker-boundary + gradient check (CLAUDE.md "Verify against real binaries")** — in the repo's own image (real fonts, real ffmpeg), built and run **in isolation**:
+  - There is no local Docker daemon in this dev environment, so use the remote host 192.168.14.26.
+  - Never use `docker compose` there, and never start, stop, attach to or depend on the running `super-dj-*` compose project (the live demo stand) or any other service on that host.
+  - Build a standalone image from the feature branch under a unique throwaway tag, run it with `docker run --rm --network none`, and remove it afterwards.
 
 ```bash
-docker compose run --rm super-dj node -e "
+TAG=super-dj-verify-$(date +%s)
+git archive --format=tar HEAD | ssh 192.168.14.26 "mkdir -p /tmp/$TAG && tar -x -C /tmp/$TAG && docker build -t $TAG /tmp/$TAG"
+# The image's own build runs `npm run build` (check the Dockerfile); if it doesn't, add `sh -c 'npm run build && …'`.
+ssh 192.168.14.26 "docker run --rm --name $TAG --network none $TAG node -e \"<the script below>\""
+# cleanup, always:
+ssh 192.168.14.26 "docker rmi $TAG; rm -rf /tmp/$TAG"
+```
+
+The script to run (pass it via a heredoc-written file mounted with `-v /tmp/$TAG/verify.js:/app/verify.js:ro` and `node verify.js` if quoting gets awkward):
+
+```bash
+node -e "
 const { renderPlaylistWindowFrame } = require('./dist/render/playlistWindowRenderPool');
 const { computePlaylistWindowRegion } = require('./dist/render/playlistWindowGeometry');
 const base = { type:'playlist', x:512, y:160, width:700, fontSize:22, style:{fontFamily:'DejaVu Sans',bold:false,italic:false} };
@@ -1619,7 +1633,7 @@ git commit -m "feat(stream): PlaylistWindowAnimator — overlap-safe canvas/pipe
 ### Task 8: Encoder args, `pipe:7`, spawner
 
 **Files:**
-- Modify: `src/ffmpeg/persistentEncoderArgs.ts`, `src/ffmpeg/persistentEncoder.ts` (pass-through, if it forwards params explicitly), `src/ffmpeg/types.ts`, `src/server.ts` (`createPipeSpawner`)
+- Modify: `src/ffmpeg/persistentEncoderArgs.ts`, `src/ffmpeg/persistentEncoder.ts` (**required:** add `playlistWindow?: PlaylistWindowLayerConfig` to `PersistentEncoderParams` — it passes `this.params` straight to `buildPersistentEncoderArgs`, so without the field `streamScene.ts` can't set it; export `type PlaylistWindowLayerConfig = { x: number; y: number; width: number; height: number; fps: number; layer: 'below' | 'top' }` from `persistentEncoderArgs.ts` and import it there, exactly as `EqualizerConfig`/`GifOverlayConfig` already are), `src/ffmpeg/types.ts`, `src/server.ts` (`createPipeSpawner`)
 - Test: `test/ffmpeg/persistentEncoderArgs.test.ts` (plus any fake encoder child in `test/ffmpeg/persistentEncoder.test.ts` / `test/server.test.ts`)
 
 **Interfaces:**
@@ -1715,7 +1729,7 @@ Add a helper right before the gif loop, and call it at the two positions:
   readonly playlistWindowPipe: NodeJS.WritableStream;
 ```
 
-`server.ts` `createPipeSpawner`: add an eighth `'pipe'` to stdio; `const playlistWindowPipe = stdio[7];` with `playlistWindowPipe.on('error', (err) => { console.error('playlist window pipe write error', err); });`; include it in the `Object.assign`; update the fd comment ("fd3/fd4/fd5/fd6/fd7 are video/audio/pulse/above-canvas/playlist-window"). If `PersistentEncoder` forwards named options into `buildPersistentEncoderArgs`, add `playlistWindow` there. Add `playlistWindowPipe: {}` to every fake encoder child in tests.
+`server.ts` `createPipeSpawner`: add an eighth `'pipe'` to stdio; `const playlistWindowPipe = stdio[7];` with `playlistWindowPipe.on('error', (err) => { console.error('playlist window pipe write error', err); });`; include it in the `Object.assign`; update the fd comment ("fd3/fd4/fd5/fd6/fd7 are video/audio/pulse/above-canvas/playlist-window"). `persistentEncoder.ts`: add `playlistWindow?: PlaylistWindowLayerConfig;` to `PersistentEncoderParams` (see Files — required, not optional). Use the exported `PlaylistWindowLayerConfig` type for the `playlistWindow` param in `buildPersistentEncoderArgs` too. Add `playlistWindowPipe: {}` to every fake encoder child in tests.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -1747,7 +1761,9 @@ git commit -m "feat(ffmpeg): optional yuva420p pipe:7 burst layer composited at 
 
 - [ ] **Step 1: Failing tests**
 
-`test/stream/streamScene.test.ts` — change every existing `scene.buildOverlay(track)` call to `scene.buildOverlay(track, [])`. The existing `elements: DEFAULT_TEMPLATE_ELEMENTS` assertion stays **unchanged**: the playlist is still baked. Add a new `describe`:
+`test/stream/streamScene.test.ts`:
+- **Delete** the two tests `'windows the playlist lines around a base anchor for a donation track not in the playlist'` and `'shows just the donation track when no base anchor is supplied at all'`. They call `buildOverlay(track, 0)` / `buildOverlay(track)` and assert window lines computed from a base anchor, behaviour this task removes (the lines now come from the caller's rows, and `windowSnapshot` is tested in Task 2).
+- Change every remaining `scene.buildOverlay(track)` call to `scene.buildOverlay(track, [])`. The existing `elements: DEFAULT_TEMPLATE_ELEMENTS` assertion stays **unchanged**: the playlist is still baked. Add a new `describe`:
 
 ```ts
 describe('buildStreamScene — playlist window burst layer (pipe:7)', () => {
@@ -1887,6 +1903,21 @@ describe('buildStreamScene — playlist window burst layer (pipe:7)', () => {
       expect(last.variant).toBe('B');
     });
 
+    it('paused -> next() -> a donation arrives: no bake/burst until resume (the screen must not show the next track early)', async () => {
+      const { deps, queue, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.pause();
+      queue.current.mockReturnValue(track('b')); // next() moved the queue while paused; nothing was fed
+      await controller.next();
+      deps.buildOverlay.mockClear();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      expect(deps.buildOverlay).not.toHaveBeenCalled();
+      expect(feeder.showRows).not.toHaveBeenCalled();
+    });
+
     it('enqueueTrack while idle/reconnecting runs no burst (C7)', () => {
       const { deps, feeder } = withFeeder();
       const controller = new StreamController(deps);
@@ -1984,7 +2015,9 @@ Expected: FAIL.
   // false when a track change (feedCurrentTrack bumps overlayGeneration) made the result stale.
   private async bakeCanvas(rows: WindowRow[], opts: { omitLivePlaylist: boolean }): Promise<boolean> {
     const generation = this.overlayGeneration;
-    const track = this.deps.queue.current();
+    // The track actually on screen — NOT queue.current(), which a paused next()/previous() moves
+    // without feeding (the spec: those change nothing on screen until resume).
+    const track = this.bakedTrack;
     if (!track || !this.canvasFeeder) return false;
     const overlay = await this.deps.buildOverlay(track, rows, opts);
     if (generation !== this.overlayGeneration || !this.canvasFeeder) return false;
@@ -1997,15 +2030,19 @@ Expected: FAIL.
   }
 ```
 
-- `feedCurrentTrack()` at the very top: `this.playlistAnimator?.abort(); this.overlayGeneration += 1; const rows = this.windowRows();` then `const overlay = await this.deps.buildOverlay(track, rows);`, and after the existing generation/state re-check set `this.bakedRows = rows;` next to `this.currentOverlay = overlay;`.
+- `feedCurrentTrack()` at the very top: `this.playlistAnimator?.abort(); this.overlayGeneration += 1; const rows = this.windowRows();` then `const overlay = await this.deps.buildOverlay(track, rows);`, and after the existing generation/state re-check set `this.bakedRows = rows; this.bakedTrack = track;` next to `this.currentOverlay = overlay;`. Add the field `private bakedTrack: Track | null = null;` (reset to `null` in `teardown()`): the track whose overlay is actually on screen.
 - `enqueueTrack()`:
 
 ```ts
   enqueueTrack(track: Track): void {
     this.deps.queue.insertNext(track);
-    // Animate only when a picture is actually being produced; otherwise the next
+    // Animate only when a picture is actually being produced, AND only while the queue's current
+    // track is still the one on screen. After a paused next()/previous() the snapshot's current row
+    // has moved but the screen deliberately hasn't (nothing changes until resume). Baking now
+    // would show the NEXT track's title/cover under the old audio. In both skip cases the next
     // feedCurrentTrack() simply bakes the new snapshot.
-    if (this.playlistAnimator && (this.state === 'streaming' || this.state === 'paused')) {
+    if (this.playlistAnimator && (this.state === 'streaming' || this.state === 'paused')
+      && this.deps.queue.current() === this.bakedTrack) {
       this.playlistAnimator.queueChanged(this.windowRows());
     }
     this.deps.onStatusChanged?.();
@@ -2034,7 +2071,14 @@ git commit -m "feat(stream): bake the queue-aware window and animate inserts on 
 - Modify: `CLAUDE.md`; possibly `src/stream/streamScene.ts` (`PLAYLIST_WINDOW_FPS`), per the fallback rule
 - Scratch (not committed): a verification harness in your scratchpad directory
 
-- [ ] **Step 1: Harness** (run inside the repo's own image after `npm run build`, so it uses the real ffmpeg 5.1.9 and fonts):
+- [ ] **Step 1: Harness.** Run it inside the repo's own image (the real ffmpeg 5.1.9 and fonts), **isolated exactly as in Task 5 Step 5**:
+  - Build a standalone image from the feature branch on 192.168.14.26 under a unique throwaway tag, and run it with `docker run --rm --name <tag> --network none`.
+  - Write output under a bind-mounted `/tmp/<tag>/out` so you can pull the files back with `scp`.
+  - Never use `docker compose`, and never touch the running `super-dj-*` stack or any other service on that host.
+  - Afterwards, `docker rmi <tag>` and remove `/tmp/<tag>`.
+  - For CPU sampling, run `ps` inside the same container: `docker exec <tag> ps -o pid,%cpu,rss,comm`.
+
+  The harness itself:
   1. Build a real scene with `buildStreamScene` against small in-memory fakes of the repositories (the default template, a 3-track playlist of short real audio files generated with `ffmpeg -f lavfi -i sine=d=120`).
   2. Build a real `StreamController` with that scene's factories, pushing to a file: `createPersistentEncoder({ rtmpUrl: '/tmp/out', streamKey: 'run.flv' })` yields `-f flv /tmp/out/run.flv`.
   3. Run A — **idle cost**: start, run 90 s with no inserts, stop.

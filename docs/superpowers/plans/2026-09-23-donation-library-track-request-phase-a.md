@@ -22,7 +22,7 @@
 - Keyword uniqueness per user → 409 on POST/PUT (PUT excludes itself); enforced in the route only, not the DB.
 - **One arrival-ordered queue for BOTH donation types (user decision, spec A5 / judgment call #2):** `SongRequestQueue` becomes the task-generic `DonationRequestQueue` (`src/donations/donationRequestQueue.ts`, `enqueue<R>(task: () => Promise<R>): Promise<R>`), with a head-of-line timeout `DONATION_TASK_TIMEOUT_MS = 90_000` (knock-on of that decision: a hung media-search download must not block every later donation). `server.ts` builds exactly ONE instance, shared by both handlers, the webhook, and the Test button.
 - Every failure of a real donation is logged and dropped — no new feedback channel.
-- Mutating authenticated routes require `Content-Type: application/json` (400 otherwise), like every other mutating route.
+- Mutating authenticated POST/PUT routes require `Content-Type: application/json` (400 otherwise), like every other POST/PUT in the app. DELETE routes do NOT carry that guard, matching every existing DELETE route: a bodiless browser DELETE would always fail it, and DELETE is preflighted regardless.
 - Migration generated only via CLAUDE.md "Persistence" remote workflow on 192.168.14.26 — never hand-written SQL. Remote host etiquette: never stop/inspect other services there; use throwaway names and a free port.
 - Commit trailer: `Co-Authored-By: Claude Opus <noreply@anthropic.com>` (or the trailer matching the model actually committing).
 
@@ -68,10 +68,14 @@ scp -r prisma/migrations 192.168.14.26:$STAGE/prisma/
 scp package.json package-lock.json 192.168.14.26:$STAGE/
 ssh 192.168.14.26 "docker network create superdj-mig-net-$$ && \
   docker run -d --name superdj-mig-pg-$$ --network superdj-mig-net-$$ -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mig postgres:16-alpine && \
-  sleep 5 && \
-  docker run --rm --network superdj-mig-net-$$ -v $STAGE:/app -w /app -e DATABASE_URL=postgresql://postgres:pw@superdj-mig-pg-$$:5432/mig node:20-bookworm-slim \
-    sh -c 'apt-get update && apt-get install -y openssl && npm ci && npx prisma migrate dev --name add_user_request_page_token --skip-generate'"
+  for i in \$(seq 1 30); do docker exec superdj-mig-pg-$$ pg_isready -U postgres -d mig && break; sleep 1; done && \
+  docker run --rm --network superdj-mig-net-$$ -v $STAGE:/app -w /app -e DATABASE_URL=postgresql://postgres:pw@superdj-mig-pg-$$:5432/mig \
+    -e HOST_UID=\$(id -u) -e HOST_GID=\$(id -g) node:20-bookworm-slim \
+    sh -c 'apt-get update && apt-get install -y openssl && npm ci && npx prisma migrate dev --name add_user_request_page_token --skip-generate; status=\$?; chown -R \$HOST_UID:\$HOST_GID /app; exit \$status'"
 scp -r "192.168.14.26:$STAGE/prisma/migrations/*_add_user_request_page_token" prisma/migrations/
+# The container ran as root: its chown above hands node_modules/ and the new migration back to the
+# SSH user, so this plain rm works. If it ever fails on root-owned leftovers, remove them with a
+# throwaway container instead: docker run --rm -v $STAGE:/app alpine rm -rf /app/node_modules
 ssh 192.168.14.26 "docker rm -f superdj-mig-pg-$$; docker network rm superdj-mig-net-$$; rm -rf $STAGE"
 ```
 
@@ -167,9 +171,9 @@ describe('request page owner routes', () => {
     expect(user.requestPageToken).toBe('c'.repeat(32));
   });
 
-  it('DELETE /token disables the link', async () => {
+  it('DELETE /token disables the link — with NO body and NO content-type, exactly as a browser sends it', async () => {
     const { app, user } = buildApp('b'.repeat(32));
-    const res = await request(app).delete('/request-page/token').set('Content-Type', 'application/json').send({});
+    const res = await request(app).delete('/request-page/token');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ token: null });
     expect(user.requestPageToken).toBeNull();
@@ -239,7 +243,12 @@ export function createRequestPageRouter(
     res.status(200).json({ token });
   }));
 
-  router.delete('/token', auth, requireJsonRequest, wrapAsync(async (req, res) => {
+  // No requireJsonRequest here, matching every other DELETE route in the app (tracks, playlists,
+  // destinations, templates, presets, interaction rules): a bodiless DELETE carries no
+  // Content-Length, so req.is('application/json') is null whatever the header says, and the guard
+  // would 400 every real browser call. DELETE isn't a CORS "simple" method, so it is always
+  // preflighted anyway — the guard's CSRF purpose is already met.
+  router.delete('/token', auth, wrapAsync(async (req, res) => {
     await users.setRequestPageToken(userId(req as AuthenticatedRequest), null);
     res.status(200).json({ token: null });
   }));
@@ -709,6 +718,48 @@ describe('DonationRequestQueue', () => {
       jest.useRealTimers();
     }
   });
+
+  it('a task that resolves AFTER its timeout still resolves its own promise (inserting late, out of order) and disturbs nothing queued after it', async () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const queue = new DonationRequestQueue({ taskTimeoutMs: 1000 });
+      const inserted: string[] = [];
+      let finishSlow!: () => void;
+      const slow = queue.enqueue(() => new Promise<string>((r) => { finishSlow = () => { inserted.push('slow'); r('slow done'); }; }));
+      const second = queue.enqueue(async () => { inserted.push('second'); return 'second done'; });
+      const third = queue.enqueue(async () => { inserted.push('third'); return 'third done'; });
+      await Promise.resolve();
+      jest.advanceTimersByTime(1000); // slow times out -> queue moves on
+      await expect(second).resolves.toBe('second done');
+      await expect(third).resolves.toBe('third done');
+      finishSlow(); // completes late
+      await expect(slow).resolves.toBe('slow done');
+      expect(inserted).toEqual(['second', 'third', 'slow']); // documented: that one request lands out of order
+      jest.advanceTimersByTime(5000);
+      expect(warn).toHaveBeenCalledTimes(1); // only the one real timeout was logged
+    } finally {
+      warn.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('a task that throws SYNCHRONOUSLY rejects its own promise, releases the queue at once, and leaves no stray timeout log', async () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const queue = new DonationRequestQueue({ taskTimeoutMs: 1000 });
+      const bad = queue.enqueue(() => { throw new Error('sync'); });
+      const next = queue.enqueue(() => Promise.resolve('ok'));
+      await expect(bad).rejects.toThrow('sync');
+      await expect(next).resolves.toBe('ok');
+      jest.advanceTimersByTime(5000);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      jest.useRealTimers();
+    }
+  });
 });
 ```
 
@@ -729,10 +780,18 @@ export const DONATION_TASK_TIMEOUT_MS = 90_000;
 // An exact-track task is two indexed queries and resolves almost at once when its turn comes; a
 // free-text task waits on the external media-search download. Deliberately fully sequential.
 //
-// Head-of-line timeout: HttpMediaSearchClient has no timeout of its own, so one hung download
-// would otherwise block every later donation of BOTH types forever. After taskTimeoutMs the queue
-// moves on; the timed-out task is not cancelled, and if it completes later it still inserts — one
-// request out of order (logged), instead of every later donation silently lost.
+// Head-of-line timeout: HttpMediaSearchClient sets no timeout of its own, so a stuck download is
+// bounded only by Node fetch's default (~300s), and would hold up every later donation of BOTH
+// types for that long. After taskTimeoutMs the queue moves on. The timed-out task is not
+// cancelled: if it completes later it still inserts — one request out of order (logged), instead
+// of every later donation delayed by minutes. 90s is well above a normal download, and above the
+// point at which the media-search service normally answers with its own 504; retune it if that
+// service's own timeout changes.
+//
+// The caller's OWN promise is never affected by this timeout: it settles when its task does. So
+// the rule "Test" button's HTTP request simply waits for its own task — up to fetch's ~300s in the
+// worst case — and then reports the real outcome. Accepted as-is: it's a manual, one-person
+// diagnostic tool, and a real result beats a synthetic "timed out".
 export class DonationRequestQueue {
   private tail: Promise<void> = Promise.resolve();
   private readonly taskTimeoutMs: number;
@@ -755,12 +814,19 @@ export class DonationRequestQueue {
         console.error(`donation task still running after ${this.taskTimeoutMs}ms; releasing the queue so later donations aren't blocked (this one may now land out of order)`);
         release();
       }, this.taskTimeoutMs);
-      const run = task();
+      let run: Promise<R>;
+      try {
+        run = task();
+      } catch (err) {
+        // A synchronous throw: clear the timer too, or it would log a bogus "still running" later.
+        this.clearTimer(timer);
+        release();
+        throw err;
+      }
       run.then(() => undefined, () => undefined).finally(() => { this.clearTimer(timer); release(); });
       return run;
     });
-    // A synchronous throw inside task() rejects `result` without reaching the finally above.
-    result.catch(() => release());
+    result.catch(() => release()); // defensive; release() is idempotent
     this.tail = released;
     return result;
   }
@@ -803,7 +869,7 @@ git commit -m "refactor(donations): generalize SongRequestQueue into one task-or
 - Test: `test/donations/interactionRuleRoutes.test.ts`, `test/donations/donatelloWebhookRoutes.test.ts`, `test/api/openapi.test.ts` (and any other `createApp` caller)
 
 **Interfaces:**
-- Consumes: `executeLibraryTrackRequest` (Task 4), `SongRequestResult`, `SongRequestQueue.enqueue`.
+- Consumes: `executeLibraryTrackRequest` (Task 4), `SongRequestResult`, `DonationRequestQueue.enqueue` (Task 4b).
 - Produces: `ACTION_TYPES = ['songRequest', 'libraryTrackRequest'] as const`; `type ActionType`; `LIBRARY_TRACK_REQUEST: ActionType`; `type DonationActionResult = SongRequestResult | LibraryTrackRequestResult`; `type DonationActionHandlers = Record<ActionType, (query: string) => Promise<DonationActionResult>>`; `isActionType(value: string): value is ActionType`. `InteractionRuleTestDeps` becomes `{ converter; actions: DonationActionHandlers }`; `DonatelloWebhookDeps.executeSongRequest` is replaced by `actions: DonationActionHandlers`.
 
 - [ ] **Step 1: Failing tests**
@@ -1151,7 +1217,7 @@ export const requestPageApi = {
 };
 ```
 
-Note `api.delete` sends `Content-Type: application/json` already (see `client.ts`), which the backend requires.
+Note: `api.delete` sends a `Content-Type: application/json` header but no body. That is fine only because `DELETE /request-page/token` deliberately has no `requireJsonRequest` guard (Task 2): Express's `req.is()` returns null for a bodiless request whatever the header says, so the guard would 400 every real browser call.
 
 `frontend/src/api/interactionRules.ts`: `export type ActionType = 'songRequest' | 'libraryTrackRequest';`; rename `SongRequestResult` to `DonationActionResult` with reasons `'mediaSearchFailed' | 'writeFailed' | 'noActiveStream' | 'trackIdMissing' | 'trackNotFound'`; update `TestInteractionRuleResult` to use it.
 
@@ -1216,6 +1282,12 @@ const render = () => renderWithProviders(<Routes><Route path="/r/:token" element
 describe('RequestPage', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('loading', () => {
+    vi.mocked(fetchPublicRequestPage).mockReturnValue(new Promise(() => {}));
+    render();
+    expect(screen.getByText('Loading…')).toBeInTheDocument();
+  });
+
   it('not found', async () => {
     vi.mocked(fetchPublicRequestPage).mockResolvedValue({ kind: 'notFound' });
     render();
@@ -1276,7 +1348,14 @@ import { formatSeconds } from './requestPageFormat';
 export default function RequestPage() {
   const { t } = useTranslation();
   const { token = '' } = useParams();
-  const query = useQuery({ queryKey: ['public-request-page', token], queryFn: () => fetchPublicRequestPage(token), retry: false });
+  // Load-time only (spec): no refetch on window focus/reconnect, only the manual Refresh button.
+  const query = useQuery({
+    queryKey: ['public-request-page', token],
+    queryFn: () => fetchPublicRequestPage(token),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
 
   useEffect(() => {
     // Never leak the token through Referer (spec A16).
@@ -1584,5 +1663,5 @@ On the stand (192.168.14.26; re-apply and verify the port-8088 mapping after the
 2. Open `/r/<token>` in a private window: the live playlist lists; Copy produces the command.
 3. Paste it into the rule's Test panel → toast success; `nextTrack` in `/local-stream/status` is that track; it plays after the current one.
 4. If Donatello is available: send a real donation with the copied command (plus a greeting before it and "thanks" after it) → queued. Note the maximum message length Donatello accepted (spec A15).
-5. Regenerate the link → the old URL shows "not valid"; stop the stream → the page shows "not live".
+5. Regenerate the link → the old URL shows "not valid"; stop the stream → the page shows "not live". Then click **Disable** on the Donations page in a real browser: it must succeed (200, and the card switches to "Create link"), and the last link must now show "not valid". Nothing else exercises the bodiless browser DELETE.
 6. Ordering (user decision): fire a `songRequest` Test and, a second later, a `libraryTrackRequest` Test; confirm via `/local-stream/status`'s `nextTrack` and by listening that the free-text track (the one that had to download) plays first, then the exact track.

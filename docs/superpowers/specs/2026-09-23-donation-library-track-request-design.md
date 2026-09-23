@@ -69,6 +69,14 @@ Delete everything that exists only to support interrupt/resume:
   `paused` or `reconnecting`, else `null`** (see edge case B7 — this keeps today's observable
   "null when nothing is playing" behaviour, which `nowPlayingTrack` provided implicitly by being
   cleared in `teardown()`).
+- **Two incidental improvements**, worth knowing so nobody "fixes" them back:
+  - After a paused `next()`, `status().currentTrack` now reports the track the queue moved to. The
+    old code kept reporting `nowPlayingTrack`, the stale pre-`next()` one, until resume.
+  - `resume()` now feeds `queue.current()` at `pausedElapsedSeconds`, so it always resumes the
+    track the queue is actually on. After a paused `next()` (which resets `pausedElapsedSeconds` to
+    0), the old `nowPlayingTrack ?? queue.current()` restarted the *skipped* track from 0 instead of
+    playing the track `next()` moved to. The new code plays the new track from its start, which is
+    what `next()` asked for.
 
 **Rename `insertEphemeralTrack` → `enqueueTrack`** on `StreamController`, `LocalStreamManager`, and
 `songRequestAction.ts`'s `StreamInserter` interface. Its body becomes exactly `playByName`'s tail:
@@ -259,13 +267,22 @@ so a donation's place in the play queue is fixed at the moment the webhook (or t
 dispatched it, not by which task finished first. An exact-track task is two indexed queries, so
 once its turn comes it resolves almost at once; the point is ordering, not speed.
 
-**Knock-on, added deliberately (flagged in the revision report):** `HttpMediaSearchClient` has no
-timeout, so today a hung download already stalls every free-text request behind it forever. With
-one shared queue it would stall exact-track requests too — a new failure mode this decision
-introduces. `DonationRequestQueue` therefore gets a **head-of-line timeout**: if a task hasn't
-settled within `DONATION_TASK_TIMEOUT_MS` (90 s), the queue logs and moves on to the next task. The
-timed-out task is not cancelled. If it completes later it still inserts, and that one request lands
-out of order — a degraded but bounded outcome, versus every later donation being lost.
+**Knock-on, added deliberately (flagged in the revision report):** `HttpMediaSearchClient` sets no
+timeout of its own, so a stuck download is bounded only by Node fetch's default (about 300 s), and
+already holds up every free-text request behind it for that long. With one shared queue it would
+hold up exact-track requests too — a new failure mode this decision introduces.
+`DonationRequestQueue` therefore gets a **head-of-line timeout**: if a task hasn't settled within
+`DONATION_TASK_TIMEOUT_MS` (90 s), the queue logs and moves on to the next task. That cuts the
+worst case from about 5 minutes to 90 s. 90 s is well above a normal download, and above the point
+where the media-search service normally answers with its own 504; retune it if that service's
+timeout changes. The timed-out task is not cancelled. If it completes later it still inserts, and
+that one request lands out of order — a degraded but bounded outcome. A task that throws
+synchronously clears its timer too, so there is no stray "still running" log.
+
+The timeout never affects a caller's **own** promise, which settles when its task does. So the
+rule Test button's HTTP request just waits for its own task (at worst about 300 s, fetch's
+default) and then reports the real outcome. That is accepted as-is: the Test button is a manual,
+single-user diagnostic, and a real result beats a synthetic "timed out".
 
 ### Rule type, validation, dispatch
 
@@ -300,7 +317,8 @@ out of order — a degraded but bounded outcome, versus every later donation bei
   valid"); not live; live without `request` (track list, no copy buttons, "requests aren't enabled
   right now"); live with `request` (per-track copy button, plus "minimum donation: N UAH" and a
   short how-to: copy, paste into the donation message). Adds `<meta name="referrer"
-  content="no-referrer">`. Loads once — no polling, no SSE, a manual "refresh" button only. i18n in
+  content="no-referrer">`. Loads once — no polling, no SSE, and TanStack Query's automatic refetch on window focus and on
+  reconnect is switched off for this query, so a manual "refresh" button is the only way to reload. i18n in
   en/ru/uk. The app-wide `AuthProvider` will still issue one `GET /auth/me` for an anonymous donor;
   it treats 401 as "logged out" without redirecting (verified in `useAuth.tsx`), so this is a wasted
   request, not a break.
@@ -393,7 +411,7 @@ A burst runs about 2–2.5 s from `enqueueTrack` to idle (two canvas renders plu
 the 600 ms of motion). The motion itself starts about 0.8–1 s after the insert. That is invisible
 next to the seconds a donation already takes to arrive and download. The residual artifact is
 that, during each 400 ms hold, text is drawn over identical text, which makes antialiased edges
-slightly heavier (edge case C19). Task 9 of the plan pixel-checks it.
+slightly heavier (edge case C19). Task 10 of the Phase C plan pixel-checks it.
 
 **Who orchestrates it: `PlaylistWindowAnimator`** (`src/stream/playlistWindowAnimator.ts`). This
 is a small class with one purpose: run bursts and coalesce queue changes. It is kept out of
@@ -401,12 +419,21 @@ is a small class with one purpose: run bursts and coalesce queue changes. It is 
 
 - the feeder: `showRows`, `animate`, `goIdle`
 - `bakeCanvas(rows, { omitLivePlaylist })`, a controller callback that builds the overlay for the
-  current track, sets it as `currentOverlay` (so the once-a-second timer tick keeps re-rendering
-  the right variant), and awaits `CanvasFeeder.render`
+  track actually on screen (`bakedTrack`, not `queue.current()`), sets it as `currentOverlay` (so
+  the once-a-second timer tick keeps re-rendering the right variant), and awaits
+  `CanvasFeeder.render`
+- `getBakedRows()` — the rows currently baked into the canvas
 - a `sleep`
 - `holdMs`
 
-Its API is `queueChanged(fromRows, toRows)`, `abort()`, and `busy`.
+Its API is `queueChanged(nextRows)`, `abort()`, and `busy`. Each run reads its *from* rows from
+`getBakedRows()` at the moment it starts, so a coalesced follow-up burst automatically diffs
+against the rows the previous burst just baked.
+
+`bakeCanvas` resolves `false` when its result was stale. The animator doesn't branch on that. This
+is an accepted minor gap rather than an oversight: every path that makes a bake stale — a track
+change, teardown, leaving `streaming`/`paused` — also calls `animator.abort()`, and that is what
+actually stops the burst.
 
 - **Coalescing.** A `queueChanged` during a burst only records the latest target rows. When the
   burst finishes (after step 5), if the recorded target differs from what's baked, a follow-up runs
@@ -435,7 +462,7 @@ Its API is `queueChanged(fromRows, toRows)`, `abort()`, and `busy`.
   worker converts resvg's premultiplied RGBA to straight alpha (the existing
   `unpremultiplyRgbaInPlace`), then to yuva420p with the **BT.601 limited-range** coefficients that
   swscale uses by default. That default is what `CanvasFeeder`'s one-shot render uses to produce the
-  baked window, so frame 0 and the final frame match the baked text's colours (checked in Task 9:
+  baked window, so frame 0 and the final frame match the baked text's colours (checked in Phase C Task 10:
   max deviation ≤ 2 code values). The idle frame is precomputed once: A = 0 everywhere, Y = 16,
   U = V = 128.
 - **Where it composites: directly above the canvas layer that contains the playlist element.** For
@@ -561,13 +588,16 @@ burst's final frame would not match the baked window (C1).
 - `StreamController`:
   - creates the feeder in `spawnPipeline()`, and the animator around it with a `bakeCanvas`
     callback; closes both in `teardown()`
-  - remembers `bakedRows` — the rows in the current overlay
+  - remembers `bakedRows` and `bakedTrack` — the rows and track in the current overlay
   - `feedCurrentTrack()` first calls `animator.abort()`, then bakes the full overlay from a fresh
     snapshot, as today
-  - `enqueueTrack()`, while `streaming`/`paused`, calls
-    `animator.queueChanged(bakedRows, windowSnapshot())`
-  - `next()`/`previous()` while paused change nothing about the window, exactly as today (no bake
-    until resume)
+  - `enqueueTrack()` calls `animator.queueChanged(windowSnapshot())`, but only while
+    `streaming`/`paused` **and** `queue.current() === bakedTrack`
+  - `next()`/`previous()` while paused change nothing on screen, exactly as today (no bake until
+    resume). That is also why `enqueueTrack` checks `bakedTrack`: after a paused `next()` the
+    snapshot's current row has moved, and a burst or re-bake would show the next track's
+    title/cover under the old audio. The next `feedCurrentTrack()` (on resume) bakes everything
+    instead.
 
 ### Cost, stated plainly
 
@@ -719,7 +749,7 @@ burst's final frame would not match the baked window (C1).
   identical text is drawn twice, so antialiased edges are slightly heavier. Pixel-checked: the
   region's luma during the overlap must stay within a small tolerance of the baked-only frames.
 - **C20 — the colour of the conversion path.** The worker's BT.601 limited-range yuva conversion
-  vs ffmpeg's swscale conversion of the baked PNG: max deviation ≤ 2 code values, checked in Task 9.
+  vs ffmpeg's swscale conversion of the baked PNG: max deviation ≤ 2 code values, checked in Phase C Task 10.
   Otherwise the text would visibly shift colour at the handoff.
 - **C21 — a per-track `overlayOverride` background.** It lives on the canvas's below layer and is
   present in both A and B. The burst layer never paints a background.
@@ -792,7 +822,9 @@ for timing-driven classes, and no real ffmpeg in unit tests.
 - **B:** `queue.test.ts` (delete the donation-FIFO tests; add ephemeral-not-in-history),
   `streamController.test.ts` (delete the interrupt/resume/409/reconnect-restore suites; add
   queue-next semantics for `enqueueTrack`, release on skip, and the status gating),
-  `songRequestAction.test.ts` (rename, `ephemeral` flag), `localStreamManager.test.ts` (rename),
+  `songRequestAction.test.ts` (rename, `ephemeral` flag), `localStreamManager.test.ts` (rewrite the
+  delegation test, which asserts the old interrupt: the track must now queue without switching
+  anything, and `next()` must resolve rather than 409; plus the rename),
   `overlayText.test.ts` (rename). Full `npm test` and `tsc` green.
 - **A:**
   - repository-free route tests for both routers (404-by-shape without a DB call, 404 unknown,
@@ -802,7 +834,8 @@ for timing-driven classes, and no real ffmpeg in unit tests.
     timeout moving on while a late task still resolves
   - keyword-uniqueness 409s; webhook and test-route dispatch by type through the shared queue
   - `openapi.test.ts` lists the new routes
-  - frontend vitest for `RequestPage` (all five states, command format, clipboard fallback) and for
+  - frontend vitest for `RequestPage` (all six states — loading, not found, offline, live without a
+    rule, live with a rule, and the clipboard-fallback field — plus the command format) and for
     the Donations card and type select
   - **real end-to-end once**, including a free-text and an exact-track Test fired back to back,
     confirming they play in the order fired, and A15's message-length check

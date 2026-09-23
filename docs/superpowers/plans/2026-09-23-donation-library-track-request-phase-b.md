@@ -25,7 +25,7 @@
 - Skipping a playing donation track with `next()`/`previous()` must delete its temp file exactly once — pinned in Task 2.
 - `status().currentTrack` must be `null` for an idle/stopped controller, not the queue's first track — pinned in Task 2.
 - A donation arriving while paused must NOT resume playback — pinned in Task 2.
-- A reconnect that happens while a donation track is current must resume that same track at its offset (it's now just `queue.current()`) — pinned in Task 2.
+- A reconnect that happens while a donation track is current must resume that same track at its offset. No NEW test pins this: after Task 2 a donation track is just `queue.current()`, so the existing generic reconnect tests ("after the backoff delay elapses, respawns the encoder and resumes the track that was playing…") cover it. A reviewer should confirm those tests still pass unmodified, rather than look for a donation-specific one.
 
 ---
 
@@ -108,7 +108,7 @@ git commit -m "feat(queue): keep ephemeral (temp-file) tracks out of history"
 
 **Files:**
 - Modify: `src/stream/streamController.ts`
-- Modify: `src/stream/localStreamManager.ts:269-275`
+- Modify: `src/stream/localStreamManager.ts:273-275`
 - Modify: `src/donations/songRequestAction.ts`
 - Test: `test/stream/streamController.test.ts`, `test/stream/localStreamManager.test.ts`, `test/donations/songRequestAction.test.ts`
 
@@ -401,7 +401,27 @@ Expected: PASS. If an older test asserted `currentTrack` while `reconnecting` wa
 
 and call `deps.streamInserter.enqueueTrack(deps.targetUserId, track);`. Update the top-of-function comment ("inserts it as a one-off next track" stays accurate).
 
-In `test/stream/localStreamManager.test.ts` and `test/donations/songRequestAction.test.ts` rename every `insertEphemeralTrack` to `enqueueTrack`, and add to the success-path test in `songRequestAction.test.ts`:
+In `test/stream/localStreamManager.test.ts`, **rewrite** (not just rename) the test `'delegates insertEphemeralTrack to this user\'s own controller, and it interrupts playback immediately'` — it asserts the old interrupt behaviour, which this task removes:
+
+```ts
+  it('delegates enqueueTrack to this user\'s own controller: the track queues next, nothing switches, next() is allowed', async () => {
+    const { manager, audioRelay } = buildManager();
+    await manager.start('user-1', 'playlist-1');
+    audioRelay.switchTrack.mockClear();
+    const donationTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true };
+
+    manager.enqueueTrack('user-1', donationTrack);
+    await settle();
+
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+    expect(manager.status('user-1').local.nextTrack).toBe('donation track');
+    // No longer unskippable: next() moves onto the queued donation track instead of rejecting.
+    await expect(manager.next('user-1')).resolves.toBeUndefined();
+    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/tmp/donation.mp3', 0);
+  });
+```
+
+and rename `insertEphemeralTrack` → `enqueueTrack` in the next test ('… throws when no local stream is active for that user'). In `test/donations/songRequestAction.test.ts` rename every `insertEphemeralTrack` to `enqueueTrack`, and add to its success-path test:
 
 ```ts
     const inserted = streamInserter.enqueueTrack.mock.calls[0][1];
