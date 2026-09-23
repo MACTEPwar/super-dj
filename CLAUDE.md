@@ -311,6 +311,72 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
   `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just a `custom`
   destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key, which works
   through the existing `CustomRtmpProvider` path and is forwarded exactly like any other.
+- **The playlist window's insert animation (fd 7 / `pipe:7`, burst-only).** The settled window
+  stays baked in the canvas (`playlistWindowNode`, byte-identical to before) from
+  `PlaylistQueue.windowSnapshot()`, which now lists queued tracks alongside the base playlist. When
+  the template has a playlist element, a yuva420p `pipe:7` exists for the whole session. A
+  `PlaylistWindowFeeder` keeps it fed with a transparent idle frame (`RawFramePacer`, extracted
+  from `PulseVisualizer` behaviour-identically) so ffmpeg's overlay frame-sync never stalls waiting
+  on it. On a visible insert, `PlaylistWindowAnimator` runs frame 0 (== the baked window) → hold →
+  canvas A (window omitted) → hold → a 600ms animation (the SAME Satori node as the baked window,
+  animated via row `maxHeight`/`opacity`/`margin`, rendered in its own dedicated piscina pool,
+  `useAtomics: false`) → canvas B (window with the new rows) → hold → idle. Every switch overlaps
+  identical content for `HANDOFF_HOLD_MS` = 2 canvas heartbeats (400ms), so it never matters which
+  of the two never-frame-synchronized inputs ffmpeg's compositor samples first. Composited directly
+  above whichever canvas layer the playlist element is baked into (before the equalizer). Why not
+  ffmpeg-side motion: a real spike proved `sendcmd`/`zmq` reach `overlay`/`drawbox`, which answer
+  `Function not implemented` for a runtime x/y command — ffmpeg composites a static-position overlay
+  only, so the motion has to be rendered frame-by-frame in Node and streamed in, not commanded.
+
+  **Verified against real binaries** (deployed to the 192.168.14.26 stand, a real account's stream,
+  real ffmpeg 5.1.9, real MediaMTX 1.21.0, real HLS output captured via the authenticated preview
+  proxy over ~15 minutes including two real donation-triggered bursts — narrower than an isolated
+  A/B-with-and-without-pipe:7 harness would give, but against the actual production pipeline rather
+  than a synthetic one; see the design doc's Phase C plan, Task 10, for the fuller harness this
+  substituted for):
+  - **The encoder accepts `pipe:7` and never stalls on it.** Real startup log: `Input #3, rawvideo,
+    from 'pipe:7': ... 704x342, 144460 kb/s, 30 tbr, 30 tbn`, correctly mapped into the filter graph
+    (`Stream #3:0 (rawvideo) -> format:default (graph 0)`) and composited (`overlay:default (graph
+    0) -> Stream #0:0 (libx264)`). The stream ran steadily the whole session; zero errors, crashes
+    or stalls in the backend log across the whole test window (~5 min of log checked, spanning two
+    triggered bursts).
+  - **Idle steady-state cost** (main encoder ffmpeg, sampled via two `/proc/<pid>/stat` reads 10s
+    apart — no `ps` binary in the deploy image): **~104% of one CPU core**, RSS **~148 MiB**, with
+    the playlist window present but transparent (idle). Node's own process stayed near-idle between
+    renders. No isolated same-host measurement without `pipe:7` was taken this session (a true A/B
+    would need a second deploy), so this is a real absolute number, not a verified delta — it sits
+    in the same range as this doc's earlier, differently-measured encoder baseline (~68% CPU), and
+    nothing observed (no dropped frames, no growing latency, no stall) indicated a problem, so
+    `PLAYLIST_WINDOW_FPS` stays at `VIDEO_FPS` (30); the plan's own fallback rule (drop to 15fps if
+    idle cost regresses) was not triggered by anything measured, but wasn't rigorously exercised via
+    true A/B either.
+  - **A real donation visibly, correctly inserts a row into the baked window**, confirmed by
+    downloading real HLS `.ts` segments through the authenticated preview proxy before and after a
+    real `libraryTrackRequest` donation and extracting frames with `ffmpeg` (cropped to the
+    `computePlaylistWindowRegion` box): the pre-donation frame showed the ordinary 3-row window: the
+    donated track then appeared as an extra row in exactly the position `windowSnapshot()` predicts
+    (immediately after the current-track row), with the base after-context row still correctly
+    following it — 4 rows total, no corruption, no duplicate/missing rows, no stale content left
+    over from the transition. The two segments spanning the actual burst were measurably larger than
+    steady-state segments (~130 KB vs ~108-111 KB for the same 2s duration) — real evidence of the
+    animation's extra motion actually being encoded, not just a silent no-op.
+  - **Burst cost stays off the main encoder.** Sampling the encoder's own CPU ticks immediately
+    before, at, and 2s after triggering a fresh burst showed no meaningful spike on the persistent
+    encoder process itself — consistent with the design (burst rendering happens in Node's piscina
+    pool and short-lived one-shot `ffmpeg` renders, not inside the long-lived encoder). One
+    additional short-lived `ffmpeg` process (RSS ~55 MiB) was observed appearing and disappearing
+    around a trigger, consistent with `CanvasFeeder`'s one-shot canvas-A/canvas-B renders firing as
+    part of the handoff.
+  - **Not measured this session** (narrower scope than the plan's full Task 10 harness — see the
+    scoping note in this feature's `docs/superpowers/plans/2026-09-23-donation-library-track-request-phase-c.md`
+    ledger for the reasoning): a true idle-vs-baseline A/B without `pipe:7` present at all;
+    frame-accurate motion capture of the animation in progress (only before/after settled states
+    were captured, not the moving frames themselves); the elaborate per-frame luma-histogram/
+    row-projection pixel forensics (handoff-overlap deviation, colour-match tolerance, fringe
+    detection) the plan's Task 10 originally specified; exact wall-clock donation-to-visible latency
+    (bounded well under the observation window, not measured to the millisecond). If any of these
+    become load-bearing later (e.g. investigating a reported visual glitch), build the isolated
+    harness the original plan describes rather than re-deriving these from production captures.
 
 **Local relay (MediaMTX).** Every stream publishes into a `bluenviron/mediamtx:1.21.0`
 container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in
@@ -844,10 +910,10 @@ never pushes an ephemeral track into `history` (its file is deleted the moment i
 `releaseTrack()` on an ephemeral track they move off mid-play, so skipping one still deletes its
 file. A stop or crash mid-donation leaves the file to the 12-hour sweep, as before.
 `status().currentTrack` is `queue.current()` while a session exists
-(`streaming`/`paused`/`reconnecting`) and `null` otherwise. The overlay's playlist window still
-uses `positionInBase()` + `buildInsertedTrackWindowLines()` for any current track not found in the
-playlist by name — which covers both donation tracks and `play`-by-name picks from outside the
-running playlist.
+(`streaming`/`paused`/`reconnecting`) and `null` otherwise. The overlay's playlist window lists
+queued tracks via `PlaylistQueue.windowSnapshot()`, and each visible insertion animates on the
+`pipe:7` burst layer (see `PlaylistWindowAnimator` under "Backend streaming pipeline" above) —
+which covers both donation tracks and `play`-by-name picks from outside the running playlist.
 
 **Donation ordering is by arrival, not by download speed (`donationRequestQueue.ts`).** Two
 donations racing on the external media-search HTTP fetch — or one free-text and one exact-track
@@ -994,8 +1060,13 @@ src/
                             localStreamPreviewRoutes.ts (the authenticated HLS proxy, mounted at
                             /local-stream/preview), streamPresetRepository.ts (Prisma; reads the
                             repurposed StreamSession tables) / streamPresetRoutes.ts (mounted at
-                            /stream-presets)
-  playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
+                            /stream-presets), playlistWindowAnimator.ts (PlaylistWindowAnimator —
+                            the one-burst-at-a-time canvas/pipe:7 handoff protocol, coalescing,
+                            abort)
+  playlist/                 queue.ts (cursor + insertNext + windowSnapshot — the keyed rows a
+                            stream's on-screen window shows, incl. queued tracks), window.ts
+                            (WindowRow + window-size constants), types.ts — shared by
+                            streamController
   ffmpeg/                   canvasFeeder.ts (video leg: one-shot renders + heartbeat resend),
                             audioRelay.ts / audioRelayArgs.ts (audio leg: per-track decode-only
                             process), persistentEncoder.ts / persistentEncoderArgs.ts (the one
@@ -1006,7 +1077,13 @@ src/
                             frame render args + overlay/timer types), duration.ts (ffprobe),
                             overlayText.ts (formatDuration, playlist-window text),
                             types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes
-                            — pipes: fd3 canvas, fd4 audio, fd5 equalizer, fd6 above-canvas)
+                            — pipes: fd3 canvas, fd4 audio, fd5 equalizer, fd6 above-canvas,
+                            fd7 playlist-window burst layer),
+                            rawFramePacer.ts (paces a raw-video pipe at its declared fps from
+                            wall-clock time; shared by PulseVisualizer and the playlist-window
+                            burst layer), playlistWindowTransition.ts (pure insert-transition
+                            planning + animated row props), playlistWindowFeeder.ts (the pipe:7
+                            frame player: idle transparent frame, showRows, one 600ms animate burst)
   templates/                templateRepository.ts (Prisma), templateRoutes.ts (mounted at
                             /templates, incl. POST /:id/preview), templateTypes.ts
                             (TemplateElement union + isValidTemplateElement(s) +
@@ -1018,7 +1095,12 @@ src/
                             thread), renderOverlay.ts (renderTemplatePng() — the one shared,
                             happy-path-only entry point both /templates/{id}/preview and the live
                             pipeline call), blankOverlay.ts (hand-built transparent-PNG fallback,
-                            independent of satori/resvg)
+                            independent of satori/resvg), playlistWindowGeometry.ts
+                            (computePlaylistWindowRegion — the fixed pixel region pipe:7's burst
+                            frames render into), yuva420p.ts (transparentYuva420p/rgbaToYuva420p —
+                            pipe:7's pixel format, BT.601 limited range), playlistWindowRenderWorker.ts
+                            / playlistWindowRenderPool.ts (a SEPARATE small dedicated piscina pool,
+                            not renderWorkerPool.ts, producing pipe:7 burst frames)
   donations/                donatelloWebhookRoutes.ts (POST /webhooks/donatello, X-Key
                             authenticated), donationEvent.ts (payload parsing), ruleMatcher.ts
                             (parseCommand/matchRules), currencyConverter.ts, songRequestAction.ts
