@@ -32,7 +32,7 @@ export class PlaylistQueue {
 
   next(): Track | undefined {
     if (this.baseTracks.length === 0 && this.insertedQueue.length === 0) return undefined;
-    if (this.currentTrack) this.history.push(this.currentTrack);
+    if (this.currentTrack && !this.currentTrack.ephemeral) this.history.push(this.currentTrack);
 
     if (this.insertedQueue.length > 0) {
       this.currentTrack = this.insertedQueue.shift();

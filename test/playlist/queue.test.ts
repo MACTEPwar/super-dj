@@ -94,4 +94,26 @@ describe('PlaylistQueue', () => {
       expect(queue.positionInBase()).toBe(1);
     });
   });
+
+  describe('ephemeral tracks', () => {
+    const ephemeral = (name: string): Track => ({ name, audioPath: `/tmp/${name}.mp3`, coverPath: null, ephemeral: true });
+
+    it('an ephemeral track plays once from the inserted FIFO but never enters history', () => {
+      const queue = new PlaylistQueue([track('a'), track('b'), track('c')]);
+      queue.insertNext(ephemeral('donation'));
+      expect(queue.next()?.name).toBe('donation');
+      expect(queue.next()?.name).toBe('b');
+      // history is [a] — the donation was skipped over when it stopped being current
+      expect(queue.previous()?.name).toBe('a');
+      expect(queue.previous()?.name).toBe('a');
+    });
+
+    it('a non-ephemeral inserted track still joins history (play-by-name semantics unchanged)', () => {
+      const queue = new PlaylistQueue([track('a'), track('b')]);
+      queue.insertNext(track('z'));
+      queue.next(); // z
+      queue.next(); // b
+      expect(queue.previous()?.name).toBe('z');
+    });
+  });
 });
