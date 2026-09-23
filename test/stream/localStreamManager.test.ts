@@ -251,23 +251,26 @@ describe('LocalStreamManager lifecycle and status', () => {
     expect(scene.buildOverlay).toHaveBeenCalled();
   });
 
-  it('delegates insertEphemeralTrack to this user\'s own controller, and it interrupts playback immediately', async () => {
+  it('delegates enqueueTrack to this user\'s own controller: the track queues next, nothing switches, next() is allowed', async () => {
     const { manager, audioRelay } = buildManager();
     await manager.start('user-1', 'playlist-1');
-    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
+    audioRelay.switchTrack.mockClear();
+    const donationTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true };
 
-    manager.insertEphemeralTrack('user-1', ephemeralTrack);
+    manager.enqueueTrack('user-1', donationTrack);
     await settle();
 
+    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+    expect(manager.status('user-1').local.nextTrack).toBe('donation track');
+    // No longer unskippable: next() moves onto the queued donation track instead of rejecting.
+    await expect(manager.next('user-1')).resolves.toBeUndefined();
     expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/tmp/donation.mp3', 0);
-    // A donation track can't be skipped — next() must reject while it's playing.
-    await expect(manager.next('user-1')).rejects.toThrow('cannot skip a donation-requested track');
   });
 
-  it('insertEphemeralTrack throws when no local stream is active for that user', () => {
+  it('enqueueTrack throws when no local stream is active for that user', () => {
     const { manager } = buildManager();
     const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
-    expect(() => manager.insertEphemeralTrack('user-1', ephemeralTrack)).toThrow('local stream is not active');
+    expect(() => manager.enqueueTrack('user-1', ephemeralTrack)).toThrow('local stream is not active');
   });
 
   it('emits statusChanged with the userId whenever that user\'s controller changes state', async () => {

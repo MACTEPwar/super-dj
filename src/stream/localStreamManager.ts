@@ -270,8 +270,8 @@ export class LocalStreamManager extends EventEmitter {
     this.require(userId).controller.playByName(name);
   }
 
-  insertEphemeralTrack(userId: string, track: Track): void {
-    this.require(userId).controller.insertEphemeralTrack(track);
+  enqueueTrack(userId: string, track: Track): void {
+    this.require(userId).controller.enqueueTrack(track);
   }
 
   /**
