@@ -44,6 +44,7 @@ function fakeScene() {
     createAudioRelay: () => audioRelay,
     createPersistentEncoder,
     createPulseVisualizer: undefined,
+    createPlaylistWindowFeeder: undefined,
   };
   return { scene, encoder, canvasFeeder, audioRelay, createPersistentEncoder };
 }

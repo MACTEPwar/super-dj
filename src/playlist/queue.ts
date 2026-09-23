@@ -69,8 +69,7 @@ export class PlaylistQueue {
   // The base-playlist index most recently reached by REAL advancement. An inserted track (a
   // play-by-name pick from the whole library, or any donation request) is never part of
   // baseTracks, so while one is current this still points at the base track it follows — which
-  // is what lets the overlay build before/after context around a track it can't find by name
-  // (see streamScene.ts's buildOverlay and overlayText.ts's buildInsertedTrackWindowLines).
+  // is what windowSnapshot() below anchors the playlist window's before/after context on.
   positionInBase(): number {
     return this.position;
   }

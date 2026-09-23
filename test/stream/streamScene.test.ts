@@ -87,7 +87,7 @@ describe('buildStreamScene — resolution and ownership', () => {
   it('falls back to DEFAULT_TEMPLATE_ELEMENTS when no templateId is given, without hitting the repository', async () => {
     const { deps, templateRepository } = buildDeps();
     const scene = await buildStreamScene(deps, params);
-    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
+    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null }, []);
     expect(templateRepository.findById).not.toHaveBeenCalled();
     expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ elements: DEFAULT_TEMPLATE_ELEMENTS }));
   });
@@ -103,7 +103,7 @@ describe('buildStreamScene — overlay building', () => {
   it('renders the overlay at 1280x720 with the configured font and the track\'s own cover', async () => {
     const { deps } = buildDeps();
     const scene = await buildStreamScene(deps, params);
-    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: '/covers/a.png' });
+    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: '/covers/a.png' }, []);
     expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({
       title: 'a', width: 1280, height: 720, fontPath: '/fonts/x.ttf', fontFamily: 'DejaVu Sans', coverPath: '/covers/a.png',
     }));
@@ -112,7 +112,7 @@ describe('buildStreamScene — overlay building', () => {
   it('falls back to the default cover when the track has none', async () => {
     const { deps } = buildDeps();
     const scene = await buildStreamScene(deps, params);
-    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
+    await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null }, []);
     expect(renderTemplatePng).toHaveBeenCalledWith(expect.objectContaining({ coverPath: '/assets/default.png' }));
   });
 
@@ -122,25 +122,9 @@ describe('buildStreamScene — overlay building', () => {
     const { deps } = buildDeps();
     (renderTemplatePng as jest.Mock).mockRejectedValue(new Error('satori exploded'));
     const scene = await buildStreamScene(deps, params);
-    const overlay = await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
+    const overlay = await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null }, []);
     expect(overlay.overlayPng).toBe(BLANK_OVERLAY_PNG);
     expect(overlay.overlayPngAbove).toBeUndefined();
-  });
-
-  it('windows the playlist lines around a base anchor for a donation track not in the playlist', async () => {
-    const { deps } = buildDeps();
-    const scene = await buildStreamScene(deps, params); // tracks: a, b
-    await scene.buildOverlay({ name: '🎁 Заказ: Blur - Song 2', audioPath: '/tmp/donation.mp3', coverPath: null }, 0);
-    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
-    expect(call.playlistLines).toEqual(['  a', '▶ 🎁 Заказ: Blur - Song 2', '  b']);
-  });
-
-  it('shows just the donation track when no base anchor is supplied at all', async () => {
-    const { deps } = buildDeps();
-    const scene = await buildStreamScene(deps, params);
-    await scene.buildOverlay({ name: '🎁 Заказ: Blur - Song 2', audioPath: '/tmp/donation.mp3', coverPath: null });
-    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
-    expect(call.playlistLines).toEqual(['▶ 🎁 Заказ: Blur - Song 2']);
   });
 
   it('splits a timer element out of the baked picture and returns its position instead', async () => {
@@ -153,7 +137,7 @@ describe('buildStreamScene — overlay building', () => {
       ],
     });
     const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
-    const overlay = await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null });
+    const overlay = await scene.buildOverlay({ name: 'a', audioPath: '/music/a.mp3', coverPath: null }, []);
     expect(overlay.timer).toEqual(expect.objectContaining({ x: 10, y: 660, fontSize: 20, color: '#ffffff' }));
     const rendered = (renderTemplatePng as jest.Mock).mock.calls[0][0].elements;
     expect(rendered.some((e: { type: string }) => e.type === 'timer')).toBe(false);
@@ -169,7 +153,7 @@ describe('buildStreamScene — overlay building', () => {
     await scene.buildOverlay({
       name: 'a', audioPath: '/music/a.mp3', coverPath: null,
       overlayOverride: { color: { mode: 'solid', color: '#ff0000' }, backgroundColor: { mode: 'solid', color: '#000000' } },
-    });
+    }, []);
     const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
     expect(call.elements[0].color).toEqual({ mode: 'solid', color: '#ff0000' });
     expect(call.background).toEqual({ mode: 'solid', color: '#000000' });
@@ -217,5 +201,67 @@ describe('buildStreamScene — encoder wiring', () => {
     const filter: string = pipeSpawner.mock.calls[0][1][pipeSpawner.mock.calls[0][1].indexOf('-filter_complex') + 1];
     expect(filter).toContain('[vcanvas_below]');
     expect(filter).not.toContain('[vcanvas_top]');
+  });
+});
+
+describe('buildStreamScene — playlist window burst layer (pipe:7)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (renderTemplatePng as jest.Mock).mockResolvedValue(Buffer.from('fake-png'));
+    (getImageFrameCount as jest.Mock).mockResolvedValue(1);
+  });
+
+  const style = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
+  const playlistEl = (x: number, y: number) => ({ type: 'playlist', x, y, width: 400, fontSize: 20, color: { mode: 'solid', color: '#ffffff' }, style });
+  const titleEl = { type: 'title', x: 0, y: 0, width: 100, fontSize: 20, color: { mode: 'solid', color: '#ffffff' }, style };
+  const ROWS = [{ key: 'b:0', text: '▶ a', isCurrent: true }, { key: 'i:0', text: '  queued', isCurrent: false }];
+  const encoderArgs = async (deps: StreamSceneDeps, p: typeof params & { templateId?: string }) => {
+    const pipeSpawner = jest.fn().mockReturnValue({ once: jest.fn(), kill: jest.fn(), pid: 1, stdout: null, stderr: null });
+    const scene = await buildStreamScene({ ...deps, pipeSpawner } as unknown as StreamSceneDeps, p);
+    scene.createPersistentEncoder({ rtmpUrl: 'rtmp://x/live', streamKey: 'k' }).start(() => {});
+    return { scene, args: pipeSpawner.mock.calls[0][1] as string[] };
+  };
+
+  it('default template: the playlist stays BAKED, pipe:7 exists, and the rows become its lines', async () => {
+    const { deps } = buildDeps();
+    const { scene, args } = await encoderArgs(deps, params);
+    expect(scene.createPlaylistWindowFeeder).toBeDefined();
+    expect(args).toContain('pipe:7');
+    await scene.buildOverlay(scene.tracks[0], ROWS);
+    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
+    expect(call.elements).toEqual(DEFAULT_TEMPLATE_ELEMENTS);
+    expect(call.playlistLines).toEqual(['▶ a', '  queued']);
+  });
+
+  it('variant A omits exactly the live playlist element', async () => {
+    const { deps } = buildDeps();
+    const { scene } = await encoderArgs(deps, params);
+    await scene.buildOverlay(scene.tracks[0], ROWS, { omitLivePlaylist: true });
+    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
+    expect(call.elements).toEqual(DEFAULT_TEMPLATE_ELEMENTS.filter((e) => e.type !== 'playlist'));
+  });
+
+  it('a second playlist element stays in variant A too (only the first animates, C12)', async () => {
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10), playlistEl(600, 10)] });
+    const { scene } = await encoderArgs(deps, { ...params, templateId: 'tpl-1' });
+    await scene.buildOverlay(scene.tracks[0], ROWS, { omitLivePlaylist: true });
+    expect((renderTemplatePng as jest.Mock).mock.calls[0][0].elements).toEqual([playlistEl(600, 10)]);
+  });
+
+  it('no playlist element: no feeder, no pipe:7', async () => {
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [titleEl] });
+    const { scene, args } = await encoderArgs(deps, { ...params, templateId: 'tpl-1' });
+    expect(scene.createPlaylistWindowFeeder).toBeUndefined();
+    expect(args).not.toContain('pipe:7');
+  });
+
+  it('off-canvas playlist element: no layer', async () => {
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(1400, 10)] });
+    const { scene, args } = await encoderArgs(deps, { ...params, templateId: 'tpl-1' });
+    expect(scene.createPlaylistWindowFeeder).toBeUndefined();
+    expect(args).not.toContain('pipe:7');
   });
 });

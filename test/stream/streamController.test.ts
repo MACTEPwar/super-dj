@@ -2,6 +2,7 @@ import { StreamController } from '../../src/stream/streamController';
 import { ApiError } from '../../src/errors';
 import { Track } from '../../src/playlist/types';
 
+const BASE_ROWS = [{ key: 'b:0', text: '▶ a', isCurrent: true }, { key: 'b:1', text: '  b', isCurrent: false }];
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
 const overlayFor = (t: Track) => ({ title: t.name, playlistLines: [`▶ ${t.name}`], durationSeconds: 100, overlayPng: Buffer.from('png'), timer: null });
 
@@ -31,6 +32,7 @@ function buildDeps() {
     insertNext: jest.fn(),
     peekNext: jest.fn().mockReturnValue(tracks[1]),
     positionInBase: jest.fn().mockReturnValue(0),
+    windowSnapshot: jest.fn().mockReturnValue(BASE_ROWS),
   };
   const children: FakeChild[] = [];
   const audioRelay = {
@@ -46,7 +48,7 @@ function buildDeps() {
     close: jest.fn(),
   };
   const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
-  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {} };
+  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {}, playlistWindowPipe: {} };
   const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const deps: any = {
     library, queue,
@@ -831,5 +833,117 @@ describe('StreamController', () => {
     expect(onStatusChanged).toHaveBeenCalledTimes(6);
     controller.stop();
     expect(onStatusChanged).toHaveBeenCalledTimes(7);
+  });
+
+  describe('playlist window burst layer', () => {
+    const INSERTED_ROWS = [{ key: 'b:0', text: '▶ a', isCurrent: true }, { key: 'i:0', text: '  d', isCurrent: false }, { key: 'b:1', text: '  b', isCurrent: false }];
+    function withFeeder() {
+      const ctx = buildDeps();
+      const feeder = { attach: jest.fn(), showRows: jest.fn().mockResolvedValue(undefined), animate: jest.fn().mockResolvedValue(undefined), goIdle: jest.fn(), close: jest.fn() };
+      ctx.deps.createPlaylistWindowFeeder = jest.fn().mockReturnValue(feeder);
+      ctx.deps.buildOverlay = jest.fn((t: Track, _rows: unknown, opts?: { omitLivePlaylist?: boolean }) =>
+        Promise.resolve({ ...overlayFor(t), variant: opts?.omitLivePlaylist ? 'A' : 'B' }));
+      return { ...ctx, feeder };
+    }
+    const settle = async () => { for (let i = 0; i < 30; i++) { jest.advanceTimersByTime(100); await Promise.resolve(); await Promise.resolve(); } };
+
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('attaches the feeder to pipe:7 and bakes the snapshot rows on start', async () => {
+      const { deps, feeder, encoderChild } = withFeeder();
+      await new StreamController(deps).start();
+      expect(feeder.attach).toHaveBeenCalledWith(encoderChild.playlistWindowPipe);
+      expect(deps.buildOverlay).toHaveBeenCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('enqueueTrack runs a burst: A is baked (and becomes currentOverlay), then B with the new rows', async () => {
+      const { deps, queue, canvasFeeder, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      expect(feeder.showRows).toHaveBeenCalledWith(BASE_ROWS);
+      expect(feeder.animate).toHaveBeenCalled();
+      const variants = canvasFeeder.render.mock.calls.map((c: any[]) => c[0].variant);
+      expect(variants).toContain('A');
+      expect(variants[variants.length - 1]).toBe('B');
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), INSERTED_ROWS, { omitLivePlaylist: false });
+      expect(feeder.goIdle).toHaveBeenCalled();
+    });
+
+    it("the timer's once-a-second re-render uses variant A while the burst is in progress", async () => {
+      const { deps, queue, canvasFeeder, feeder } = withFeeder();
+      deps.buildOverlay.mockImplementation((t: Track, _r: unknown, opts?: any) => Promise.resolve({ ...overlayFor(t), variant: opts?.omitLivePlaylist ? 'A' : 'B', timer: { x: 0, y: 0, fontSize: 10, color: '#fff', style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } } }));
+      let releaseAnimate!: () => void;
+      feeder.animate.mockImplementation(() => new Promise<void>((r) => { releaseAnimate = r; }));
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle(); // now parked inside animate(), canvas is A
+      canvasFeeder.render.mockClear();
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      expect(canvasFeeder.render.mock.calls.every((c: any[]) => c[0].variant === 'A')).toBe(true);
+      releaseAnimate();
+      await settle();
+    });
+
+    it('next() during a burst aborts it (feeder idle) and the new track bakes normally (C2)', async () => {
+      const { deps, queue, canvasFeeder, feeder } = withFeeder();
+      feeder.animate.mockImplementation(() => new Promise<void>(() => {}));
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      feeder.goIdle.mockClear();
+      await controller.next();
+      expect(feeder.goIdle).toHaveBeenCalled();
+      const last = canvasFeeder.render.mock.calls[canvasFeeder.render.mock.calls.length - 1][0];
+      expect(last.variant).toBe('B');
+    });
+
+    it('paused -> next() -> a donation arrives: no bake/burst until resume (the screen must not show the next track early)', async () => {
+      const { deps, queue, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.pause();
+      queue.current.mockReturnValue(track('b')); // next() moved the queue while paused; nothing was fed
+      await controller.next();
+      deps.buildOverlay.mockClear();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      expect(deps.buildOverlay).not.toHaveBeenCalled();
+      expect(feeder.showRows).not.toHaveBeenCalled();
+    });
+
+    it('enqueueTrack while idle/reconnecting runs no burst (C7)', () => {
+      const { deps, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      expect(feeder.showRows).not.toHaveBeenCalled();
+    });
+
+    it('stop() closes the feeder', async () => {
+      const { deps, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.stop();
+      expect(feeder.close).toHaveBeenCalled();
+    });
+
+    it('without a playlist element (no factory) enqueueTrack only queues', async () => {
+      const { deps, queue } = buildDeps();
+      const controller = new StreamController(deps);
+      await controller.start();
+      deps.buildOverlay.mockClear();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      expect(deps.buildOverlay).not.toHaveBeenCalled();
+    });
   });
 });

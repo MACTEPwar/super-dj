@@ -6,13 +6,25 @@ import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
 import { PulseVisualizer } from '../ffmpeg/pulseVisualizer';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { formatDuration } from '../ffmpeg/overlayText';
+import { InsertTransition } from '../ffmpeg/playlistWindowTransition';
+import { WindowRow, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER } from '../playlist/window';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 import { ReconnectPolicy, ReconnectDecision, SHORT_LIVED_UPTIME_MS } from './reconnectPolicy';
+import { PlaylistWindowAnimator, HANDOFF_HOLD_MS } from './playlistWindowAnimator';
 
 export interface LibraryLike {
   list(): Track[];
   findByName(name: string): Track | undefined;
+}
+
+// The structural subset of PlaylistWindowFeeder this controller drives.
+export interface PlaylistWindowFeederLike {
+  attach(pipe: NodeJS.WritableStream): void;
+  showRows(rows: WindowRow[]): Promise<void>;
+  animate(plan: InsertTransition): Promise<void>;
+  goIdle(): void;
+  close(): void;
 }
 
 export interface StreamControllerDeps {
@@ -22,7 +34,9 @@ export interface StreamControllerDeps {
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: () => PersistentEncoder;
   createPulseVisualizer?: () => PulseVisualizer;
-  buildOverlay: (track: Track, baseAnchorIndex?: number) => Promise<NowPlayingOverlay>;
+  // Present only when the template has an on-canvas playlist element — see buildStreamScene().
+  createPlaylistWindowFeeder?: () => PlaylistWindowFeederLike;
+  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean }) => Promise<NowPlayingOverlay>;
   // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
   // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so the caller
   // (LocalStreamManager — the only constructor of a StreamController now) can fold in
@@ -56,6 +70,19 @@ export class StreamController {
   // respawn captures this value at schedule time and bails if it no longer matches when its timer
   // fires (the same pattern feedCurrentTrack already uses for a stale overlay probe).
   private sessionGeneration = 0;
+
+  // The playlist window's pipe:7 burst layer — both null when the template has no on-canvas
+  // playlist element.
+  private playlistWindowFeeder: PlaylistWindowFeederLike | null = null;
+  private playlistAnimator: PlaylistWindowAnimator | null = null;
+  // The rows the canvas currently shows in the live playlist element (variant B's rows).
+  private bakedRows: WindowRow[] = [];
+  // The track whose overlay is actually on screen — NOT always queue.current(), which a paused
+  // next()/previous() moves without feeding.
+  private bakedTrack: Track | null = null;
+  // Separate from sessionGeneration on purpose: pause() bumps sessionGeneration, and a burst's
+  // canvas-B bake must still land while paused. Only a track change / teardown invalidates a bake.
+  private overlayGeneration = 0;
 
   // When the currently-running encoder (if any) was spawned — used to compute how long it lived
   // once it exits unexpectedly (see reconnectPolicy.ts's SHORT_LIVED_UPTIME_MS: exit codes carry
@@ -154,14 +181,22 @@ export class StreamController {
   }
 
   private async feedCurrentTrack(track: Track, startOffsetSeconds = 0): Promise<void> {
+    // A track change (or resume) supersedes any in-progress window burst: the layer goes
+    // transparent at once and any pending canvas A/B bake from it is invalidated, so the new
+    // track's full overlay (window included) is what lands — no stale moving rows on top.
+    this.playlistAnimator?.abort();
+    this.overlayGeneration += 1;
+    const rows = this.windowRows();
     const generation = ++this.sessionGeneration;
-    const overlay = await this.deps.buildOverlay(track, this.deps.queue.positionInBase());
+    const overlay = await this.deps.buildOverlay(track, rows);
     // The generation may have advanced, or the session may have left 'streaming', while we were
     // awaiting the overlay — a stale overlay must never be fed.
     if (generation !== this.sessionGeneration) return;
     if (this.state !== 'streaming') return;
 
     this.currentOverlay = overlay;
+    this.bakedRows = rows;
+    this.bakedTrack = track;
     this.trackStartedAt = Date.now();
     this.trackStartOffsetSeconds = startOffsetSeconds;
     const child = this.audioRelay!.switchTrack(track.audioPath, startOffsetSeconds);
@@ -176,6 +211,37 @@ export class StreamController {
       this.releaseTrack(track);
       this.advanceToNextTrack();
     });
+
+    // An enqueueTrack() that arrived while this feed was awaiting its overlay skipped its burst
+    // (bakedTrack was still the previous track then), so `rows` may predate it. Catch the window
+    // up; a plain no-op ('none' plan, no bake) when nothing was queued in the meantime.
+    if (this.playlistAnimator && generation === this.sessionGeneration && this.state === 'streaming') {
+      this.playlistAnimator.queueChanged(this.windowRows());
+    }
+  }
+
+  private windowRows(): WindowRow[] {
+    return this.deps.queue.windowSnapshot(PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
+  }
+
+  // The animator's hook back into the canvas: builds the current track's overlay from `rows`
+  // (variant A omits the live playlist element), makes it currentOverlay — so the once-a-second
+  // timer tick and pause()'s frozen frame re-render the RIGHT variant — and renders it. Returns
+  // false when a track change (feedCurrentTrack bumps overlayGeneration) made the result stale.
+  private async bakeCanvas(rows: WindowRow[], opts: { omitLivePlaylist: boolean }): Promise<boolean> {
+    const generation = this.overlayGeneration;
+    // The track actually on screen — NOT queue.current(), which a paused next()/previous() moves
+    // without feeding (nothing changes on screen until resume).
+    const track = this.bakedTrack;
+    if (!track || !this.canvasFeeder) return false;
+    const overlay = await this.deps.buildOverlay(track, rows, opts);
+    if (generation !== this.overlayGeneration || !this.canvasFeeder) return false;
+    if (this.state !== 'streaming' && this.state !== 'paused') return false;
+    this.currentOverlay = overlay;
+    if (!opts.omitLivePlaylist) this.bakedRows = rows;
+    const elapsed = this.state === 'paused' ? this.pausedElapsedSeconds : this.elapsedTrackSeconds();
+    await this.canvasFeeder.render(overlay, this.timerText(elapsed));
+    return true;
   }
 
   // Fires a one-off track's cleanup hook once it stops being the current track — naturally (the
@@ -237,6 +303,13 @@ export class StreamController {
   private teardown(): void {
     this.clearPendingReconnect();
     this.stopTimerTicker();
+    this.playlistAnimator?.abort();
+    this.playlistWindowFeeder?.close();
+    this.playlistAnimator = null;
+    this.playlistWindowFeeder = null;
+    this.bakedRows = [];
+    this.bakedTrack = null;
+    this.overlayGeneration += 1;
     this.audioRelay?.close();
     this.canvasFeeder?.close();
     this.pulseVisualizer?.close();
@@ -272,6 +345,18 @@ export class StreamController {
       this.pulseVisualizer = this.deps.createPulseVisualizer();
       this.pulseVisualizer.attach(child.pulsePipe);
       this.audioRelay.attachTap(this.pulseVisualizer.audioSink);
+    }
+    if (this.deps.createPlaylistWindowFeeder) {
+      const feeder = this.deps.createPlaylistWindowFeeder();
+      feeder.attach(child.playlistWindowPipe);
+      this.playlistWindowFeeder = feeder;
+      this.playlistAnimator = new PlaylistWindowAnimator({
+        feeder,
+        bakeCanvas: (rows, opts) => this.bakeCanvas(rows, opts),
+        getBakedRows: () => this.bakedRows,
+        sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref(); }),
+        holdMs: HANDOFF_HOLD_MS,
+      });
     }
   }
 
@@ -386,6 +471,15 @@ export class StreamController {
   // Phase A).
   enqueueTrack(track: Track): void {
     this.deps.queue.insertNext(track);
+    // Animate only when a picture is actually being produced, AND only while the queue's current
+    // track is still the one on screen. After a paused next()/previous() the snapshot's current row
+    // has moved but the screen deliberately hasn't (nothing changes until resume). Baking now
+    // would show the NEXT track's title/cover under the old audio. In both skip cases the next
+    // feedCurrentTrack() simply bakes the new snapshot.
+    if (this.playlistAnimator && (this.state === 'streaming' || this.state === 'paused')
+      && this.deps.queue.current() === this.bakedTrack) {
+      this.playlistAnimator.queueChanged(this.windowRows());
+    }
     this.deps.onStatusChanged?.();
   }
 

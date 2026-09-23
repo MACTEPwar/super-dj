@@ -8,15 +8,17 @@ import { CanvasPlacement, GifOverlayConfig } from '../ffmpeg/persistentEncoderAr
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
 import { getImageFrameCount } from '../ffmpeg/imageFrameCount';
-import { buildPlaylistWindowLines, buildInsertedTrackWindowLines } from '../ffmpeg/overlayText';
+import { PlaylistWindowFeeder } from '../ffmpeg/playlistWindowFeeder';
 import { Spawner, PipeSpawner } from '../ffmpeg/types';
+import { computePlaylistWindowRegion } from '../render/playlistWindowGeometry';
+import { WindowRow, windowRowLines, PLAYLIST_WINDOW_VISIBLE_ROWS } from '../playlist/window';
 import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
 import { TemplateImageService, InvalidAssetIdError } from '../templates/templateImageService';
 import {
-  TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS,
+  TemplateElement, TimerElement, EqualizerElement, PlaylistElement, DEFAULT_TEMPLATE_ELEMENTS,
   normalizeEqualizerElement, globalPulseStrength,
 } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
@@ -32,8 +34,7 @@ export const VIDEO_FPS = 30;
 // persistentEncoderArgs.ts's heartbeatFps for why these two must always match.
 export const CANVAS_HEARTBEAT_MS = 200;
 export const CANVAS_HEARTBEAT_FPS = 1000 / CANVAS_HEARTBEAT_MS;
-const PLAYLIST_WINDOW_BEFORE = 2;
-const PLAYLIST_WINDOW_AFTER = 7;
+export const PLAYLIST_WINDOW_FPS = VIDEO_FPS; // Task 10's measured fallback rule may lower this to 15
 
 // Where the encoder pushes. Supplied by the caller because that is the ONE thing this module
 // deliberately knows nothing about: LocalStreamManager passes a minted MediaMTX publish URL, and
@@ -72,14 +73,16 @@ export interface StreamScene {
   playlistName: string;
   tracks: Track[];
   library: LibraryLike;
-  // baseAnchorIndex is PlaylistQueue.positionInBase() — required only when `track` is an inserted
-  // track that isn't itself in this scene's playlist; optional otherwise (StreamController always
-  // supplies it, but it's ignored whenever the track IS found in the playlist by name).
-  buildOverlay: (track: Track, baseAnchorIndex?: number) => Promise<NowPlayingOverlay>;
+  // windowRows is PlaylistQueue.windowSnapshot() — the playlist element's lines. omitLivePlaylist
+  // renders "variant A": the first playlist element left out, while the pipe:7 burst layer draws
+  // it instead (see PlaylistWindowAnimator).
+  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean }) => Promise<NowPlayingOverlay>;
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: (target: RtmpTarget) => PersistentEncoder;
   createPulseVisualizer?: () => PulseVisualizer;
+  // Present only when the template has an on-canvas playlist element (pipe:7 exists exactly then).
+  createPlaylistWindowFeeder?: () => PlaylistWindowFeeder;
 }
 
 // Applies a track's overlayOverride.color to every title/text element's own color — playlist/
@@ -230,32 +233,51 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
     ? path.join(deps.fifoDir, `super-dj-overlay-above-${sceneId}.png`)
     : undefined;
 
-  const buildOverlay = async (track: Track, baseAnchorIndex?: number): Promise<NowPlayingOverlay> => {
-    const currentIndex = tracks.findIndex((t) => t.name === track.name);
-    // An inserted track (play-by-name from outside this playlist, or a donation request) isn't in
-    // this playlist's own snapshot — falling through to buildPlaylistWindowLines would always miss
-    // and render an empty window for as long as it plays. baseAnchorIndex
-    // (PlaylistQueue.positionInBase()) is what StreamController passes for exactly this case — the
-    // base-playlist track the inserted track is standing in front of.
-    const playlistLines = currentIndex >= 0
-      ? buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER)
-      : buildInsertedTrackWindowLines(tracks, baseAnchorIndex ?? -1, track.name, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
+  // The FIRST playlist element gets a burst layer (pipe:7) for insert animations. It stays BAKED
+  // in the canvas like before — the layer is transparent except during a burst (see
+  // PlaylistWindowAnimator). Later playlist elements (rare) are only ever baked. The layer sits
+  // directly above whichever canvas layer the element is baked into.
+  const livePlaylistElement = templateElements.find((e): e is PlaylistElement => e.type === 'playlist') ?? null;
+  const livePlaylistRegion = livePlaylistElement
+    ? computePlaylistWindowRegion(livePlaylistElement, { width: VIDEO_WIDTH, height: VIDEO_HEIGHT }, PLAYLIST_WINDOW_VISIBLE_ROWS)
+    : null;
+  const livePlaylist = livePlaylistElement && livePlaylistRegion
+    ? {
+        element: livePlaylistElement,
+        region: livePlaylistRegion,
+        layer: (canvasPlacement !== 'top' && belowElements.includes(livePlaylistElement) ? 'below' : 'top') as 'below' | 'top',
+      }
+    : null;
+
+  const buildOverlay = async (
+    track: Track,
+    windowRows: WindowRow[],
+    opts: { omitLivePlaylist?: boolean } = {},
+  ): Promise<NowPlayingOverlay> => {
+    // The rows come from PlaylistQueue.windowSnapshot() — queued (inserted) tracks included, and
+    // an inserted current track anchored where the base playlist will pick back up.
+    const playlistLines = windowRowLines(windowRows);
     const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
-    const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => renderTemplatePng({
-      elements: applyOverlayOverride(elements, track.overlayOverride),
-      title: track.name,
-      playlistLines,
-      coverPath: track.coverPath ?? deps.defaultCoverPath,
-      width: VIDEO_WIDTH,
-      height: VIDEO_HEIGHT,
-      fontPath: deps.fontFile,
-      fontFamily: deps.fontFamily,
-      imageAssets: resolveImageAssets(elements, deps.templateImageService, userId, templateId ?? ''),
-      // The track's own background override is the bottom-most thing in the scene, so it only ever
-      // belongs on the lower layer — painted on the upper one it would cover every gif.
-      background: layer === 'below' ? track.overlayOverride?.backgroundColor : undefined,
-    });
+    const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => {
+      // Variant A: identity-filter exactly the live element, so a second playlist element (or
+      // anything else) stays baked. Without omitLivePlaylist this is the original element list.
+      const shown = opts.omitLivePlaylist && livePlaylist ? elements.filter((e) => e !== livePlaylist.element) : elements;
+      return renderTemplatePng({
+        elements: applyOverlayOverride(shown, track.overlayOverride),
+        title: track.name,
+        playlistLines,
+        coverPath: track.coverPath ?? deps.defaultCoverPath,
+        width: VIDEO_WIDTH,
+        height: VIDEO_HEIGHT,
+        fontPath: deps.fontFile,
+        fontFamily: deps.fontFamily,
+        imageAssets: resolveImageAssets(shown, deps.templateImageService, userId, templateId ?? ''),
+        // The track's own background override is the bottom-most thing in the scene, so it only ever
+        // belongs on the lower layer — painted on the upper one it would cover every gif.
+        background: layer === 'below' ? track.overlayOverride?.backgroundColor : undefined,
+      });
+    };
 
     let overlayPng: Buffer;
     let overlayPngAbove: Buffer | undefined;
@@ -326,10 +348,17 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
         : undefined,
       gifOverlays,
       canvasPlacement,
-      // Wired to a real value in a later task (the playlist-window insert-burst layer); this
-      // task's PersistentEncoderParams change only requires the key to be explicitly decided.
-      playlistWindow: undefined,
+      playlistWindow: livePlaylist
+        ? {
+            x: livePlaylist.region.x, y: livePlaylist.region.y,
+            width: livePlaylist.region.width, height: livePlaylist.region.height,
+            fps: PLAYLIST_WINDOW_FPS, layer: livePlaylist.layer,
+          }
+        : undefined,
     }),
+    createPlaylistWindowFeeder: livePlaylist
+      ? () => new PlaylistWindowFeeder({ element: livePlaylist.element, region: livePlaylist.region, fps: PLAYLIST_WINDOW_FPS })
+      : undefined,
     createPulseVisualizer: equalizerElement
       ? () => new PulseVisualizer({
           width: Math.round(equalizerElement.width),
