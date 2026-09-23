@@ -786,7 +786,7 @@ connection) opens in a shared `Drawer` component (a slide-out panel built on the
 primitive) rather than being inlined on the page.
 
 **Donation-triggered song requests.** A per-user `InteractionRule` (Prisma model: `actionType`
-today always `'songRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
+`'songRequest'` or `'libraryTrackRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
 Donatello.to trigger a one-off track play: a donation message containing `!<keyword>:<query>` at
 or above the rule's `minAmount` (converted to UAH) fetches audio for `<query>` from the streamer's
 own external media-search service and is **queued to play next**, exactly like `play`-by-name: it
@@ -803,7 +803,10 @@ keyword/threshold matching against a user's enabled rules), `currencyConverter.t
 `LocalStreamManager.enqueueTrack`; resolves a `SongRequestResult` rather than throwing on
 failure, so both the real webhook path — which only logs it — and the interaction-rule "Test"
 button — which reports it back to the caller — can share one implementation),
-`songRequestQueue.ts` (`SongRequestQueue` — see below), `tempFileCleanup.ts` (the sweep backstop —
+`donationRequestQueue.ts` (`DonationRequestQueue` — see below), `libraryTrackRequestAction.ts`
+(`executeLibraryTrackRequest` — the exact-track counterpart to `executeSongRequest`, see below),
+`donationActions.ts` (the `ActionType` union and the shared `DonationActionHandlers` dispatch
+object both the webhook and the rule "Test" route use), `tempFileCleanup.ts` (the sweep backstop —
 see "Configuration" below), and `interactionRuleRepository.ts`/`interactionRuleRoutes.ts` (CRUD
 plus `POST /interaction-rules/{id}/test`, mounted at `/interaction-rules`, cookie-authenticated and
 owner-scoped like every other resource route). `frontend/src/pages/Donations.tsx` +
@@ -811,6 +814,26 @@ owner-scoped like every other resource route). `frontend/src/pages/Donations.tsx
 panel that calls the `/test` route directly — bypassing Donatello entirely — with the rule's own
 `minAmount` (not editable client-side) and an editable message defaulted to a working `!keyword:`
 command.
+
+**Exact library-track requests + the public request page.** A second action type,
+`libraryTrackRequest`, lets a donor request an EXACT track. The streamer shares
+`/r/<requestPageToken>` (a public frontend page, outside the authenticated shell), which reads
+`GET /public/request-page/:token` — the ONE unauthenticated read besides `/auth/*` — listing the
+tracks of the owner's currently-live playlist (`streaming`/`paused`/`reconnecting`; anything else
+is `{live:false}`), read fresh from the DB at page load (no live updates). Each track copies
+`!<keyword>:<first 20 code points of its name> <track uuid>`. `executeLibraryTrackRequest`
+(`src/donations/libraryTrackRequestAction.ts`) takes the LAST uuid in the matched query, checks the
+track belongs to `DONATION_TARGET_USER_ID` (ownership only, not membership in the live playlist),
+and calls `LocalStreamManager.enqueueTrack` — no media-search fetch, no temp file — through the
+SAME `DonationRequestQueue` as free-text requests, so the two types play strictly in donation
+order (an exact-track request waits behind an earlier free-text one that is still downloading).
+The token is `User.requestPageToken` — 128-bit hex, unique, minted/rotated/disabled
+only via `POST`/`DELETE /request-page/token` (owner, `requireAuth`), and never the `userId`. The
+public route 404s a malformed token by shape before any DB call, answers the same 404 for an
+unknown one, sets `no-store` + `no-referrer`, and exposes only names/ids/durations. Rule keywords
+are unique per user (409), since two rules sharing one would both fire. The webhook and the rule
+"Test" button dispatch through one shared `DonationActionHandlers` object built in `server.ts`
+(`src/donations/donationActions.ts`).
 
 **One queue (`StreamController.enqueueTrack`).** Every donation request and every `play`-by-name
 goes through the one `PlaylistQueue.insertNext()` FIFO via `enqueueTrack(track)` — play after the
@@ -826,16 +849,30 @@ uses `positionInBase()` + `buildInsertedTrackWindowLines()` for any current trac
 playlist by name — which covers both donation tracks and `play`-by-name picks from outside the
 running playlist.
 
-**Donation ordering is by arrival, not by download speed (`songRequestQueue.ts`).** Two donations
-racing on the external media-search HTTP fetch could otherwise insert — and therefore play — in
-whichever order their downloads happened to finish, not the order the donations actually arrived
-in. `SongRequestQueue.enqueue()` chains every request onto one promise tail, so a query is not even
-started (its own `fetchAudio()` call not fired) until every request enqueued ahead of it has fully
-resolved — deliberately fully sequential rather than "download in parallel, deliver in order":
-simpler, and ordering is what was asked for, not throughput. `server.ts` constructs ONE
-`SongRequestQueue` instance and hands the same `enqueue` function to both the real webhook path and
+**Donation ordering is by arrival, not by download speed (`donationRequestQueue.ts`).** Two
+donations racing on the external media-search HTTP fetch — or one free-text and one exact-track
+donation arriving moments apart — could otherwise insert, and therefore play, in whichever order
+their work happened to finish, not the order the donations actually arrived in.
+`DonationRequestQueue.enqueue(() => task)` is task-generic (not query-string-specific any more —
+that's what let it become the one shared queue for BOTH action types) and chains every task onto
+one promise tail, so a task is not even started until every task enqueued ahead of it has fully
+settled — deliberately fully sequential rather than "run in parallel, deliver in order": simpler,
+and ordering is what was asked for, not throughput. An exact-track task is two indexed DB
+queries and settles almost instantly once its turn comes; a free-text task waits on the external
+media-search download — so a free-text donation that arrived first still plays before a
+later-arriving exact-track one, even though the exact-track one resolves first once it's running.
+`server.ts` constructs ONE `DonationRequestQueue` instance and both `donationActions.songRequest`
+and `donationActions.libraryTrackRequest` enqueue onto it, shared by both the real webhook path and
 the interaction-rule "Test" button, so a manual test and a real donation queued moments apart still
-resolve in the order they were actually issued.
+resolve in the order they were actually issued. A **head-of-line timeout**
+(`DONATION_TASK_TIMEOUT_MS = 90_000`) is the knock-on of sharing one queue across a
+fetch-bound task and near-instant ones: a hung media-search download would otherwise block every
+later donation of BOTH types for as long as it hangs. After 90s the queue moves on; the timed-out
+task is not cancelled and still resolves its own caller's promise if it eventually completes — one
+request landing out of order (logged), instead of the whole queue stalling. The residual race this
+doesn't remove: two webhooks arriving within one `listEnabledByUser` DB round trip are ordered by
+whichever `matchRules` call resolves first, not by which HTTP request the platform sent first —
+narrow, and unchanged from the original arrival-ordering design's own scope.
 
 **MVP scope note:** `DONATION_TARGET_USER_ID` hard-codes which single
 account's stream every donation is routed to (see "Configuration" below) — there is no per-donor
@@ -987,13 +1024,23 @@ src/
                             (parseCommand/matchRules), currencyConverter.ts, songRequestAction.ts
                             (executeSongRequest — fetch, temp-write, enqueueTrack; fetches
                             through media/mediaSearchClient.ts, above),
-                            songRequestQueue.ts (SongRequestQueue — serializes donation-triggered
-                            requests so play order matches arrival order, not download speed),
+                            libraryTrackRequestAction.ts (executeLibraryTrackRequest — exact-track
+                            counterpart: resolve a donated uuid to an owned track, enqueueTrack,
+                            no fetch/temp file), donationActions.ts (ActionType union,
+                            DonationActionHandlers — the shared dispatch object both the webhook
+                            and the rule "Test" route use), donationRequestQueue.ts
+                            (DonationRequestQueue — serializes EVERY donation-triggered action, both
+                            types, so play order matches arrival order, not download/DB speed; a
+                            head-of-line timeout keeps a hung task from blocking later donations),
                             tempFileCleanup.ts (age-based sweep backstop),
                             interactionRuleRepository.ts (Prisma) / interactionRuleRoutes.ts
-                            (mounted at /interaction-rules)
-prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
-                            StreamDestination — incl. the reused youtubeLiveStreamId,
+                            (mounted at /interaction-rules, incl. per-user keyword uniqueness)
+  requestPage/               requestPageRoutes.ts (owner routes, mounted at /request-page: mint/
+                            rotate/disable the public share token), publicRequestPageRoutes.ts
+                            (the ONE unauthenticated read besides /auth/*, mounted at
+                            /public/request-page — token-gated live playlist for donors)
+prisma/                     schema.prisma (User — incl. requestPageToken, Session, Track, Playlist,
+                            PlaylistTrack, StreamDestination — incl. the reused youtubeLiveStreamId,
                             OAuthConnection, OAuthState, StreamSession +
                             StreamSessionDestination — kept under their old names, now read as
                             saved PRESETS, StreamTemplate, InteractionRule) + migrations/
@@ -1221,14 +1268,17 @@ top of this same CRUD API. `POST /templates/{id}/preview`
 stream pipeline which falls back to a blank overlay instead of failing the request.
 
 `POST /interaction-rules` (`actionType`, `enabled`, `minAmount`, `commandKeyword` — every field
-required and validated: `actionType` must be a known type (only `songRequest` today),
+required and validated: `actionType` must be one of `songRequest`/`libraryTrackRequest`,
 `minAmount` a positive whole number, `commandKeyword` 1-20 letters/digits, stored lowercased and
-**bare, without a leading `!`**), `GET /interaction-rules`, `PUT /interaction-rules/{id}` (same
-validation, full replace — a partial body is rejected, not merged, except `actionType` which
-defaults to the existing rule's own value when omitted), `DELETE /interaction-rules/{id}` — cookie-
-authenticated and owner-scoped (404 if the rule isn't the caller's) like every other resource
-route. Backs the donation song-request feature's per-user rule set — see "Donation-triggered song
-requests" above.
+**bare, without a leading `!`**, and unique per user — **409** if another of the caller's own rules
+already uses it, case-insensitively, regardless of that other rule's action type, since two rules
+sharing a keyword would both fire on one donation), `GET /interaction-rules`,
+`PUT /interaction-rules/{id}` (same validation, full replace — a partial body is rejected, not
+merged, except `actionType` which defaults to the existing rule's own value when omitted; the
+keyword-uniqueness check excludes the rule's own id, so keeping an unchanged keyword never 409s
+against itself), `DELETE /interaction-rules/{id}` — cookie-authenticated and owner-scoped (404 if
+the rule isn't the caller's) like every other resource route. Backs the donation feature's per-user
+rule set — see "Donation-triggered song requests" and "Exact library-track requests" above.
 
 `POST /webhooks/donatello` — the inbound Donatello.to donation event. **Not session-cookie
 authenticated** (Donatello is a server-to-server caller, not a browser): a shared secret is
@@ -1236,6 +1286,21 @@ compared against the `X-Key` request header (`timingSafeEqual`), 401 on a missin
 Answers `200` fast, before any rule matching or media fetch, so Donatello never sees our own
 downstream decisions (no rule matched, the media fetch failed) as a delivery failure and retries
 forever; a structurally invalid payload is the only case that 400s.
+
+`GET /request-page` (returns `{token: string | null}`, never mints one as a side effect),
+`POST /request-page/token` (mints or rotates the caller's public share token, invalidating any
+previous link immediately), `DELETE /request-page/token` (disables it — no `Content-Type` guard,
+matching every other DELETE route in the app, since a bodiless browser DELETE carries no body to
+guard) — cookie-authenticated, no id in the URL (there is exactly one token per account, like the
+local-stream routes). See "Exact library-track requests" above.
+
+`GET /public/request-page/{token}` — **the one unauthenticated read besides `/auth/*`.** A donor
+opens this from the streamer's shared link; the token alone resolves to a user's currently-live
+playlist. 404s a malformed token by shape before any DB call, and the identical 404 for an unknown
+one; `{live: false}` (200, not 404) for a valid token whose stream isn't
+`streaming`/`paused`/`reconnecting`. Every response carries `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`, and exposes only track id/name/duration plus which command
+keyword/minAmount to use (never file paths, covers or the owner's email).
 
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
