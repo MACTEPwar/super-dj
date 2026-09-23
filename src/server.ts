@@ -31,7 +31,9 @@ import { InteractionRuleRepository } from './donations/interactionRuleRepository
 import { StubCurrencyConverter } from './donations/currencyConverter';
 import { HttpMediaSearchClient } from './media/mediaSearchClient';
 import { executeSongRequest } from './donations/songRequestAction';
+import { executeLibraryTrackRequest } from './donations/libraryTrackRequestAction';
 import { DonationRequestQueue } from './donations/donationRequestQueue';
+import { DonationActionHandlers } from './donations/donationActions';
 import { startTempFileCleanupSweep } from './donations/tempFileCleanup';
 import * as os from 'os';
 import * as path from 'path';
@@ -190,18 +192,21 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   // here.
   const tempFileCleanupSweep = startTempFileCleanupSweep(donationTempDir, 12 * 60 * 60 * 1000, 10 * 60 * 1000);
 
-  // Serializes every donation-triggered action (from the real webhook AND the interaction-rule
-  // "Test" button, which shares this same instance below) so two requests racing on the external
-  // media-search fetch still play in the order they were donated, never in whichever order their
-  // downloads happened to finish — see donationRequestQueue.ts. This is a temporary shim: it wraps
-  // the task-generic DonationRequestQueue back into the old SongRequestQueue-shaped
-  // `{enqueue(query)}` interface so this commit builds green; Task 5 replaces it with the real
-  // free-text/exact-track handlers object.
+  // ONE arrival-ordered queue for every donation action, shared by the real webhook and the rule
+  // "Test" button: whoever donated first plays first, across BOTH action types (user decision —
+  // see the design spec, edge case A5). An exact-track request waits behind an earlier free-text
+  // request that is still downloading.
   const donationQueue = new DonationRequestQueue();
-  const songRequestQueue = { enqueue: (query: string) => donationQueue.enqueue(() => executeSongRequest(
-    { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
-    query,
-  )) };
+  const donationActions: DonationActionHandlers = {
+    songRequest: (query) => donationQueue.enqueue(() => executeSongRequest(
+      { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
+      query,
+    )),
+    libraryTrackRequest: (query) => donationQueue.enqueue(() => executeLibraryTrackRequest(
+      { trackRepository, streamInserter: localStreamManager, targetUserId: config.donationTargetUserId },
+      query,
+    )),
+  };
 
   // The destination-free half of the pipeline — everything a stream needs that has no destination
   // concept in it. LocalStreamManager below is constructed by spreading this same value, not a
@@ -265,7 +270,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
       callbackKey: config.donatelloCallbackKey,
       converter: currencyConverter,
       targetUserId: config.donationTargetUserId,
-      executeSongRequest: (query: string) => songRequestQueue.enqueue(query),
+      actions: donationActions,
     },
     frontendOrigin: config.frontendOrigin,
   });

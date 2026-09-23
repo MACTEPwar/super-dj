@@ -71,7 +71,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/stream-presets', createStreamPresetRouter(deps.authService, deps.streamPresetRepository, deps.playlistRepository, deps.templateRepository, deps.destinationRepository));
   app.use('/interaction-rules', createInteractionRuleRouter(deps.authService, deps.interactionRuleRepository, {
     converter: deps.donatelloWebhookDeps.converter,
-    executeSongRequest: deps.donatelloWebhookDeps.executeSongRequest,
+    actions: deps.donatelloWebhookDeps.actions,
   }));
   app.use('/webhooks/donatello', createDonatelloWebhookRouter({ ...deps.donatelloWebhookDeps, ruleRepository: deps.interactionRuleRepository }));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));

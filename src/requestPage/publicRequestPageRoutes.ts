@@ -6,6 +6,7 @@ import { PlaylistRepository } from '../playlists/playlistRepository';
 import { InteractionRuleRepository } from '../donations/interactionRuleRepository';
 import { LocalStreamManager } from '../stream/localStreamManager';
 import { REQUEST_PAGE_TOKEN_PATTERN } from './requestPageRoutes';
+import { LIBRARY_TRACK_REQUEST } from '../donations/donationActions';
 
 export interface PublicRequestPageDeps {
   users: Pick<UserRepository, 'findByRequestPageToken'>;
@@ -60,7 +61,7 @@ export function createPublicRequestPageRouter(deps: PublicRequestPageDeps): Rout
       deps.rules.listEnabledByUser(user.id),
     ]);
     const cheapest = rules
-      .filter((r) => r.actionType === 'libraryTrackRequest')
+      .filter((r) => r.actionType === LIBRARY_TRACK_REQUEST)
       .sort((a, b) => a.minAmount - b.minAmount)[0];
 
     const body: PublicRequestPage = {

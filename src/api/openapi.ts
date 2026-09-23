@@ -586,7 +586,7 @@ export const openApiSpec = {
     },
     '/interaction-rules': {
       post: {
-        summary: 'Create a donation-triggered interaction rule (e.g. a song request: a donation containing !<keyword>:<query> at or above minAmount plays that query once)',
+        summary: 'Create a donation-triggered interaction rule — a free-text song request or an exact library-track request — from a donation containing !<keyword>:<query> at or above minAmount. 409s if another of the caller\'s rules already uses the same command keyword (case-insensitively).',
         requestBody: {
           required: true,
           content: {
@@ -595,7 +595,7 @@ export const openApiSpec = {
                 type: 'object',
                 required: ['actionType', 'enabled', 'minAmount', 'commandKeyword'],
                 properties: {
-                  actionType: { type: 'string', enum: ['songRequest'] },
+                  actionType: { type: 'string', enum: ['songRequest', 'libraryTrackRequest'] },
                   enabled: { type: 'boolean' },
                   minAmount: { type: 'integer', minimum: 1, description: 'Threshold in UAH; must be a positive whole number' },
                   commandKeyword: { type: 'string', pattern: '^[a-zA-Z0-9]{1,20}$', description: 'Stored lowercased, without the leading ! (e.g. "song", not "!song")' },
@@ -608,6 +608,7 @@ export const openApiSpec = {
           '201': { description: 'Rule created', content: { 'application/json': { schema: { $ref: '#/components/schemas/InteractionRule' } } } },
           '400': { description: 'Missing/invalid actionType, enabled, minAmount or commandKeyword' },
           '401': { description: 'Not authenticated' },
+          '409': { description: 'Another of this user\'s rules already uses this command keyword' },
         },
       },
       get: {
@@ -620,7 +621,7 @@ export const openApiSpec = {
     },
     '/interaction-rules/{id}': {
       put: {
-        summary: 'Replace an interaction rule (full replace, same validation as create; actionType defaults to the rule\'s own current value when omitted)',
+        summary: 'Replace an interaction rule (full replace, same validation as create; actionType defaults to the rule\'s own current value when omitted). 409s if the new commandKeyword collides with another of the caller\'s rules — the rule\'s OWN existing keyword is excluded from that check, so it may be kept unchanged.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
@@ -630,7 +631,7 @@ export const openApiSpec = {
                 type: 'object',
                 required: ['enabled', 'minAmount', 'commandKeyword'],
                 properties: {
-                  actionType: { type: 'string', enum: ['songRequest'] },
+                  actionType: { type: 'string', enum: ['songRequest', 'libraryTrackRequest'] },
                   enabled: { type: 'boolean' },
                   minAmount: { type: 'integer', minimum: 1 },
                   commandKeyword: { type: 'string', pattern: '^[a-zA-Z0-9]{1,20}$' },
@@ -644,6 +645,7 @@ export const openApiSpec = {
           '400': { description: 'Missing/invalid fields' },
           '401': { description: 'Not authenticated' },
           '404': { description: 'Not your interaction rule, or not found' },
+          '409': { description: 'Another of this user\'s rules already uses this command keyword' },
         },
       },
       delete: {
@@ -658,7 +660,7 @@ export const openApiSpec = {
     },
     '/interaction-rules/{id}/test': {
       post: {
-        summary: 'Test a rule without a real Donatello donation: simulates a donation of exactly this rule\'s own minAmount (in UAH, not editable) carrying the given message, runs it through the same matching logic a real webhook call uses, and — on a match — actually dispatches the song request',
+        summary: 'Test a rule without a real Donatello donation: simulates a donation of exactly this rule\'s own minAmount (in UAH, not editable) carrying the given message, runs it through the same matching logic a real webhook call uses, and — on a match — actually dispatches the rule\'s own action (songRequest or libraryTrackRequest)',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
@@ -921,10 +923,10 @@ export const openApiSpec = {
       },
       InteractionRule: {
         type: 'object',
-        description: 'A per-user rule matching a donation message to a triggered action (today, always a song request).',
+        description: 'A per-user rule matching a donation message to a triggered action.',
         properties: {
           id: { type: 'string' },
-          actionType: { type: 'string', enum: ['songRequest'] },
+          actionType: { type: 'string', enum: ['songRequest', 'libraryTrackRequest'] },
           enabled: { type: 'boolean' },
           minAmount: { type: 'integer', description: 'Threshold in UAH' },
           commandKeyword: { type: 'string', description: 'Stored lowercased, without the leading !' },
