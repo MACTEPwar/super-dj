@@ -3,6 +3,7 @@ import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { AuthService } from '../auth/authService';
 import { createAuthRouter } from '../auth/authRoutes';
+import { UserRepository } from '../auth/userRepository';
 import { TrackRepository } from '../tracks/trackRepository';
 import { TrackUploadService } from '../tracks/trackUploadService';
 import { createTrackRouter } from '../tracks/trackRoutes';
@@ -26,11 +27,13 @@ import { createStreamPresetRouter } from '../stream/streamPresetRoutes';
 import { InteractionRuleRepository } from '../donations/interactionRuleRepository';
 import { createInteractionRuleRouter } from '../donations/interactionRuleRoutes';
 import { createDonatelloWebhookRouter, DonatelloWebhookDeps } from '../donations/donatelloWebhookRoutes';
+import { createRequestPageRouter } from '../requestPage/requestPageRoutes';
 import { errorHandler } from './errorHandler';
 import { openApiSpec } from './openapi';
 
 export interface AppDeps {
   authService: AuthService;
+  userRepository: UserRepository;
   trackRepository: TrackRepository;
   trackUploadService: TrackUploadService;
   trackPreviewService: TrackPreviewService;
@@ -71,6 +74,7 @@ export function createApp(deps: AppDeps): Express {
   }));
   app.use('/webhooks/donatello', createDonatelloWebhookRouter({ ...deps.donatelloWebhookDeps, ruleRepository: deps.interactionRuleRepository }));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));
+  app.use('/request-page', createRequestPageRouter(deps.authService, deps.userRepository));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
   app.use(errorHandler);

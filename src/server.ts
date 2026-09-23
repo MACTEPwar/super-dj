@@ -240,6 +240,7 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const app = createApp({
     authService,
+    userRepository,
     trackRepository,
     trackUploadService,
     trackPreviewService,

@@ -3,6 +3,7 @@ import { createApp } from '../../src/api/app';
 
 function buildApp() {
   const authService: any = { register: jest.fn(), login: jest.fn(), logout: jest.fn(), getCurrentUser: jest.fn() };
+  const userRepository: any = { findById: jest.fn(), setRequestPageToken: jest.fn(), findByRequestPageToken: jest.fn() };
   const trackRepository: any = {};
   const trackUploadService: any = {};
   const trackPreviewService: any = {};
@@ -10,6 +11,7 @@ function buildApp() {
   const destinationRepository: any = {};
   return createApp({
     authService,
+    userRepository,
     trackRepository,
     trackUploadService,
     trackPreviewService,
@@ -57,6 +59,12 @@ describe('API docs', () => {
     expect(res.body.paths).toHaveProperty(['/tracks/search-preview']);
     expect(res.body.paths).toHaveProperty(['/tracks/preview/{previewId}']);
     expect(res.body.paths).toHaveProperty(['/tracks/from-preview/{previewId}']);
+  });
+
+  it('documents the request-page routes', async () => {
+    const res = await request(buildApp()).get('/openapi.json');
+    expect(res.body.paths).toHaveProperty(['/request-page']);
+    expect(res.body.paths).toHaveProperty(['/request-page/token']);
   });
 
   // Full cutover: leaving these reachable would let a caller start a destination-bound encode that

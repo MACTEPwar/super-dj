@@ -691,6 +691,32 @@ export const openApiSpec = {
         },
       },
     },
+    '/request-page': {
+      get: {
+        summary: 'The caller\'s own public request-page link token (null when disabled)',
+        responses: {
+          '200': { description: 'Current token', content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string', nullable: true } } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
+    '/request-page/token': {
+      post: {
+        summary: 'Mint or rotate the request-page token — the old link stops working immediately',
+        responses: {
+          '200': { description: 'New token', content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string' } } } } } },
+          '400': { description: 'Content-Type must be application/json' },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+      delete: {
+        summary: 'Disable the request page',
+        responses: {
+          '200': { description: 'Disabled', content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string', nullable: true } } } } } },
+          '401': { description: 'Not authenticated' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
