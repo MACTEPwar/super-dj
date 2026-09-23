@@ -638,9 +638,12 @@ beyond the visible `after` rows (more queued than fit) changes nothing visible, 
   of wrapping (a visible change, stated).
 - **C15 — the timer overlapping the playlist region.** The playlist layer is now above the timer.
   The approximation is stated. A template that deliberately overlaps them is unusual.
-- **C16 — gradient text colour.** Satori's `backgroundClip: text` per row works the same in the
-  row builder. The worker must load every font variant the element uses (`collectFontVariants` for
-  the one element).
+- **C16 — gradient text colour.** Rows are now separate absolutely-positioned boxes, so a gradient
+  `color` (Satori's `backgroundClip: text`) spans **each row** rather than the whole block — a
+  visible change for gradient playlist elements, in the preview too. The worker must load every
+  font variant the element uses (`collectFontVariants` for the one element). resvg runs with
+  `loadSystemFonts: false` (Satori has already converted glyphs to paths, and the system-font scan
+  costs ~130 ms per call, per the equalizer spike).
 - **C17 — the premultiplied-alpha fringe.** Unpremultiplied before writing, as the equalizer does.
   Verified on real output (plan task).
 - **C18 — rows re-rendered while their text is unchanged.** A `none` diff doesn't render. A
