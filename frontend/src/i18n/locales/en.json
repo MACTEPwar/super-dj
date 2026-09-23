@@ -329,5 +329,18 @@
       "dispatchFailed": "Matched, but the request failed: {{message}}",
       "requestFailed": "Failed to run the test"
     }
+  },
+  "requestPage": {
+    "title": "Request a track",
+    "loading": "Loading…",
+    "notFound": "This link isn't valid.",
+    "offline": "The stream isn't live right now.",
+    "requestsDisabled": "Track requests aren't enabled right now.",
+    "howTo": "Copy a command and paste it into your donation message (minimum {{amount}} UAH).",
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyManually": "Copy this command:",
+    "refresh": "Refresh",
+    "error": "Couldn't load the page."
   }
 }
