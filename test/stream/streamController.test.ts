@@ -906,6 +906,25 @@ describe('StreamController', () => {
       expect(last.variant).toBe('B');
     });
 
+    it('a track enqueued while a track change awaits its overlay is caught up once the feed lands', async () => {
+      const { deps, queue, feeder, library } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      const b = library.list()[1];
+      let resolveOverlay!: () => void;
+      deps.buildOverlay.mockImplementationOnce((t: Track) => new Promise((r) => { resolveOverlay = () => r({ ...overlayFor(t), variant: 'B' }); }));
+      const pending = controller.next(); // rows (BASE_ROWS) captured, now awaiting the overlay
+      queue.current.mockReturnValue(b);
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null }); // skipped: b isn't on screen yet
+      expect(feeder.showRows).not.toHaveBeenCalled();
+      resolveOverlay();
+      await pending;
+      await settle();
+      expect(feeder.animate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(b, INSERTED_ROWS, { omitLivePlaylist: false });
+    });
+
     it('paused -> next() -> a donation arrives: no bake/burst until resume (the screen must not show the next track early)', async () => {
       const { deps, queue, feeder } = withFeeder();
       const controller = new StreamController(deps);

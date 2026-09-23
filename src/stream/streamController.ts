@@ -194,6 +194,12 @@ export class StreamController {
     if (generation !== this.sessionGeneration) return;
     if (this.state !== 'streaming') return;
 
+    // Re-feeding the SAME track (resume, or previous() landing back on it) leaves
+    // bakedTrack === queue.current() during the wait above, so an enqueueTrack() could have started
+    // a burst meanwhile. Cancel it here, before this full render lands, so the catch-up below
+    // restarts it cleanly instead of racing it (baked rows under moving pipe:7 rows).
+    this.playlistAnimator?.abort();
+    this.overlayGeneration += 1;
     this.currentOverlay = overlay;
     this.bakedRows = rows;
     this.bakedTrack = track;
