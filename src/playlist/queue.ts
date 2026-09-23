@@ -68,8 +68,9 @@ export class PlaylistQueue {
 
   // The base-playlist index most recently reached by REAL advancement. An inserted track (a
   // play-by-name pick from the whole library, or any donation request) is never part of
-  // baseTracks, so while one is current this still points at the base track it follows — which
-  // is what windowSnapshot() below anchors the playlist window's before/after context on.
+  // baseTracks, so while one is current this still points at the base track it follows. Exposed
+  // for tests; windowSnapshot() below reads the same underlying `position` field directly rather
+  // than calling this method, but the value and its meaning are identical.
   positionInBase(): number {
     return this.position;
   }

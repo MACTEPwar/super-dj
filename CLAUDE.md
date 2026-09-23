@@ -343,13 +343,17 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
   - **Idle steady-state cost** (main encoder ffmpeg, sampled via two `/proc/<pid>/stat` reads 10s
     apart — no `ps` binary in the deploy image): **~104% of one CPU core**, RSS **~148 MiB**, with
     the playlist window present but transparent (idle). Node's own process stayed near-idle between
-    renders. No isolated same-host measurement without `pipe:7` was taken this session (a true A/B
-    would need a second deploy), so this is a real absolute number, not a verified delta — it sits
-    in the same range as this doc's earlier, differently-measured encoder baseline (~68% CPU), and
-    nothing observed (no dropped frames, no growing latency, no stall) indicated a problem, so
-    `PLAYLIST_WINDOW_FPS` stays at `VIDEO_FPS` (30); the plan's own fallback rule (drop to 15fps if
-    idle cost regresses) was not triggered by anything measured, but wasn't rigorously exercised via
-    true A/B either.
+    renders. **No isolated same-host measurement without `pipe:7` was taken this session — this
+    number is NOT a verified delta against a no-`pipe:7` baseline**: the only other number on record
+    (~68% CPU) was measured on a different host, a different template and a different method, so
+    the two are not comparable, and the plan's own fallback rule (drop `PLAYLIST_WINDOW_FPS` to 15
+    if the encoder's CPU exceeds a genuine no-`pipe:7` baseline by more than 10 percentage points)
+    cannot honestly be called "not triggered" from this data — the only number available (a 36-point
+    gap) points the other way. `PLAYLIST_WINDOW_FPS` stays at `VIDEO_FPS` (30) for now because
+    nothing OBSERVED during the live test (no dropped frames, no growing latency, no stall)
+    indicated a real problem, but this is provisional: run the real A-vs-B (same host, same
+    template, a build with `pipe:7` vs one without) before trusting the capacity math in
+    `MAX_CONCURRENT_LOCAL_STREAMS`, which is sized off the encoder's own cost.
   - **A real donation visibly, correctly inserts a row into the baked window**, confirmed by
     downloading real HLS `.ts` segments through the authenticated preview proxy before and after a
     real `libraryTrackRequest` donation and extracting frames with `ffmpeg` (cropped to the
@@ -358,8 +362,10 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
     (immediately after the current-track row), with the base after-context row still correctly
     following it — 4 rows total, no corruption, no duplicate/missing rows, no stale content left
     over from the transition. The two segments spanning the actual burst were measurably larger than
-    steady-state segments (~130 KB vs ~108-111 KB for the same 2s duration) — real evidence of the
-    animation's extra motion actually being encoded, not just a silent no-op.
+    steady-state segments (~130 KB vs ~108-111 KB for the same 2s duration) — **consistent with**
+    the animation's extra motion being encoded (canvas A and canvas B's own re-bakes would also
+    enlarge those segments, and no mid-animation frame was captured to isolate the two causes, so
+    this is corroborating, not conclusive).
   - **Burst cost stays off the main encoder.** Sampling the encoder's own CPU ticks immediately
     before, at, and 2s after triggering a fresh burst showed no meaningful spike on the persistent
     encoder process itself — consistent with the design (burst rendering happens in Node's piscina
@@ -367,9 +373,11 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
     additional short-lived `ffmpeg` process (RSS ~55 MiB) was observed appearing and disappearing
     around a trigger, consistent with `CanvasFeeder`'s one-shot canvas-A/canvas-B renders firing as
     part of the handoff.
-  - **Not measured this session** (narrower scope than the plan's full Task 10 harness — see the
-    scoping note in this feature's `docs/superpowers/plans/2026-09-23-donation-library-track-request-phase-c.md`
-    ledger for the reasoning): a true idle-vs-baseline A/B without `pipe:7` present at all;
+  - **Not measured this session** (narrower scope than the plan's full Task 10 harness — this was a
+    deliberate scoping decision by the orchestrator, reusing this session's own deploy/capture
+    tooling against the real demo stand instead of building the plan's isolated-container harness
+    from scratch): a true idle-vs-baseline A/B without `pipe:7` present at all (see above — this is
+    the one gap worth closing before trusting capacity numbers);
     frame-accurate motion capture of the animation in progress (only before/after settled states
     were captured, not the moving frames themselves); the elaborate per-frame luma-histogram/
     row-projection pixel forensics (handoff-overlap deviation, colour-match tolerance, fringe
@@ -657,9 +665,12 @@ lands:
   `CustomRtmpProvider`/`YoutubeProvider`/the ffmpeg pipeline do not consume templates yet — this
   stage is renderer + CRUD only.
 - **Stage 1a (done):** `renderScene()`'s output replaces the hand-built `drawtext` filter graph in
-  `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping went away with it — `formatDuration`/
-  `buildPlaylistWindowLines` are all that's left there). Still one ffmpeg process per segment,
-  architecture otherwise untouched. Notable decisions from this stage, since they're easy to
+  `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping went away with it — at the time,
+  `formatDuration`/`buildPlaylistWindowLines` were all that was left there; the donation
+  library-track-request Phase C rework later deleted `buildPlaylistWindowLines` too, once
+  `PlaylistQueue.windowSnapshot()` took over listing the window's rows — `formatDuration` alone
+  remains). Still one ffmpeg process per segment, architecture otherwise untouched. Notable
+  decisions from this stage, since they're easy to
   second-guess without the context:
   - **`templateId` is optional, not required** (today on `POST /local-stream/start` and
     `POST /stream-presets`; at the time, on the two now-deleted start routes) — deliberately, so a
@@ -1075,7 +1086,9 @@ src/
                             destination forward: MediaMTX in, destination RTMP out, never
                             transcoding), segmentArgs.ts (canvas-
                             frame render args + overlay/timer types), duration.ts (ffprobe),
-                            overlayText.ts (formatDuration, playlist-window text),
+                            overlayText.ts (formatDuration — the playlist-window text builders
+                            that used to live here were deleted when Phase C's windowSnapshot()
+                            took over),
                             types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes
                             — pipes: fd3 canvas, fd4 audio, fd5 equalizer, fd6 above-canvas,
                             fd7 playlist-window burst layer),
@@ -1645,6 +1658,21 @@ so do not quote a number here as measured. What *was* measured about the relay's
 `RelayProcess` bullet above; latency is not among it. For context on the scale: YouTube's own
 ingest→transcode→CDN→player pipeline typically adds ~20-40 s at `latencyPreference: 'normal'`
 regardless, so this hop is unlikely to be the dominant term either way.
+(r) **`CanvasFeeder.render()` has no "latest request wins" rule** — pre-existing (not introduced
+by the playlist-window burst layer, Phase C's own final review flagged it as worth recording
+because that layer makes it somewhat easier to hit). Two overlapping one-shot renders (e.g. the
+once-a-second timer tick racing a burst's canvas-A/canvas-B re-bake, or a `pause()` render racing
+either) share one fixed overlay PNG path, and whichever one-shot ffmpeg process happens to finish
+last is what actually lands on screen — not necessarily the one that was issued last. Concretely:
+a tick that starts just before a burst's canvas-B render lands could make the window blink off for
+up to ~1s; a `pause()` render landing after canvas B could leave the window missing for the whole
+pause; with no timer element, a bake-A render landing after a track change's own render could leave
+the previous track's overlay (window omitted) on screen until the next re-render. All three need
+one render to finish measurably slower than another that started later — a real but narrow window,
+self-correcting in practice (a one-shot render is normally much faster than the `buildOverlay` that
+precedes the next one). Not fixed here — deliberately out of Phase C's scope. The fix, when someone
+picks it up: a monotonic sequence number in `CanvasFeeder`, so a render only writes if its sequence
+number is still the latest issued by the time it resolves.
 
 ## Tooling
 
