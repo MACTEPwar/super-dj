@@ -5,6 +5,9 @@ import { PulseEngine } from '../audio/pulseEngine';
 import { buildPulseSvg, layoutPulsePoints } from '../render/pulseSvg';
 import { unpremultiplyRgbaInPlace } from '../render/unpremultiply';
 import { renderPulseFrame as renderPulseFrameViaPool } from '../render/pulseRenderWorkerPool';
+import { RawFramePacer } from './rawFramePacer';
+
+export { MAX_CATCH_UP_FRAMES } from './rawFramePacer';
 
 export interface PulseVisualizerOptions {
   width: number;
@@ -30,13 +33,6 @@ export interface PulseVisualizerOptions {
 }
 
 const DEFAULT_BAND_COUNT = 56;
-// The most frames a single tick will write to catch the frame count up after the event loop was
-// stalled — ~1/3s at 30fps, longer than CanvasFeeder's 200ms heartbeat, so any stall the canvas
-// heartbeat itself rides out without losing a frame is caught up fully here too. A longer stall
-// cost the canvas frames as well (it has no catch-up), so replaying it all here would only push
-// this pipe ahead of the canvas and pin it against backpressure — and this also bounds how much
-// raw RGBA a catch-up can ever park in Node's write buffer at once (see writeDueFrames).
-export const MAX_CATCH_UP_FRAMES = 10;
 const PCM_WINDOW_SAMPLES = 2048; // matches pcmSpectrum.ts's WINDOW_SIZE
 const PCM_FRAME_BYTES = 2 /* channels */ * 2; /* bytes/sample */
 const PCM_WINDOW_BYTES = PCM_WINDOW_SAMPLES * PCM_FRAME_BYTES;
@@ -62,6 +58,7 @@ export class PulseVisualizer {
   private readonly analyzeSpectrum: (pcm: Int16Array, bandCount: number) => number[];
   private readonly now: () => number;
   private pulsePipe: NodeJS.WritableStream | null = null;
+  private readonly pacer: RawFramePacer;
   private tickTimer: NodeJS.Timeout | null = null;
   private readonly pcm = new PcmRingBuffer(PCM_RING_SECONDS * PCM_BYTES_PER_SECOND);
   // One reusable analysis window; pcmWindow aliases windowBytes' memory (an Int16Array view needs
@@ -70,21 +67,7 @@ export class PulseVisualizer {
   private readonly windowBytes = Buffer.alloc(PCM_WINDOW_BYTES);
   private readonly pcmWindow = new Int16Array(this.windowBytes.buffer, this.windowBytes.byteOffset, PCM_WINDOW_SAMPLES * 2);
   private rendering = false;
-  private cachedFrame: Buffer | null = null;
   private lastTickSeconds: number;
-  private attachedAtSeconds = 0;
-  // Frames written plus frames deliberately forgiven — see writeDueFrames() for the distinction.
-  private framesAccounted = 0;
-  // Frames actually written to pipe:5 — i.e. the index ffmpeg will give the next one, which is
-  // what fixes its place on the output timeline (see loadAnalysisWindow). Deliberately NOT
-  // framesAccounted: a forgiven frame was never written, so ffmpeg never numbered it.
-  private framesWritten = 0;
-  private readonly onDrain = () => {
-    // The pipe just came unblocked. Everything that came due while it was blocked is forgiven
-    // except the one frame the blocked tick left owed — see writeDueFrames() for why.
-    this.framesAccounted = Math.max(this.framesAccounted, this.framesDue() - 1);
-    this.writeDueFrames();
-  };
   private readonly sink: Writable;
 
   constructor(private readonly options: PulseVisualizerOptions) {
@@ -100,6 +83,7 @@ export class PulseVisualizer {
     this.analyzeSpectrum = options.analyzeSpectrum ?? magnitudesFromPcm;
     this.now = options.now ?? (() => Date.now() / 1000);
     this.lastTickSeconds = this.now();
+    this.pacer = new RawFramePacer({ fps: options.fps, now: this.now });
 
     // Every byte AudioRelay writes into the encoder's audio pipe lands in the ring too, in the
     // same order, so a ring position is a pipe:4 position. Nothing is analyzed here: the sink
@@ -132,16 +116,13 @@ export class PulseVisualizer {
   /** Called once, right after the persistent encoder starts — see StreamController.start(). */
   attach(pulsePipe: NodeJS.WritableStream): void {
     this.pulsePipe = pulsePipe;
-    this.attachedAtSeconds = this.now();
-    this.framesAccounted = 0;
-    this.framesWritten = 0;
-    pulsePipe.on('drain', this.onDrain);
+    this.pacer.attach(pulsePipe);
     this.startTicking();
   }
 
   close(): void {
     this.stopTicking();
-    this.pulsePipe?.removeListener('drain', this.onDrain);
+    this.pacer.detach();
     this.pulsePipe = null;
   }
 
@@ -175,7 +156,7 @@ export class PulseVisualizer {
     // A render is already in flight — resend the last completed frame instead of overlapping a
     // second one, the same backpressure discipline CanvasFeeder's heartbeat uses.
     if (this.rendering) {
-      this.writeDueFrames();
+      this.pacer.writeDueFrames();
       return;
     }
     const nowSeconds = this.now();
@@ -206,8 +187,8 @@ export class PulseVisualizer {
     this.renderFrame(svg)
       .then(({ pixels }) => {
         unpremultiplyRgbaInPlace(pixels);
-        this.cachedFrame = pixels;
-        this.writeDueFrames();
+        this.pacer.setFrame(pixels);
+        this.pacer.writeDueFrames();
       })
       .catch((err) => {
         console.error('pulse frame render failed, resending the last good frame', err);
@@ -235,60 +216,12 @@ export class PulseVisualizer {
   // position instead measured 0-1 frame of lag on the encoder's output, on every transient.
   private loadAnalysisWindow(): void {
     // Centered on the interval frame #framesWritten is on screen for, [k, k+1)/fps.
-    const centerByte = ((this.framesWritten + 0.5) / this.options.fps) * PCM_BYTES_PER_SECOND;
+    const centerByte = ((this.pacer.framesWritten + 0.5) / this.options.fps) * PCM_BYTES_PER_SECOND;
     // If that audio hasn't reached the tap yet (only right after start, before the decoder's
     // first output), the newest available is the closest there is.
     let end = Math.min(Math.round(centerByte + PCM_WINDOW_BYTES / 2), this.pcm.writtenBytes);
     // Snapped to a stereo-frame boundary (the stream's position 0 is one) so L/R never swap.
     end -= end % PCM_FRAME_BYTES;
     this.pcm.read(end - PCM_WINDOW_BYTES, this.windowBytes);
-  }
-
-  // How many frames pipe:5 should have received by now. The pipe is declared to ffmpeg at a fixed
-  // `-r fps` with no timestamps, so ffmpeg synthesizes its timeline purely from this count — and
-  // its overlay filter can't emit any output frame until this pipe has a NEWER one. That makes
-  // the count, not the tick, the thing that has to track wall-clock time: every frame this class
-  // fails to deliver stalls the whole stream (canvas, audio, everything) by one frame interval,
-  // permanently, because nothing downstream ever catches up. Measured against a real ffmpeg
-  // binary: with a late-firing 30fps timer the encoder ran at 0.7x real time on an idle CPU, and a
-  // viewer sees that as the picture's only moving element — this one — periodically freezing.
-  // (The +1e-6 keeps e.g. 0.1 * 10 = 0.9999... from rounding a frame that is due down to zero.)
-  private framesDue(): number {
-    return Math.floor((this.now() - this.attachedAtSeconds) * this.options.fps + 1e-6);
-  }
-
-  // Brings the frame count up to date. Unlike CanvasFeeder's writeCachedFrame(), which can simply
-  // skip a tick under backpressure because its content is near-static and ffmpeg holding the
-  // last canvas frame a little longer changes nothing, a frame this class never writes is not
-  // harmless: it's a permanently missing slot in a count-derived timeline (see framesDue()).
-  // Which of two things a missed write means depends on the pipe's own state:
-  //
-  // - Pipe free: ffmpeg is reading as fast as we write, i.e. it's waiting on US, and the whole
-  //   stream stalls for every frame we're short. So a tick that fired late writes every frame it
-  //   owes now — resends of the latest frame, a one-interval hold no viewer can see — bounded by
-  //   MAX_CATCH_UP_FRAMES, which is also what bounds the raw RGBA parked in Node's buffer.
-  //
-  // - Pipe backed up: ffmpeg is NOT reading this pipe, so it's waiting on something else — the
-  //   canvas, whose frames it consumes in one-heartbeat bursts (its fps= stage only releases a
-  //   canvas frame's copies once the next canvas frame lands). Frames that come due meanwhile
-  //   stall nothing and are forgiven, all but one, which the pipe's 'drain' event then writes so
-  //   a momentary stall while ffmpeg IS waiting on us never loses a frame. Forgiving (rather
-  //   than deferring and replaying as duplicates) is deliberate and verified against a real
-  //   ffmpeg binary: replaying produced a 4-frame hold then a 4-frame jump on every heartbeat,
-  //   whereas each forgiven frame nudges this pipe's timeline to just behind the canvas bursts,
-  //   where consumption is frame-by-frame and the pipe stops backing up at all.
-  private writeDueFrames(): void {
-    if (!this.cachedFrame || !this.pulsePipe) return;
-    const due = this.framesDue();
-    if ((this.pulsePipe as unknown as { writableNeedDrain?: boolean }).writableNeedDrain) {
-      this.framesAccounted = Math.max(this.framesAccounted, due - 1);
-      return;
-    }
-    if (due - this.framesAccounted > MAX_CATCH_UP_FRAMES) this.framesAccounted = due - MAX_CATCH_UP_FRAMES;
-    while (this.framesAccounted < due) {
-      this.pulsePipe.write(this.cachedFrame);
-      this.framesAccounted += 1;
-      this.framesWritten += 1;
-    }
   }
 }
