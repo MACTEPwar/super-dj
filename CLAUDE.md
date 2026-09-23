@@ -789,17 +789,17 @@ primitive) rather than being inlined on the page.
 today always `'songRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
 Donatello.to trigger a one-off track play: a donation message containing `!<keyword>:<query>` at
 or above the rule's `minAmount` (converted to UAH) fetches audio for `<query>` from the streamer's
-own external media-search service and **interrupts whatever is currently playing to play it
-immediately** — not queued to play "next" after the current track ends. Once it (and any donation
-tracks that queued up behind it — see below) finishes, the track it interrupted resumes at the
-exact position it was cut off at, never restarted from 0. The whole module lives in
+own external media-search service and is **queued to play next**, exactly like `play`-by-name: it
+plays once the current track ends, never cutting it off (it used to interrupt and resume; that was
+removed — see `docs/superpowers/specs/2026-09-23-donation-library-track-request-design.md`, Phase
+B). The whole module lives in
 `src/donations/`: `donatelloWebhookRoutes.ts` (`POST /webhooks/donatello` — the inbound event,
 authenticated by a shared `X-Key` header rather than the session cookie, since Donatello is not a
 browser), `donationEvent.ts` (payload parsing), `ruleMatcher.ts` (`parseCommand`/`matchRules` —
 keyword/threshold matching against a user's enabled rules), `currencyConverter.ts`,
 `mediaSearchClient.ts` (the external media-search HTTP client), `songRequestAction.ts`
 (`executeSongRequest` — fetches audio, writes it to a dedicated temp dir, and calls
-`LocalStreamManager.insertEphemeralTrack`; resolves a `SongRequestResult` rather than throwing on
+`LocalStreamManager.enqueueTrack`; resolves a `SongRequestResult` rather than throwing on
 failure, so both the real webhook path — which only logs it — and the interaction-rule "Test"
 button — which reports it back to the caller — can share one implementation),
 `songRequestQueue.ts` (`SongRequestQueue` — see below), `tempFileCleanup.ts` (the sweep backstop —
@@ -811,39 +811,19 @@ panel that calls the `/test` route directly — bypassing Donatello entirely —
 `minAmount` (not editable client-side) and an editable message defaulted to a working `!keyword:`
 command.
 
-**The interrupt-and-resume mechanism (`StreamController`).** `insertEphemeralTrack` enqueues onto
-`PlaylistQueue`'s `donationQueue` — a FIFO kept entirely SEPARATE from `insertedQueue` (which
-`playByName` still uses, unchanged: queued to play after the current track ends, joins `history`
-normally). The first donation track of an "episode" (i.e. arriving while `interruptedForDonation`
-is null) captures whatever is actually playing right now — `StreamController.nowPlayingTrack`, its
-own field tracking what's audible, deliberately NOT `PlaylistQueue.current()` — plus its elapsed
-position, stores that as `interruptedForDonation`, and switches to the donation track immediately;
-a donation arriving while one is already playing just extends the FIFO, no re-interruption. Once
-the whole `donationQueue` drains, the captured track resumes via `feedCurrentTrack(track,
-elapsedSeconds)` — the same `-ss`-seek path `pause()`/`resume()`/reconnect already use.
-`PlaylistQueue.current()`/`position`/`history` are **never touched** by any of this — a donation
-track is never part of playlist "previous" navigation, and the playlist's own resume point survives
-the whole interruption untouched. This has real consequences elsewhere in `StreamController`, all
-addressed the same way — read `nowPlayingTrack` (falling back to `queue.current()` only when it's
-genuinely unset), never `queue.current()` directly:
-- **`next()`/`previous()` reject with 409 while `interruptedForDonation` is set** — a donation
-  track can never be skipped, by design.
-- **`pause()`/`resume()`** act on the donation track itself when one is playing, not on
-  `queue.current()` (the track it interrupted) — resuming from the wrong one would silently abandon
-  the donation track mid-playback.
-- **A crash/reconnect mid-donation-track restores the SAME donation track at its captured offset**,
-  not `queue.current()` from 0 — `interruptedForDonation` is restored immediately after `teardown()`
-  in `handleUnexpectedExit`, before the 'reconnecting' state is even entered, so `next()`/`previous()`
-  stay rejected for the whole reconnect window too (closing the "queue moved during the wait" case
-  `performReconnect`'s plain-playlist path exists to handle — it genuinely cannot apply here).
-- **A donation arriving while `paused` wakes the stream and plays it immediately** — a donation
-  is meant to be heard right away, not wait for a manual resume.
-- The overlay's playlist-window element uses `PlaylistQueue.positionInBase()` (the base-playlist
-  index most recently reached by REAL advancement, untouched by donation pulls) plus
-  `overlayText.ts`'s `buildEphemeralPlaylistWindowLines()` to show sensible before/current/after
-  context around a donation track — it would otherwise render as a completely empty window for as
-  long as any donation track plays, since the track is never findable by name in the playlist's own
-  snapshot (the bug the ordinary `buildPlaylistWindowLines()` has for any track not in `tracks`).
+**One queue (`StreamController.enqueueTrack`).** Every donation request and every `play`-by-name
+goes through the one `PlaylistQueue.insertNext()` FIFO via `enqueueTrack(track)` — play after the
+current track ends, in call order, never interrupting, and skippable like any other track. A
+donation's temp-file track carries `ephemeral: true` plus `_onFinished`: `PlaylistQueue.next()`
+never pushes an ephemeral track into `history` (its file is deleted the moment it finishes, so
+`previous()` must never reach it), and `StreamController.next()`/`previous()` call
+`releaseTrack()` on an ephemeral track they move off mid-play, so skipping one still deletes its
+file. A stop or crash mid-donation leaves the file to the 12-hour sweep, as before.
+`status().currentTrack` is `queue.current()` while a session exists
+(`streaming`/`paused`/`reconnecting`) and `null` otherwise. The overlay's playlist window still
+uses `positionInBase()` + `buildInsertedTrackWindowLines()` for any current track not found in the
+playlist by name — which covers both donation tracks and `play`-by-name picks from outside the
+running playlist.
 
 **Donation ordering is by arrival, not by download speed (`songRequestQueue.ts`).** Two donations
 racing on the external media-search HTTP fetch could otherwise insert — and therefore play — in
@@ -1004,7 +984,7 @@ src/
   donations/                donatelloWebhookRoutes.ts (POST /webhooks/donatello, X-Key
                             authenticated), donationEvent.ts (payload parsing), ruleMatcher.ts
                             (parseCommand/matchRules), currencyConverter.ts, songRequestAction.ts
-                            (executeSongRequest — fetch, temp-write, insertEphemeralTrack; fetches
+                            (executeSongRequest — fetch, temp-write, enqueueTrack; fetches
                             through media/mediaSearchClient.ts, above),
                             songRequestQueue.ts (SongRequestQueue — serializes donation-triggered
                             requests so play order matches arrival order, not download speed),

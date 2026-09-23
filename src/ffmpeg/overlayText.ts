@@ -39,14 +39,13 @@ export function buildPlaylistWindowLines(
   return lines;
 }
 
-// The counterpart used while a donation-requested track is playing: it's never found by name in
-// `tracks` (it isn't part of the playlist), so buildPlaylistWindowLines' own currentIndex lookup
-// always misses and would otherwise render an empty window for the whole time it plays.
-// baseAnchorIndex is PlaylistQueue.positionInBase() — the base-playlist track a donation
-// interruption is standing in front of — so "before" context ends at (and includes) the track
-// that just played, the donation track is marked ▶ in its place, and "after" context resumes
-// exactly where the base playlist will pick back up once the donation track finishes.
-export function buildEphemeralPlaylistWindowLines(
+// The counterpart used while the current track is an INSERTED one (queued via insertNext — a
+// play-by-name pick from outside this playlist, or a donation request): it isn't found by name in
+// `tracks`, so buildPlaylistWindowLines' own currentIndex lookup misses and would render an empty
+// window for the whole time it plays. baseAnchorIndex is PlaylistQueue.positionInBase() — the
+// base track it follows — so "before" ends at (and includes) that track, the inserted track is
+// marked ▶ after it, and "after" continues where the base playlist will pick back up.
+export function buildInsertedTrackWindowLines(
   tracks: Track[],
   baseAnchorIndex: number,
   currentTrackName: string,
