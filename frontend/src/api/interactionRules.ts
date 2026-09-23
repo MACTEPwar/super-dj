@@ -1,8 +1,8 @@
 import { api } from './client';
 
-// "songRequest" is the only action type today — kept as a real string union (not inlined as a
-// boolean) so the frontend is ready for a second action type without a type-shape change.
-export type ActionType = 'songRequest';
+// A real string union (not inlined as a boolean) so the frontend stays ready for further action
+// types without a type-shape change.
+export type ActionType = 'songRequest' | 'libraryTrackRequest';
 
 export interface InteractionRule {
   id: string;
@@ -21,13 +21,17 @@ export interface InteractionRuleInput {
   commandKeyword: string;
 }
 
-export type SongRequestResult =
+export type DonationActionResult =
   | { ok: true }
-  | { ok: false; reason: 'mediaSearchFailed' | 'writeFailed' | 'noActiveStream'; message: string };
+  | {
+      ok: false;
+      reason: 'mediaSearchFailed' | 'writeFailed' | 'noActiveStream' | 'trackIdMissing' | 'trackNotFound';
+      message: string;
+    };
 
 export type TestInteractionRuleResult =
   | { matched: false }
-  | { matched: true; query: string; result: SongRequestResult };
+  | { matched: true; query: string; result: DonationActionResult };
 
 export const interactionRulesApi = {
   list: () => api.get<InteractionRule[]>('/interaction-rules'),

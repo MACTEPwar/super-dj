@@ -10,6 +10,7 @@ import { usePageTitle } from '../hooks/usePageTitle';
 
 const ACTION_TYPE_LABELS: Record<InteractionRule['actionType'], string> = {
   songRequest: 'donations.actionSongRequest',
+  libraryTrackRequest: 'donations.actionLibraryTrackRequest',
 };
 
 interface RuleFormState {
