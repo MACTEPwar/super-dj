@@ -1,5 +1,5 @@
 import { PipeSpawner, ChildProcessWithPipes } from './types';
-import { buildPersistentEncoderArgs, CanvasPlacement, EqualizerConfig, GifOverlayConfig } from './persistentEncoderArgs';
+import { buildPersistentEncoderArgs, CanvasPlacement, EqualizerConfig, GifOverlayConfig, PlaylistWindowLayerConfig } from './persistentEncoderArgs';
 
 export interface PersistentEncoderParams {
   spawner: PipeSpawner;
@@ -13,6 +13,7 @@ export interface PersistentEncoderParams {
   equalizer?: EqualizerConfig;
   gifOverlays?: GifOverlayConfig[];
   canvasPlacement?: CanvasPlacement;
+  playlistWindow?: PlaylistWindowLayerConfig;
 }
 
 // Spawned once in StreamController.start() and never restarted for the life of the session —

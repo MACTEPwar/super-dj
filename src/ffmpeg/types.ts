@@ -27,6 +27,9 @@ export interface ChildProcessWithPipes extends ChildProcessLike {
   // written to" arrangement as pulsePipe above: createPipeSpawner opens the stdio slot
   // unconditionally, and buildPersistentEncoderArgs only declares `-i pipe:6` when it's needed.
   readonly aboveCanvasPipe: NodeJS.WritableStream;
+  // The playlist window's burst layer (fd 7) — see PlaylistWindowFeeder. Same "always present,
+  // sometimes written" arrangement as pulsePipe.
+  readonly playlistWindowPipe: NodeJS.WritableStream;
 }
 
 export type PipeSpawner = (command: string, args: string[]) => ChildProcessWithPipes;

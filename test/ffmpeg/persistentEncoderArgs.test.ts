@@ -272,4 +272,45 @@ describe('buildPersistentEncoderArgs', () => {
     const empty = buildPersistentEncoderArgs({ ...base, gifOverlays: [] });
     expect(empty).toEqual(omitted);
   });
+
+  describe('playlist window burst layer (pipe:7)', () => {
+    const base = { width: 1280, height: 720, fps: 30, heartbeatFps: 5, rtmpUrl: 'rtmp://h/live', streamKey: 'k', backgroundPath: '/bg.png' };
+    const PW = { x: 510, y: 158, width: 704, height: 342, fps: 30, layer: 'top' as const };
+    const graphOf = (args: string[]) => args[args.indexOf('-filter_complex') + 1];
+    const GIF = { x: 0, y: 0, width: 10, height: 10, filePath: '/g.gif', frameCount: 3 };
+
+    it('absent unless configured: args byte-identical to today (C11)', () => {
+      expect(buildPersistentEncoderArgs({ ...base })).toEqual(buildPersistentEncoderArgs({ ...base, playlistWindow: undefined }));
+      expect(buildPersistentEncoderArgs({ ...base }).join(' ')).not.toContain('pipe:7');
+    });
+
+    it('declares pipe:7 as yuva420p at its own fps, last among inputs', () => {
+      const args = buildPersistentEncoderArgs({ ...base, playlistWindow: PW });
+      const i = args.indexOf('pipe:7');
+      expect(args.slice(i - 9, i + 1)).toEqual(['-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', '704x342', '-r', '30', '-i', 'pipe:7']);
+      expect(args.lastIndexOf('-i')).toBe(i - 1);
+    });
+
+    it("layer 'top': right after the top canvas, before the equalizer", () => {
+      const g = graphOf(buildPersistentEncoderArgs({ ...base, playlistWindow: PW, equalizer: { x: 0, y: 600, width: 400, height: 100 } }));
+      // inputs: 0 canvas, 1 audio, 2 bg, 3 pulse, 4 playlist window
+      expect(g).toContain('[4:v]format=yuva420p[plwin]');
+      expect(g).toContain('[vcanvas_top][plwin]overlay=510:158[vplwin]');
+      expect(g).toContain('[vplwin][pulse]overlay=0:600[vout]');
+    });
+
+    it("layer 'below' (bottom placement): right after the below canvas, UNDER the gifs", () => {
+      const g = graphOf(buildPersistentEncoderArgs({ ...base, canvasPlacement: 'bottom', gifOverlays: [GIF], playlistWindow: { ...PW, layer: 'below' } }));
+      // inputs: 0 canvas, 1 audio, 2 bg, 3 gif, 4 playlist window
+      expect(g).toContain('[vcanvas_below][plwin]overlay=510:158[vplwin]');
+      expect(g).toContain('[vplwin][gif0]overlay=0:0:format=rgb[vgif0]');
+    });
+
+    it("split: index follows the above-canvas input; 'top' sits after the above layer", () => {
+      const g = graphOf(buildPersistentEncoderArgs({ ...base, canvasPlacement: 'split', gifOverlays: [GIF], playlistWindow: PW }));
+      // 0 canvas, 1 audio, 2 bg, 3 gif, 4 above canvas, 5 playlist window
+      expect(g).toContain('[5:v]format=yuva420p[plwin]');
+      expect(g).toContain('[vcanvas_top][plwin]overlay=510:158[vplwin]');
+    });
+  });
 });

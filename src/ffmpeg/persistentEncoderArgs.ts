@@ -56,6 +56,22 @@ const GIF_OVERLAY_FORMAT = 'format=rgb';
  */
 export type CanvasPlacement = 'top' | 'bottom' | 'split';
 
+// The playlist window's burst layer (PlaylistWindowFeeder, pipe:7) — transparent while idle, the
+// insert animation during a burst. Composited directly above whichever baked canvas layer the
+// template's playlist element is actually baked into, so its z-position relative to the gifs
+// matches the settled window's own. `layer` says which of the two baked canvas layers that is:
+// 'top' for the canvas that ends up on top ('vcanvas_top', or the only canvas when there's no
+// split), 'below' for the below-canvas layer of a 'bottom'/'split' placement. See
+// compositePlaylistWindow() below for how the two are reconciled with `canvasPlacement`.
+export type PlaylistWindowLayerConfig = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fps: number;
+  layer: 'below' | 'top';
+};
+
 export function buildPersistentEncoderArgs(params: {
   width: number;
   height: number;
@@ -73,12 +89,18 @@ export function buildPersistentEncoderArgs(params: {
   gifOverlays?: GifOverlayConfig[];
   // Defaults to 'top' — the pre-split behaviour, and the only meaningful value with no gifs.
   canvasPlacement?: CanvasPlacement;
+  // Present only when the resolved template has a playlist-window element — see
+  // PlaylistWindowLayerConfig above.
+  playlistWindow?: PlaylistWindowLayerConfig;
 }): string[] {
-  const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [], canvasPlacement = 'top' } = params;
+  const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [], canvasPlacement = 'top', playlistWindow } = params;
   const pulseInputIndex = 3 + gifOverlays.length;
   // Appended after the pulse input, not before it, so neither the gif input indices (3...) nor
   // pulseInputIndex above moves when a template gains a second canvas layer.
   const aboveCanvasInputIndex = pulseInputIndex + (equalizer ? 1 : 0);
+  // Appended after the above-canvas input (present only for 'split'), so declaring the playlist
+  // window's own burst layer never renumbers anything declared before it.
+  const playlistWindowInputIndex = aboveCanvasInputIndex + (canvasPlacement === 'split' ? 1 : 0);
   const inputs = [
     // yuva420p, not yuv420p: this pipe used to carry an opaque frame (CanvasFeeder flattened the
     // background into it before every write), which meant nothing composited "under" [0:v] in
@@ -117,6 +139,14 @@ export function buildPersistentEncoderArgs(params: {
     ...(canvasPlacement === 'split'
       ? ['-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', `${width}x${height}`, '-r', String(heartbeatFps), '-i', 'pipe:6']
       : []),
+    // The playlist window's BURST layer (PlaylistWindowFeeder): transparent while idle, the insert
+    // animation during a burst — the settled window stays baked in pipe:3. Present only when the
+    // template has a playlist element (decided once per session, like every input). Declared last,
+    // so no earlier index moves. Its motion is rendered in Node: ffmpeg's overlay/drawbox refuse
+    // runtime x/y commands (sendcmd spike: "Function not implemented").
+    ...(playlistWindow
+      ? ['-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', `${playlistWindow.width}x${playlistWindow.height}`, '-r', String(playlistWindow.fps), '-i', 'pipe:7']
+      : []),
   ];
 
   const filterLines: string[] = [
@@ -136,11 +166,21 @@ export function buildPersistentEncoderArgs(params: {
   ];
   let videoPad = 'vbg';
 
+  const compositePlaylistWindow = () => {
+    // Directly above the canvas layer the playlist element is baked into, so burst frames keep
+    // the baked window's z-position relative to the gifs. Even x/y (computePlaylistWindowRegion)
+    // makes yuv420 placement exact without GIF_OVERLAY_FORMAT's RGB round trip.
+    filterLines.push(`[${playlistWindowInputIndex}:v]format=yuva420p[plwin]`);
+    filterLines.push(`[${videoPad}][plwin]overlay=${playlistWindow!.x}:${playlistWindow!.y}[vplwin]`);
+    videoPad = 'vplwin';
+  };
+
   // For 'bottom' and 'split', the elements the template lists BEFORE its first gif go down first,
   // so the gifs below then composite over them instead of under them.
   if (canvasPlacement !== 'top') {
     filterLines.push(`[${videoPad}][vcanvas]overlay=0:0[vcanvas_below]`);
     videoPad = 'vcanvas_below';
+    if (playlistWindow?.layer === 'below') compositePlaylistWindow();
   }
 
   // Each gif is composited in template-element order onto whatever is underneath it so far — the
@@ -175,6 +215,10 @@ export function buildPersistentEncoderArgs(params: {
     filterLines.push(`[${videoPad}][${topCanvasPad}]overlay=0:0[vcanvas_top]`);
     videoPad = 'vcanvas_top';
   }
+  // For 'top' placement there is no below layer at all, so a 'below' value is treated as 'top'
+  // here — this and the 'below'-layer call above are mutually exclusive by construction, so the
+  // playlist window is never composited twice.
+  if (playlistWindow && (playlistWindow.layer === 'top' || canvasPlacement === 'top')) compositePlaylistWindow();
 
   if (equalizer) {
     // format=yuva420p is the actual straight-alpha compositing conversion — the input is declared
