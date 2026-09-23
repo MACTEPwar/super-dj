@@ -250,10 +250,22 @@ change between a donor copying a command and the donation arriving, and dropping
 that race is worse than playing a track of the streamer's own that isn't in the current playlist.
 The only ids a donor can realistically know are ones some request page showed them.
 
-**Not routed through `SongRequestQueue`**, as agreed: there is no download to race, so it resolves
-in two indexed queries and inserts immediately. Consequence stated plainly (edge case A5): a library
-request can overtake a free-text request that arrived *earlier* but is still downloading. See
-"Judgment calls" #2.
+**One arrival-ordered queue for both types (user decision, 2026-09-23).** "There must be one queue;
+whoever donated first goes first." `SongRequestQueue` is generalized and renamed
+**`DonationRequestQueue`** (`src/donations/donationRequestQueue.ts`), with
+`enqueue<R>(task: () => Promise<R>): Promise<R>` — the same promise-tail chain as today, just no
+longer tied to a query string. Both handlers enqueue onto the **one** instance `server.ts` builds,
+so a donation's place in the play queue is fixed at the moment the webhook (or the Test button)
+dispatched it, not by which task finished first. An exact-track task is two indexed queries, so
+once its turn comes it resolves almost at once; the point is ordering, not speed.
+
+**Knock-on, added deliberately (flagged in the revision report):** `HttpMediaSearchClient` has no
+timeout, so today a hung download already stalls every free-text request behind it forever. With
+one shared queue it would stall exact-track requests too — a new failure mode this decision
+introduces. `DonationRequestQueue` therefore gets a **head-of-line timeout**: if a task hasn't
+settled within `DONATION_TASK_TIMEOUT_MS` (90 s), the queue logs and moves on to the next task. The
+timed-out task is not cancelled. If it completes later it still inserts, and that one request lands
+out of order — a degraded but bounded outcome, versus every later donation being lost.
 
 ### Rule type, validation, dispatch
 
@@ -269,8 +281,10 @@ request can overtake a free-text request that arrived *earlier* but is still dow
 - **Dispatch by action type.** A new `src/donations/donationActions.ts` defines
   `type DonationActionResult = SongRequestResult | LibraryTrackRequestResult` and
   `type DonationActionHandlers = Record<ActionType, (query: string) => Promise<DonationActionResult>>`.
-  `server.ts` builds one handlers object — `songRequest` → `songRequestQueue.enqueue(query)` (as
-  today), `libraryTrackRequest` → `executeLibraryTrackRequest(...)` — and hands the **same** object
+  `server.ts` builds one handlers object — `songRequest` →
+  `donationQueue.enqueue(() => executeSongRequest(..., query))`, `libraryTrackRequest` →
+  `donationQueue.enqueue(() => executeLibraryTrackRequest(..., query))`, both on the same
+  `DonationRequestQueue` — and hands the **same** object
   to both the webhook (whose loop becomes the `switch`-on-`actionType` its own comment anticipated)
   and the rule test route. This replaces the `executeSongRequest` dep on both.
 - **The "Test" button** (`POST /interaction-rules/{id}/test`) needs no new logic: it already runs
@@ -325,216 +339,258 @@ and after. The dispatch worked; the target filters implement no `process_command
 goes through the same `avfilter_graph_send_command` path, and injecting expression strings hits the
 same wall. No `sendcmd`/`zmq`/runtime-expression design is considered.
 
-### Chosen approach: a dedicated, continuously-fed playlist-window pipe
+### Chosen approach (user decision, 2026-09-23): the settled window stays baked; pipe:7 is a burst-only layer
 
-A new raw-video pipe carries **only the playlist window's region**, composited by ffmpeg at a fixed
-x/y with no ffmpeg-side motion. All animation is computed and rendered in Node.
+> Revision note. The first version of this spec moved the playlist window out of the baked canvas
+> permanently. The user chose the other fork: **"everything stays in the main canvas; the new pipe
+> is only for the animation burst."** This section is rewritten for that choice. The findings it
+> reverses are listed under "Judgment calls" (#1, #3, #4, #5).
 
-**The fork, and the call made on it.** Either (i) the playlist window moves out of the baked Satori
-canvas *permanently* and this layer always draws it, or (ii) the canvas keeps drawing the settled
-window and this layer only contributes during a burst. **Chosen: (i), permanent.** The decisive
-fact: *a raw pipe declared to ffmpeg must be fed continuously at its declared rate in both designs*
-— `overlay`'s frame sync stalls the entire encode on any input that stops delivering frames (the
-failure `PulseVisualizer.framesDue()` exists to prevent; see its comment). So (ii) saves no
-steady-state cost at all — it would write transparent frames all the time instead of the window —
-and adds a handoff: at burst start and end, the canvas (5 fps heartbeat, one-shot ffmpeg render, ~100
-ms+ latency) and this layer (30 fps) would have to swap who draws the window on the same frame, or
-the window would visibly double or blink. (i) has one code path for how the window looks, no
-handoff, and the preview endpoint renders it through the same row builder.
+The real constraint behind both forks: ffmpeg's filter graph is fixed when the encoder spawns. So
+whether `pipe:7` exists can only be decided once per session — the same invariant that rules out
+`sendcmd`/`zmq`. It can't be toggled by "are donations happening right now".
 
-### Pipe, fd, and compositing
+- **The settled window is exactly today's.** It is baked into the main Satori canvas PNG by the
+  same `case 'playlist'` node, with the same natural line height, wrapping, gradient spanning the
+  block, and position in the canvas's own layer. Its content is rebuilt through the existing
+  render-on-change path (`buildOverlay` → `CanvasFeeder.render`). A stream that never has anything
+  queued looks byte-for-byte as it does today.
+- **`pipe:7` exists structurally** whenever the template has a usable `playlist` element (the same
+  per-session optionality as the equalizer's `pipe:5`). While idle it carries a precomputed
+  **fully transparent frame**, resent at the declared rate, and contributes nothing visible.
+- **During a burst** (a track was just queued and the change is visible in the window), the layer
+  shows the animation on top, and the canvas temporarily bakes the window *out*, so the old rows
+  underneath don't double up with the moving ones. When the burst ends, the canvas bakes the window
+  back in with the new rows (its normal render-on-change path) and the layer returns to transparent.
+
+**Why the canvas must bake the window out during a burst.** The burst layer draws text on a
+transparent background. Composited over a canvas that still shows the *old* rows, the viewer would
+see two different row sets overlapping. Making the burst layer opaque would need it to reproduce
+whatever is under the window (background image, gifs, the per-track background override), which it
+can't. So for the length of a burst, the canvas is rendered as variant **A** — the current overlay
+with the live playlist element omitted. Afterwards it is rendered as variant **B** — the full
+overlay with the new rows.
+
+### The handoff protocol
+
+The canvas (`pipe:3`, a 5 fps heartbeat, with one-shot-ffmpeg render latency) and `pipe:7` (30 fps)
+are separate inputs with no frame-accurate synchronization between them. The protocol never relies
+on one: every switch overlaps **identical** content for a hold period, so whichever input ffmpeg
+picks up first, the picture is the same. `HANDOFF_HOLD_MS = 2 × CANVAS_HEARTBEAT_MS` (400 ms).
+
+1. **Frame 0.** The feeder renders the *from* rows with the settled layout. That is pixel-for-pixel
+   the window already baked in the canvas, because it is the same Satori node at the same position.
+   It becomes the `pipe:7` frame. Wait `HANDOFF_HOLD_MS`: the same text is now drawn twice, in the
+   same place.
+2. **Canvas → A.** Render and write canvas variant A (window omitted), then wait
+   `HANDOFF_HOLD_MS`. The window is now drawn only by `pipe:7`, still showing the from rows.
+3. **Animate** for 600 ms (below). It ends on a frame with the *to* rows at the settled layout.
+4. **Canvas → B.** Render and write canvas variant B (window baked in with the to rows), then wait
+   `HANDOFF_HOLD_MS`. Identical content is drawn twice again.
+5. **Idle.** `pipe:7` goes back to the transparent frame.
+
+A burst runs about 2–2.5 s from `enqueueTrack` to idle (two canvas renders plus two holds around
+the 600 ms of motion). The motion itself starts about 0.8–1 s after the insert. That is invisible
+next to the seconds a donation already takes to arrive and download. The residual artifact is
+that, during each 400 ms hold, text is drawn over identical text, which makes antialiased edges
+slightly heavier (edge case C19). Task 9 of the plan pixel-checks it.
+
+**Who orchestrates it: `PlaylistWindowAnimator`** (`src/stream/playlistWindowAnimator.ts`). This
+is a small class with one purpose: run bursts and coalesce queue changes. It is kept out of
+`StreamController` so the controller only gains a few calls. Its injected deps:
+
+- the feeder: `showRows`, `animate`, `goIdle`
+- `bakeCanvas(rows, { omitLivePlaylist })`, a controller callback that builds the overlay for the
+  current track, sets it as `currentOverlay` (so the once-a-second timer tick keeps re-rendering
+  the right variant), and awaits `CanvasFeeder.render`
+- a `sleep`
+- `holdMs`
+
+Its API is `queueChanged(fromRows, toRows)`, `abort()`, and `busy`.
+
+- **Coalescing.** A `queueChanged` during a burst only records the latest target rows. When the
+  burst finishes (after step 5), if the recorded target differs from what's baked, a follow-up runs
+  from the newly baked rows. It is a burst if the diff is an insert, otherwise a plain re-bake. Any
+  number of inserts during one burst collapse into one follow-up.
+- **Abort** (any `feedCurrentTrack` — a track change, a resume — or `teardown`). The burst's
+  generation is bumped, so every pending await bails; the feeder goes idle immediately; and
+  `feedCurrentTrack` bakes the full overlay as it always does. On a track change the window can be
+  missing for that one render's latency (edge case C2). It happens during what is already a hard
+  cut (the title and cover change at the same moment), and it's preferable to showing stale rows
+  over new ones.
+- **When bursts run.** Only while the controller is `streaming` or `paused` (the video keeps
+  running while paused) and a feeder exists. In any other state, or with no playlist element, a
+  queue change just waits for the next normal bake.
+
+### Pipe, fd, format, and compositing
 
 - **fd 7 / `pipe:7`**, a new `playlistWindowPipe` on `ChildProcessWithPipes`. Existing fds are
   unchanged: 3 canvas, 4 audio, 5 equalizer, 6 above-canvas. `createPipeSpawner` opens stdio slot 7
-  unconditionally (stdio becomes 8 entries) and attaches an `'error'` listener, exactly like 5 and 6.
-- **Optional, like the equalizer.** `buildPersistentEncoderArgs` gains `playlistWindow?: { x, y,
-  width, height }` and declares `-f rawvideo -pix_fmt rgba -s WxH -r 30 -i pipe:7` only when present.
-  The input is appended **last** (after the above-canvas input) so no existing input index moves:
-  `playlistWindowInputIndex = aboveCanvasInputIndex + (split ? 1 : 0)`.
-- **Filter:** `[idx:v]format=yuva420p[plwin]`, then `[videoPad][plwin]overlay=X:Y[vplwin]`, placed
-  **after the top canvas layer and before the equalizer**. So the window draws above the canvas
-  (including the timer) and above gifs, and below the equalizer. This is the same kind of fixed-slot
-  approximation the equalizer already makes (it always draws on top regardless of element order);
-  a template that lists an opaque element *after* the playlist to cover it will now have the playlist
-  on top. Stated, not engineered around.
-- **RGBA straight alpha**, following `PulseVisualizer`: resvg's premultiplied pixels go through the
-  existing `unpremultiplyRgbaInPlace` before being written.
-- **Declared rate: 30 fps** (`PLAYLIST_WINDOW_FPS = VIDEO_FPS`), so the animation runs at the output
-  frame rate with no duplicate-frame stepping. It is one named constant; see "Cost" for the measured
-  fallback rule.
+  unconditionally and attaches an `'error'` listener, exactly like 5 and 6.
+- **Optional.** `buildPersistentEncoderArgs` gains `playlistWindow?: { x, y, width, height, fps,
+  layer: 'below' | 'top' }` and declares `-f rawvideo -pix_fmt yuva420p -s WxH -r <fps> -i pipe:7`
+  only when it is present. The input is appended **last**, so no existing index moves.
+- **Pixel format `yuva420p`**, not rgba: 2.5 bytes per pixel instead of 4 (37% less pipe traffic,
+  which matters because this pipe is fed even while idle), and the same format `pipe:3` carries. The
+  worker converts resvg's premultiplied RGBA to straight alpha (the existing
+  `unpremultiplyRgbaInPlace`), then to yuva420p with the **BT.601 limited-range** coefficients that
+  swscale uses by default. That default is what `CanvasFeeder`'s one-shot render uses to produce the
+  baked window, so frame 0 and the final frame match the baked text's colours (checked in Task 9:
+  max deviation ≤ 2 code values). The idle frame is precomputed once: A = 0 everywhere, Y = 16,
+  U = V = 128.
+- **Where it composites: directly above the canvas layer that contains the playlist element.** For
+  `top` placement, or when the playlist is in the above layer of a `split`, that is right after
+  `[vcanvas_top]`. When the playlist is in the below layer (`bottom`, or `split`-below), it is right
+  after `[vcanvas_below]` — under the gifs, exactly where the baked window sits. Always before the
+  equalizer. So during a burst the moving rows keep the baked window's z-position relative to gifs.
+  The one burst-only exception: in `top` placement the timer's drawtext lives in the same canvas
+  layer, so moving rows draw above the timer if the two overlap (C15).
+- **Declared rate `PLAYLIST_WINDOW_FPS = 30`** (the output frame rate, so the motion isn't stepped),
+  with the measured fallback to 15 below.
 
-### Region geometry
+### Region geometry (burst frames only)
 
-`PlaylistElement` has no height, and a pipe needs fixed dimensions. Rows therefore get a
-**deterministic height**: `rowHeight = round(fontSize × 1.25)`, applied as an explicit `lineHeight`
-and `height` on every row. Rows become **single-line** (`whiteSpace: nowrap`, `overflow: hidden`,
-`textOverflow: ellipsis`) — needed so a long name can't wrap and break the row grid. Both are small
-visible changes to existing templates (today rows use Satori's `normal` line height, about 1.16 for
-DejaVu Sans, and long names wrap), and the preview endpoint shows them identically, because it
-renders rows through the same shared node builder.
+The pipe needs fixed dimensions, and `PlaylistElement` has no height. The region is a bound, not a
+layout change — the baked window keeps its natural layout.
 
-- `visibleRows = PLAYLIST_WINDOW_BEFORE + 1 + PLAYLIST_WINDOW_AFTER` (= 10) and `regionRows =
-  visibleRows + 1`: one extra row of room so the row pushed out at the bottom can slide down while
-  it fades instead of being clipped hard.
 - `pad = ceil((stroke?.width ?? 0) + max(|shadow.offsetX|, |shadow.offsetY|) + (shadow?.blur ?? 0)) + 2`.
-- Region = `[el.x − pad, el.x + el.width + pad] × [el.y − pad, el.y + regionRows·rowHeight + pad]`,
-  clamped to the 1280×720 canvas, **with x/y rounded down to even and width/height adjusted to
-  even**. The persistent encoder's `overlay` snaps odd coordinates to the yuv420 chroma grid (see
-  `GIF_OVERLAY_FORMAT`'s comment), and an even origin makes placement exact at zero cost, without
-  the RGB-compositing option the gifs pay for.
-- A region with width or height < 2 after clamping (an element placed off-canvas) is treated as "no
-  playlist layer": no pipe, no feeder.
-- Default template: 700 px wide at `fontSize: 22` gives `rowHeight` 28 and a region of about
-  704 × 312.
+- Width: `el.x − pad` … `el.x + el.width + pad`. Height: `el.y − pad` …
+  `el.y + ceil((visibleRows + 1) × fontSize × 1.4) + pad`. Here `visibleRows = 10`, plus one row of
+  room for the pushed-out row to slide while it fades, and 1.4 × fontSize generously bounds the
+  natural single-line height (about 1.16–1.2 × for the bundled fonts).
+- Clamped to 1280×720, with the origin rounded down to even and the size to even — so `overlay`
+  places it exactly without the gifs' RGB-compositing cost (see `GIF_OVERLAY_FORMAT`).
+- Width or height < 2 after clamping (the element is off-canvas) → no layer at all.
+- A window whose names wrap onto a second line can extend past the bound. Only **burst frames** are
+  clipped there (C14); the baked window never is.
+- Default template (`x 512, y 160, width 700, fontSize 22`): **704 × 342**.
 
-### Window contents: a queue-aware snapshot with stable keys
+### The burst frames: the same node, animated
 
-Today the window lists only base-playlist tracks around the current one, so a queued track is
-**invisible until it starts playing** (true today for `play`-by-name, and for every donation after
-B). The animation needs the queued track to appear, so Phase C changes what the window shows:
+`sceneRenderer.ts`'s existing `case 'playlist'` node (a flex column with the container's text
+style, one div per row) is refactored into `playlistWindowNode(el, rows, origin)`, where each row
+may carry optional animation props: `opacity`, `offsetX`, and `maxHeightFactor`.
 
-`PlaylistQueue.windowSnapshot(before, after): WindowRow[]`, with `WindowRow = { key, text, isCurrent }`:
-
-- **Before:** the same base context as today — `before` base rows ending just before the current
-  base index, or, when the current track is an inserted one, the `before` rows ending at (and
-  including) `positionInBase()` (today's two builders' semantics, unchanged).
-- **Current:** `▶ <name>`.
-- **After:** remaining `insertedQueue` entries in FIFO order, then base rows from
-  `positionInBase() + 1`, `after` rows in total (no wrap-around, as today).
-- **Keys are stable per queue entry**: base rows are `b:<baseIndex>`, inserted entries get
-  `i:<seq>` from a per-queue counter assigned in `insertNext()`, and an inserted entry keeps its
-  key when it becomes current. `history` stores `{ track, key }` so `previous()` restores the right
-  key too.
-
-This replaces `buildPlaylistWindowLines`/`buildInsertedTrackWindowLines` and `positionInBase()`'s
-use as a render argument. `buildOverlay(track, windowRows)` still receives the rows, because a
-template's **second and later** `playlist` elements (rare) stay baked into the canvas with the same
-row builder — they update on track change only, like today, and don't animate. Only the **first**
-`playlist` element goes on the live layer. One region per element would mean one pipe per element.
-
-### Components
-
-- **`RawFramePacer`** (`src/ffmpeg/rawFramePacer.ts`) — **extracted from `PulseVisualizer`**, with
-  identical behaviour: `framesDue()`, `framesAccounted`/`framesWritten`, `MAX_CATCH_UP_FRAMES`, the
-  forgive-under-backpressure rule, and the `'drain'` handler. `PulseVisualizer` delegates to it and
-  `test/ffmpeg/pulseVisualizer.test.ts` must pass **unmodified** — that is the refactor's acceptance
-  test. Extracted, not copied, because this is the most measured and least obvious write discipline
-  in the repo, and two drifting copies of it would be a liability.
-  - This is the same invariant as `CanvasFeeder`'s "every write lands exactly `heartbeatMs` apart"
-    rule — the frame count written must track wall-clock time × declared rate — in the form that
-    holds at 30 fps. It also removes the bug `CanvasFeeder` once had *by construction*: a render
-    never writes to the pipe. It only replaces the cached frame, and the pacer's tick does all the
-    writing.
-- **`PlaylistWindowFeeder`** (`src/ffmpeg/playlistWindowFeeder.ts`) — one clear purpose: turn
-  "what rows should the window show" into a continuously-paced raw RGBA stream on `pipe:7`,
-  animating insertions. API: `attach(pipe)`, `setRows(rows: WindowRow[])`, `close()`. It holds a
-  30 fps tick timer (`.unref()`'d), a pacer, the cached frame, the "rendering" in-flight flag, and
-  the animation state. Constructor takes geometry, the element's style, and an injectable
-  `renderFrame` and `now` (for fakes/tests, like `PulseVisualizer`).
-  - **Before its first render**, the cached frame is a pre-allocated all-zero (fully transparent)
-    buffer, so the encoder never stalls waiting for this pipe. That frame is also what a render
-    failure falls back to (log, keep the last good frame; a transparent frame only if nothing was
-    ever rendered) — the same "keeping the stream up matters more than one picture" policy as the
-    canvas's `BLANK_OVERLAY_PNG`.
-- **Why not a capability of `CanvasFeeder`:** different cadence (30 vs 5 fps), different pixel
-  format (rgba vs yuva420p), different renderer (Satori-direct pixels vs one-shot ffmpeg), and
-  different pacing discipline. Merging them would couple two timing regimes in one class.
-  Why not `PulseVisualizer`: that class is audio-analysis-driven. The shared part is exactly the
-  pacer, and that is what gets shared.
-- **Rendering:** a new worker entry `src/render/playlistWindowRenderWorker.ts` in its own small
-  piscina pool `src/render/playlistWindowRenderPool.ts` (`maxThreads` 2, `idleTimeout` 60 s,
-  **`useAtomics: false`** — the RSS-leak scar documented in `pulseRenderWorkerPool.ts` applies
-  verbatim). The worker runs Satori → resvg and returns raw `pixels`. The pool rewraps the returned
-  `Uint8Array` with `Buffer.from(buf.buffer, byteOffset, byteLength)` (the worker-boundary scar), and
-  fonts are loaded inside the worker via `fontCache`, as `renderScene` does, so no font bytes cross
-  the boundary. It gets its own pool so an animation burst never queues behind, or delays, another
-  tenant's 1280×720 canvas render in the shared render pool.
-- **One shared row builder** (`playlistWindowNode(el, rows, layout)` in `sceneRenderer.ts`): used by
-  the preview/bake path (settled layout, rows at `i·rowHeight`, opacity 1) and by the worker
-  (per-frame offsets/opacity, origin shifted into region coordinates). The window looks the same in
-  the editor preview, on stream settled, and at the end of every animation.
-
-### Lifecycle and wiring
-
-- `buildStreamScene()` finds the first `playlist` element, computes its region, removes it from the
-  baked element lists (`isBaked` excludes it, like timer/equalizer/gifs), passes
-  `playlistWindow: region` to `createPersistentEncoder`, and exposes
-  `createPlaylistWindowFeeder?: () => PlaylistWindowFeeder`, present only when the template has a
-  usable playlist element (same optional-factory shape as `createPulseVisualizer`). **No playlist
-  element → no factory, no `-i pipe:7`, no renders, no timer: zero cost.**
-- `StreamControllerDeps` gains `createPlaylistWindowFeeder?`. `spawnPipeline()` creates and attaches
-  it to `child.playlistWindowPipe`; `teardown()` closes it; it is recreated on reconnect like every
-  other collaborator.
-- `StreamController` pushes rows through one private `publishWindow()` —
-  `this.playlistWindowFeeder?.setRows(this.deps.queue.windowSnapshot(BEFORE, AFTER))` — called from
-  `feedCurrentTrack()` (after the generation/state re-check, alongside the canvas render), from
-  `enqueueTrack()`, and from `next()`/`previous()` when not streaming (paused/reconnecting, where
-  the queue moves without a feed).
-
-### The animation
-
-`PlaylistWindowFeeder.setRows(next)` diffs `next` against its current target with a pure function,
-`planWindowTransition(from, to)` (`src/ffmpeg/playlistWindowTransition.ts`):
-
-- `none` — identical keys and texts: nothing to do.
-- `insert` — the current row's key and index are unchanged, and `to` equals `from` with one or more
-  rows inserted after the current row, while rows fall off only at the bottom. Every shared key keeps
-  its text and relative order.
-- `snap` — anything else (a track advance, `previous`, a restart, a first render from empty).
-
-`snap` renders the new settled frame immediately. `insert` runs a **600 ms** animation, driven by
-wall-clock progress `p = (now − startedAt) / 600`, not frame index, so a slow or dropped render
-shortens the visible frame rate but never stretches the animation:
+- **With no animation props, the node is byte-identical to today's.** The baked canvas and the
+  template preview call it that way. The existing `sceneRenderer` tests, unmodified, are the gate.
+- Burst frames render **only this element**, region-sized, with the origin shifted into region
+  coordinates. Frame 0 and the final frame pass no animation props, so they are the baked window's
+  own pixels. That is what makes the handoff overlaps invisible.
+- Intermediate frames animate the gap by growing the new row's box:
+  `maxHeight = maxHeightFactor × fontSize`, with `overflow: hidden`. The flex column then pushes
+  every row below it down naturally — no row-height model is needed, so wrapping, natural line
+  height and the block-spanning gradient all behave as they do in the baked window.
 
 | What | Motion | Window (ms) | Easing |
 |---|---|---|---|
-| Rows below the insertion point | slide down by `k × rowHeight` (`k` = rows inserted) | 0–360 | ease-in-out cubic |
-| Rows pushed past the last visible slot | same slide, opacity 1 → 0 | 0–360 | ease-in-out cubic |
-| New row(s) | opacity 0 → 1, and x offset +24 px → 0 | 240–600 | ease-out cubic |
+| New row(s): gap | `maxHeightFactor` 0 → 1.5 (saturates at the row's natural height, about 1.2) | 0–360 | ease-in-out cubic |
+| Row(s) pushed past the last visible slot | stay in the column below, opacity 1 → 0 | 0–360 | ease-in-out cubic |
+| New row(s): content | opacity 0 → 1, `offsetX` +24 px → 0 | 240–600 | ease-out cubic |
 
-The gap opens first and the new row settles into it, overlapping by 120 ms so the motion reads as
-one movement. No colour or highlight is invented: rows keep the template's own style. At `p ≥ 1` the
-feeder renders the target's settled frame (byte-identical to what a `snap` would produce) and the
-animation ends. During an animation the tick requests a new render whenever none is in flight, so
-there is **at most one render in flight per feeder** (the `PulseVisualizer` discipline). At most 18
-renders per insertion at 30 fps, fewer if renders are slower than 33 ms.
+Because the cap of 1.5 × fontSize is above the natural height, the gap finishes opening at about
+80% of its eased progress — slightly early, but still smooth. At `t ≥ 600` the feeder renders the
+to rows with no props (the final frame).
 
-**Coalescing.** At most one animation is in flight. `setRows` during an animation:
+The motion is driven by wall-clock progress, so a slow render drops frames but never stretches the
+animation. At most one render is in flight per feeder (the `PulseVisualizer` discipline); that is up
+to 18 frames at 30 fps. A gradient `color` is applied by the container's `backgroundClip: text`, so
+it stretches as the block grows during the burst. Satori may also not apply a row's `opacity` to
+gradient-clipped text, in which case the fade is lost but the gap motion stays. Both are burst-only
+and are checked in Task 5 (C16).
 
-- If the pending change, diffed against the in-flight animation's *target*, is `insert` (more
-  donations landing within the same 600 ms), it is **queued** and runs as exactly **one** follow-up
-  animation from that target once the current one ends. Any number of inserts within one animation
-  coalesce into one follow-up that opens a `k`-row gap.
-- If it is `snap` (e.g. the track advanced mid-animation), the animation is **abandoned** and the
-  new state snaps immediately. A cosmetic animation must never delay showing the real now-playing
-  state.
+### Window contents: a queue-aware snapshot with stable keys (unchanged from the first version)
 
-Donations seconds apart (the realistic case, since a free-text request needs a download first) each
-get their own animation.
+`PlaylistQueue.windowSnapshot(before, after): WindowRow[]` with `WindowRow = { key, text, isCurrent }`:
 
-**Every insertion animates, including the streamer's own `play`-by-name.** After B there is one
-insert path, and the viewer sees the queue change the same way whatever its source. An insertion
-beyond the visible `after` rows (more queued than fit) changes nothing visible, so it produces a
-`none`-equivalent result (see edge case C4).
+- **Before:** `before` base rows ending just before the current base index. When an inserted track
+  is current, the `before` rows end at (and include) `positionInBase()`.
+- **Current:** `▶ <name>`.
+- **After:** remaining `insertedQueue` entries, then base rows, capped at `after` rows in total,
+  with no wrap-around.
+- **Keys:** `b:<baseIndex>` for base rows, and `i:<seq>` per inserted queue entry, kept when the
+  entry becomes current and when `previous()` restores it.
+
+It replaces `buildPlaylistWindowLines`/`buildInsertedTrackWindowLines`, and `buildOverlay(track,
+windowRows, opts?)` bakes `windowRowLines(rows)`.
+
+**This is the one change to the baked window that survives the reversal, and it is visible:** the
+window now lists queued tracks. With nothing queued, the snapshot's lines are exactly today's, so
+there is no change. With something queued — a `play`-by-name, which is possible today, or any
+donation after B — the queued rows appear after the current one. That is required: otherwise the
+burst's final frame would not match the baked window (C1).
+
+### Components
+
+- **`RawFramePacer`** (`src/ffmpeg/rawFramePacer.ts`), extracted from `PulseVisualizer` with
+  identical behaviour, and `pulseVisualizer.test.ts` unmodified as the gate. This is the same
+  heartbeat-of-an-unchanging-frame discipline `CanvasFeeder` uses for `pipe:3` — the frame count
+  written tracks wall-clock time × declared rate, and a render only replaces the cached frame and
+  never writes by itself — in the count-driven form that holds at 30 fps. Idle is exactly this:
+  the pacer resending the precomputed transparent frame.
+- **`PlaylistWindowFeeder`** (`src/ffmpeg/playlistWindowFeeder.ts`) is now a dumb frame player for
+  `pipe:7`. Its API:
+  - `attach(pipe)`
+  - `showRows(rows): Promise<void>` — render a settled frame and make it current
+  - `animate(plan): Promise<void>` — play the 600 ms insert and end on the settled to-rows frame
+  - `goIdle()` — back to the transparent frame; cancels anything in flight
+  - `close()`
+
+  It holds a 30 fps tick timer (`.unref()`'d), the pacer, the "one render in flight" flag, and a
+  generation counter so a cancelled render never becomes current. It takes injectable `renderFrame`
+  and `nowMs`. It owns no timing policy, and no knowledge of the canvas or the queue.
+- **`PlaylistWindowAnimator`** (`src/stream/playlistWindowAnimator.ts`) runs the handoff protocol
+  and coalescing described above.
+- **Rendering:** its own piscina pool, `playlistWindowRenderPool.ts` + `playlistWindowRenderWorker.ts`:
+  - `maxThreads` 2, `useAtomics: false` (the RSS-leak scar)
+  - resvg with `loadSystemFonts: false` (Satori has already turned glyphs into paths, and the scan
+    costs about 130 ms per call)
+  - unpremultiply and yuva conversion inside the worker, so the main thread only memcpys
+  - the returned `Uint8Array` rewrapped as a `Buffer` (the worker-boundary scar)
+
+  It has its own pool so a burst never queues behind, or delays, another tenant's canvas render.
+
+### Lifecycle and wiring
+
+- `buildStreamScene()` finds the first `playlist` element and computes its region. If it is usable,
+  it records which canvas layer the element was baked into (`'below'` when it falls in
+  `belowElements` under `bottom`/`split`, else `'top'`). It passes `playlistWindow` to
+  `createPersistentEncoder` and exposes `createPlaylistWindowFeeder?`, present only then.
+  `buildOverlay(track, rows, { omitLivePlaylist })` bakes every element as today, minus that one
+  element when asked (variant A). **No playlist element → no factory, no `-i pipe:7`, no renders,
+  no timer, and args byte-identical to today.**
+- `StreamController`:
+  - creates the feeder in `spawnPipeline()`, and the animator around it with a `bakeCanvas`
+    callback; closes both in `teardown()`
+  - remembers `bakedRows` — the rows in the current overlay
+  - `feedCurrentTrack()` first calls `animator.abort()`, then bakes the full overlay from a fresh
+    snapshot, as today
+  - `enqueueTrack()`, while `streaming`/`paused`, calls
+    `animator.queueChanged(bakedRows, windowSnapshot())`
+  - `next()`/`previous()` while paused change nothing about the window, exactly as today (no bake
+    until resume)
 
 ### Cost, stated plainly
 
-- **Constant, for every stream whose template has a playlist element — including the built-in
-  default template.** Pipe writes of `w × h × 4` bytes at 30 fps. Default: 704 × 312 × 4 ≈ 0.88 MB
-  per frame, **~26 MB/s** of Node → kernel → ffmpeg memcpy, plus ffmpeg's rgba → yuva420p conversion
-  and one overlay of that region at 30 fps. This is the same order as the already-shipped equalizer
-  (a 1000 × 300 element is ~36 MB/s), but the equalizer is opt-in and this is on by default. It is
-  paid **even when no donation ever arrives**, because the pipe must be fed regardless (see "The
-  fork").
-- **Per settled change** (track switch, insertion end): one Satori + resvg render of the region.
-- **Per insertion:** up to 18 region renders over 0.6 s, self-limited to one in flight — at most one
-  worker thread busy for about 0.6 s. That is far cheaper than 18 full 1280×720 canvas renders, and
-  still real work.
-- **Measured fallback rule** (enforced by the plan's real-binary task): if, on the real image, the
-  encoder's steady-state `speed=` falls below 0.98x with the layer enabled, or its CPU rises by more
-  than 10 percentage points of one core over the same stream without it, `PLAYLIST_WINDOW_FPS`
-  drops to 15 (the `fps=` stage duplicates frames up to 30), and the numbers are re-measured and
-  recorded in CLAUDE.md either way.
+- **Idle, per session whose template has a playlist element — including the built-in default
+  template.** A transparent frame costs exactly the same bytes as a real one; what the reversal
+  removes is the visual change and the settled renders, not the pipe traffic. Only the format and
+  the rate reduce that. Default region 704 × 342 in yuva420p ≈ **0.60 MB/frame**:
+  - **~18 MB/s at 30 fps**, **~9 MB/s at 15 fps**. For scale, the existing canvas `pipe:3` is
+    1280 × 720 × 2.5 × 5 fps ≈ 11.5 MB/s.
+  - ffmpeg also runs one `overlay` blend of that region per output frame, on fully transparent
+    pixels.
+  - **No Satori/resvg renders at all.**
+- **Per insert that changes the visible window:**
+  - about 20 region renders (frame 0, up to 18 animation frames, the final frame), at most one in
+    flight: roughly one worker thread busy for about 0.6–0.8 s
+  - **plus two full-canvas re-renders** (variants A and B: a Satori render and a one-shot ffmpeg
+    each). B is new work anyway, since the baked window now lists queued tracks; A exists only for
+    the handoff.
+- **Measured fallback rule** (enforced by the plan's real-binary task). The idle cost and the burst
+  cost are measured separately. If the idle layer makes the encoder's steady-state `speed=` drop
+  below 0.98x, or adds more than 10 percentage points of one core to ffmpeg's CPU over the same
+  stream without the layer, then `PLAYLIST_WINDOW_FPS` drops to 15 and everything is re-measured.
+  The numbers are recorded in CLAUDE.md either way.
 
 ---
 
@@ -555,7 +611,8 @@ beyond the visible `after` rows (more queued than fit) changes nothing visible, 
   outlives the respawn), and `performReconnect()`'s existing "current track changed → start from 0"
   logic is unaffected: `insertNext()` doesn't change `current()`.
 - **B6 — ordering.** `play`-by-name and donation inserts share one FIFO, so they play in call order.
-  Free-text requests are still serialized among themselves by `SongRequestQueue`.
+  Free-text requests are still serialized among themselves by `SongRequestQueue` (which Phase A
+  generalizes into `DonationRequestQueue` for both donation types).
 - **B7 — `status().currentTrack` after `stop()`.** `teardown()` used to clear `nowPlayingTrack`,
   making it `null`. Reading `queue.current()` unconditionally would report a track for an idle
   controller (the entry survives `stop()`). Gated on state (above).
@@ -579,9 +636,18 @@ beyond the visible `after` rows (more queued than fit) changes nothing visible, 
   real id is always the last UUID.
 - **A4 — the playlist changed, or the track was removed from it, after copying.** Ownership only is
   checked, so it still plays (above). A track *deleted from the library* → `trackNotFound`.
-- **A5 — a library request overtakes an earlier free-text request that is still downloading.** It
-  resolves immediately while the free-text one waits on its fetch. Accepted per the agreed "never
-  touches `SongRequestQueue`" decision; flagged as judgment call #2 with a one-line alternative.
+- **A5 — ordering across the two donation types.** Closed by the user's decision: both types go
+  through one `DonationRequestQueue`, so an exact-track request waits behind an earlier free-text
+  request that is still downloading, and plays after it. Residual risk: a hung download. Bounded by
+  the queue's 90 s head-of-line timeout, after which the queue moves on and the late task, if it
+  ever finishes, inserts out of order (logged). Residual, accepted: the webhook enqueues after its
+  `listEnabledByUser` read, so two webhooks landing within one DB round trip (milliseconds) are
+  ordered by when that read resolves. Closing it would mean enqueueing before the action type is
+  known.
+- **A5b — a single donation matching two rules** (two different keywords in one message is not
+  possible; `COMMAND_PATTERN` takes the first command only). Several matches of one command can only
+  come from pre-existing duplicate-keyword rules (A6). They are enqueued in rule order,
+  synchronously, within one webhook call, so they keep that order.
 - **A6 — a keyword collision between rule types** would double-fire. Closed by the 409 uniqueness
   check. Pre-existing duplicates are grandfathered.
 - **A7 — several enabled `libraryTrackRequest` rules.** The page advertises the lowest `minAmount`,
@@ -608,94 +674,114 @@ beyond the visible `after` rows (more queued than fit) changes nothing visible, 
 
 ### Phase C
 
-- **C1 — upcoming queued tracks were never shown in the window at all** (today, and after B until C
-  lands). Found while designing C, and fixed by `windowSnapshot()`. It is also a prerequisite for
-  the animation to have anything to show.
-- **C2 — an animation in flight when the track advances.** Abandoned, snap (above).
-- **C3 — N donations within one animation.** One coalesced follow-up animation.
-- **C4 — an insertion lands beyond the visible rows.** No visible change. `planWindowTransition`
-  compares the *visible* rows only (the snapshot is already capped at `after`), so this returns
-  `none`, and no render happens.
-- **C5 — the queue drains while an inserted row is visible** (the inserted track becomes current).
-  That is a track advance → snap. Only insertions animate; track changes cut instantly, as today.
-- **C6 — pause during an animation.** Pause doesn't change the rows, so the animation completes. The
-  pipe keeps being fed while paused, like the canvas heartbeat.
-- **C7 — an insertion while `reconnecting`.** The feeder is torn down (`?.` makes the push a no-op),
-  and the reconnect's `feedCurrentTrack()` publishes the full state into the fresh feeder as a snap.
-- **C8 — the encoder dies mid-animation.** `teardown()` → `close()` stops the tick. A render
-  resolving after `close()` must not write: the feeder checks a `closed` flag / null pipe, as
-  `PulseVisualizer` does.
-- **C9 — a render slower than 33 ms, or a timeout.** The pacer resends the last frame (a visible hold,
-  not a stall). Progress is wall-clock, so the animation still ends on time. A failure logs and holds.
-- **C10 — before the first render.** Transparent frames, so the encoder never waits on `pipe:7`.
-- **C11 — a template with no playlist element, or one placed fully off-canvas.** No pipe, no
-  feeder, no `-i pipe:7`. `persistentEncoderArgs` snapshot tests must show byte-identical args for
-  such templates.
-- **C12 — multiple playlist elements.** The first is live and animated; the rest stay baked and
-  static (above).
-- **C13 — odd element coordinates.** The region origin is rounded to even, so placement is exact.
-- **C14 — stroke or shadow overflowing the row box.** Covered by `pad`. Long names ellipsize instead
-  of wrapping (a visible change, stated).
-- **C15 — the timer overlapping the playlist region.** The playlist layer is now above the timer.
-  The approximation is stated. A template that deliberately overlaps them is unusual.
-- **C16 — gradient text colour.** Rows are now separate absolutely-positioned boxes, so a gradient
-  `color` (Satori's `backgroundClip: text`) spans **each row** rather than the whole block — a
-  visible change for gradient playlist elements, in the preview too. The worker must load every
-  font variant the element uses (`collectFontVariants` for the one element). resvg runs with
-  `loadSystemFonts: false` (Satori has already converted glyphs to paths, and the system-font scan
-  costs ~130 ms per call, per the equalizer spike).
-- **C17 — the premultiplied-alpha fringe.** Unpremultiplied before writing, as the equalizer does.
-  Verified on real output (plan task).
-- **C18 — rows re-rendered while their text is unchanged.** A `none` diff doesn't render. A
-  settled frame is cached and resent by the pacer for free.
+(Revised for the burst-only layer.)
+
+- **C1 — queued tracks were never shown in the window.** This is true today and after B. Fixed by
+  `windowSnapshot()`, which the *baked* window now uses. It is a visible change only when something
+  is queued, and it is required so the burst's final frame equals the re-baked window.
+- **C2 — the track advances (or the stream resumes) mid-burst.** `feedCurrentTrack` aborts the
+  burst, the layer goes idle at once, and the full overlay is baked as usual. The window can be
+  missing for that one canvas render's latency, during what is already a hard cut. This beats
+  stale rows over new ones.
+- **C3 — N inserts during one burst.** They coalesce into one follow-up burst after the current one
+  has fully handed back, starting from the newly baked rows.
+- **C4 — an insert beyond the visible rows.** The snapshot is unchanged → `none` → no burst and no
+  re-bake.
+- **C5 — the inserted track becomes current.** That is a track change → C2 path, no animation.
+- **C6 — pause during a burst.** It completes. `pause()`'s frozen-frame render uses `currentOverlay`,
+  which is variant A during the burst (the animator sets it), so the timer freeze never re-bakes the
+  old window under the moving rows.
+- **C7 — an insert while `reconnecting`/`idle`/`error`.** No burst. The next `feedCurrentTrack`
+  bakes the snapshot.
+- **C8 — the encoder dies mid-burst.** `teardown()` aborts the animator and closes the feeder. A
+  render resolving afterwards is discarded by the generation check and never written.
+- **C9 — a slow or failed render.** The pacer resends the last frame (a hold, not a stall), and
+  progress is wall-clock. If frame 0 or the final frame fails, the animator aborts: the layer goes
+  idle and variant B is baked, so the only visible effect is losing the animation.
+- **C10 — before anything renders, and while idle.** The precomputed transparent yuva frame, so
+  ffmpeg never waits on `pipe:7`.
+- **C11 — a template with no playlist element, or one that's fully off-canvas.** No pipe, no feeder,
+  no animator, and encoder args byte-identical to today (asserted).
+- **C12 — multiple playlist elements.** Only the first animates. The others stay baked in both
+  variants A and B, and update at B.
+- **C13 — odd element coordinates.** An even region origin gives exact placement.
+- **C14 — a wrapped name, or a very long window.** Only **burst frames** can clip at the region's
+  bottom bound. The baked window is untouched.
+- **C15 — the timer overlapping the window in `top` placement.** Moving rows draw above the timer
+  during a burst only.
+- **C16 — gradient text.** The gradient stretches as the block grows during a burst, and a fading
+  row's opacity may not apply to gradient-clipped text in Satori. Both are burst-only, verified in
+  Task 5, and don't change the settled look.
+- **C17 — premultiplied-alpha fringe.** Unpremultiplied in the worker before yuva conversion.
+  Pixel-checked for real.
+- **C18 — the same rows again.** `none` → nothing happens.
+- **C19 — handoff overlap.** For up to `HANDOFF_HOLD_MS` at the start and end of each burst,
+  identical text is drawn twice, so antialiased edges are slightly heavier. Pixel-checked: the
+  region's luma during the overlap must stay within a small tolerance of the baked-only frames.
+- **C20 — the colour of the conversion path.** The worker's BT.601 limited-range yuva conversion
+  vs ffmpeg's swscale conversion of the baked PNG: max deviation ≤ 2 code values, checked in Task 9.
+  Otherwise the text would visibly shift colour at the handoff.
+- **C21 — a per-track `overlayOverride` background.** It lives on the canvas's below layer and is
+  present in both A and B. The burst layer never paints a background.
+- **C22 — a variant-A/B canvas render fails.** `buildOverlay`'s existing blank-overlay fallback
+  applies, as for any bake. The animator aborts the burst, and the next bake restores it.
 
 ### Cross-phase
 
 - **X1 — A without C.** A library request queues correctly after A, but it doesn't appear in the
-  window until it plays (C1). Acceptable interim state, since the phases ship in order.
-- **X2 — C without the B rename.** Impossible by ordering. C's `publishWindow()` hooks into
-  `enqueueTrack()`, which B creates.
-- **X3 — the test button inserting into a live stream.** A `libraryTrackRequest` test really queues
-  the track (and animates it) on the live stream, exactly as a `songRequest` test really plays its
+  window until it plays (C1). An acceptable interim state, since the phases ship in order.
+- **X2 — C without the B rename.** Impossible by ordering: C hooks `enqueueTrack()`, which B
+  creates.
+- **X3 — the test button inserts into the live stream.** A `libraryTrackRequest` test really queues
+  (and animates) the track on the live stream, exactly as a `songRequest` test really plays its
   fetched track today. Unchanged semantics.
+- **X4 — one shared donation queue (A) and the burst (C).** Donations are dispatched one at a time,
+  so bursts arrive at most as fast as the queue drains. A slow download ahead spaces them out; a
+  run of instant exact-track requests coalesces per C3.
 
 ## Judgment calls made in this write-up
 
-Listed so the user can review them without rereading the whole spec:
+Listed so the user can review them without rereading the whole spec. Revised 2026-09-23 after two
+user decisions; each item that was reversed or narrowed says so.
 
-1. **Phase C: the playlist window moves permanently to the new layer**, rather than the layer being
-   active only during a burst. This is backed by the fact that the pipe costs the same either way.
-2. **Phase A: library requests bypass `SongRequestQueue`, as agreed.** This means they can overtake
-   an earlier free-text request that is still downloading (A5). Alternative: generalize
-   `SongRequestQueue` to take any `() => Promise<R>` task and route both through it — this restores
-   strict cross-type arrival order, at the cost of a library request waiting on the slowest pending
-   download ahead of it.
-3. **Phase C cost is paid by default.** The built-in default template has a playlist element, so
-   every such stream gets the new ~26 MB/s pipe even with donations unused. This comes with a
-   measured 30 → 15 fps fallback rule.
-4. **Phase C: rows become fixed-height and single-line** (`rowHeight = round(1.25 × fontSize)`,
-   ellipsis instead of wrapping), which slightly changes how existing templates look, preview
-   included.
-5. **Phase C: the playlist layer composites above the canvas, timer and gifs, and below the
-   equalizer**, regardless of element order.
-6. **Phase C: every insertion animates, including `play`-by-name. Track changes do not** — they cut
-   instantly.
-7. **Phase C: the window now lists queued tracks** (C1), which changes what viewers see even with
-   no donations.
-8. **Phase B: new `Track.ephemeral` flag.** Ephemeral tracks never enter `history`, and skipping one
-   deletes its file.
+1. **REVERSED by the user: the playlist window stays baked in the main canvas, and `pipe:7` is a
+   burst-only layer** (it was: moved permanently to the new layer). The cost this reversal brings
+   is the handoff protocol — canvas variant A, and two 400 ms identical-content overlaps per burst.
+2. **DECIDED by the user: one arrival-ordered queue for both donation types**
+   (`DonationRequestQueue`). The knock-on added in this revision is a 90 s head-of-line timeout.
+3. **NARROWED: idle cost is still paid by every session whose template has a playlist element,
+   including the default template.** A transparent idle frame is the same bytes as a real one. It is
+   now about 18 MB/s at 30 fps (yuva420p, 704×342) rather than about 26 MB/s (rgba), with no renders
+   at idle, and a measured 30 → 15 fps fallback (about 9 MB/s). It is not free: flagged for the user.
+4. **MOOT for the settled appearance.** No fixed row height, no ellipsis, no per-row gradient — the
+   baked window and the preview are unchanged. **Burst-only remnants:** the region's height bound
+   (1.4 × fontSize per row, which can clip wrapped names during a burst), the gap animated by
+   growing the new row's `maxHeight`, and a gradient that stretches (and may not fade) during a
+   burst.
+5. **MOOT for the settled appearance, and mostly fixed for the burst.** The layer now composites
+   directly above the canvas layer the playlist is baked into (below or above the gifs, as baked),
+   always under the equalizer. The only burst-only remnant is drawing above the timer in `top`
+   placement.
+6. **Every visible insertion animates, including `play`-by-name. Track changes do not** — they cut
+   instantly (unchanged).
+7. **The baked window now lists queued tracks** (C1). It is visible only when something is queued
+   (unchanged; the reversal keeps it necessary).
+8. **Phase B: new `Track.ephemeral` flag** — never in `history`, and deleted when skipped.
 9. **Phase B: `insertEphemeralTrack` is renamed to `enqueueTrack`**, and `playByName` delegates to
    it.
-10. **Phase A: `commandKeyword` must be unique per user** (409), enforced in the route and
-    grandfathered for existing rows.
-11. **Phase A: the id is extracted as the last UUID-shaped substring** rather than literally the
-    last 36 characters, and the copied command has a space between prefix and id.
+10. **Phase A: `commandKeyword` must be unique per user** (409).
+11. **Phase A: the id is the last UUID-shaped substring**, and the command has a space between the
+    prefix and the id.
 12. **Phase A: only ownership is checked, not membership in the live playlist.**
-13. **Phase A: the token is a `User` column, 128-bit hex, stored in plaintext, and minted only
-    explicitly.** Rotation overwrites it; disabling nulls it. There is no rate limit (accepted, and
-    consistent with `/auth/*`).
-14. **Phase C: `RawFramePacer` is extracted from `PulseVisualizer`** (behaviour-identical, with its
-    existing tests unmodified as the gate) rather than having its algorithm copied.
+13. **Phase A: the token is a `User` column, 128-bit hex, in plaintext, minted only explicitly, with
+    no rate limit.**
+14. **Phase C: `RawFramePacer` is extracted from `PulseVisualizer`** (behaviour-identical).
+15. **NEW: the handoff protocol** — frame 0 overlap → canvas A → animate → canvas B → overlap →
+    idle, with `HANDOFF_HOLD_MS = 2 × CANVAS_HEARTBEAT_MS`, orchestrated by a separate
+    `PlaylistWindowAnimator`.
+16. **NEW: `pipe:7` carries yuva420p**, converted in the worker with BT.601 limited-range
+    coefficients to match swscale's default, verified for real (C20).
+17. **NEW (knock-on of decision 1): `DonationRequestQueue`'s head-of-line timeout.**
 
 ## Testing and verification
 
@@ -708,29 +794,38 @@ for timing-driven classes, and no real ffmpeg in unit tests.
   queue-next semantics for `enqueueTrack`, release on skip, and the status gating),
   `songRequestAction.test.ts` (rename, `ephemeral` flag), `localStreamManager.test.ts` (rename),
   `overlayText.test.ts` (rename). Full `npm test` and `tsc` green.
-- **A:** repository-free route tests for both routers (fake repositories and a fake
-  `LocalStreamManager`: 404-by-shape without a DB call, 404 unknown, offline, live, `request` null vs
-  lowest-`minAmount`, headers); `libraryTrackRequestAction.test.ts` (every reason, last-UUID
-  extraction, foreign-owner, mapping); keyword-uniqueness 409s; webhook and test-route dispatch by
-  type; `openapi.test.ts` lists the new routes. Frontend vitest for `RequestPage` (all five states,
-  command format including code-point truncation and whitespace collapsing, clipboard fallback) and
-  the Donations card/select. **Real end-to-end once:** migration applied on the stand, a real page
-  load, a real donation through Donatello (or the Test button when Donatello is unavailable) with a
-  copied command, confirming the track queues next. A15's message-length assumption is checked there.
-- **C:** pure tests for `planWindowTransition`, `windowSnapshot`, geometry, and easing;
-  `RawFramePacer` extracted with `pulseVisualizer.test.ts` unmodified; `PlaylistWindowFeeder` with
-  a fake `renderFrame`/`now`/pipe (transparent-first, pacing, coalescing, abandon-on-snap,
-  no-write-after-close); `persistentEncoderArgs` (fd 7 input and filter only when present; args
-  byte-identical without it); `streamScene` (element excluded from bake, factory present/absent).
-  **Mandatory real-binary tasks**, because this phase is squarely in both classes CLAUDE.md says
-  unit tests can't catch:
-  1. The worker boundary: render through the *real* pool and assert `Buffer.isBuffer`, the expected
-     byte length `w·h·4`, and non-empty glyphs for Cyrillic text.
-  2. Real ffmpeg from the repo's own image: the generated args are accepted; pixel-sample the output
-     at the region before, during, and after an animation (rows actually move, the new row's alpha
-     ramps, no fringe, no stall); measure encoder `speed=` and CPU with and without the layer over
-     ≥ 60 s; apply the 30 → 15 fps fallback rule; record the numbers in CLAUDE.md.
-  3. A live look on the deployed stand at a real donation insert.
+- **A:**
+  - repository-free route tests for both routers (404-by-shape without a DB call, 404 unknown,
+    offline, live, `request` null vs lowest `minAmount`, headers)
+  - `libraryTrackRequestAction.test.ts` (every reason, last-UUID extraction, foreign owner, mapping)
+  - `donationRequestQueue.test.ts`: strict arrival order across task types, and the head-of-line
+    timeout moving on while a late task still resolves
+  - keyword-uniqueness 409s; webhook and test-route dispatch by type through the shared queue
+  - `openapi.test.ts` lists the new routes
+  - frontend vitest for `RequestPage` (all five states, command format, clipboard fallback) and for
+    the Donations card and type select
+  - **real end-to-end once**, including a free-text and an exact-track Test fired back to back,
+    confirming they play in the order fired, and A15's message-length check
+- **C:**
+  - pure tests for `planWindowTransition`, the animated-row props, `windowSnapshot`, geometry, and
+    the yuva conversion
+  - `RawFramePacer` extracted, with `pulseVisualizer.test.ts` unmodified
+  - `sceneRenderer.test.ts` **unmodified** as the gate that the baked node didn't change
+  - `PlaylistWindowFeeder` with fakes (transparent idle, `showRows`, `animate`, `goIdle` cancelling,
+    no write after close)
+  - `PlaylistWindowAnimator` with a fake feeder, a fake `bakeCanvas` and a fake sleep: the exact
+    handoff order and holds, coalescing, abort at every stage
+  - `persistentEncoderArgs`: the `pipe:7` input and placement for both layers; args byte-identical
+    without it
+  - `streamScene`: variant A omits exactly the live element; factory present/absent
+  - **Mandatory real-binary tasks:**
+    1. The worker boundary: a real `Buffer` of `2.5·w·h` bytes, and Cyrillic glyphs.
+    2. Real ffmpeg from the repo's own image. Measure the **idle** cost (60 s with the layer idle vs
+       the same template's stream with no layer: `speed=`, CPU and pipe bytes) **separately from
+       the burst** cost (renders per burst, worker CPU, canvas renders). Pixel-sample the handoff
+       (no doubled or blank window beyond C19's tolerance), the motion, the colour match (C20) and
+       the fringe (C17). Apply the fallback rule and record the numbers in CLAUDE.md.
+    3. A live look on the stand.
 
 ## Documentation updates (part of each phase's plan)
 

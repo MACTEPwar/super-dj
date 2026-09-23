@@ -20,7 +20,7 @@
 - Id extraction (backend): LAST match of `/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi`, lowercased.
 - Action types: exactly `'songRequest' | 'libraryTrackRequest'`.
 - Keyword uniqueness per user → 409 on POST/PUT (PUT excludes itself); enforced in the route only, not the DB.
-- Library requests do NOT go through `SongRequestQueue` (agreed; spec A5 / judgment call #2).
+- **One arrival-ordered queue for BOTH donation types (user decision, spec A5 / judgment call #2):** `SongRequestQueue` becomes the task-generic `DonationRequestQueue` (`src/donations/donationRequestQueue.ts`, `enqueue<R>(task: () => Promise<R>): Promise<R>`), with a head-of-line timeout `DONATION_TASK_TIMEOUT_MS = 90_000` (knock-on of that decision: a hung media-search download must not block every later donation). `server.ts` builds exactly ONE instance, shared by both handlers, the webhook, and the Test button.
 - Every failure of a real donation is logged and dropped — no new feedback channel.
 - Mutating authenticated routes require `Content-Type: application/json` (400 otherwise), like every other mutating route.
 - Migration generated only via CLAUDE.md "Persistence" remote workflow on 192.168.14.26 — never hand-written SQL. Remote host etiquette: never stop/inspect other services there; use throwaway names and a free port.
@@ -33,6 +33,7 @@
 - A streamer who creates a `libraryTrackRequest` rule with the same keyword as their existing `songRequest` rule must be refused (409), since both would fire — pinned in Task 5.
 - The public page must say "not live" (not 404) for a valid token whose stream is `starting`/`idle`, and must treat `reconnecting` as live — pinned in Task 3.
 - A track name with newlines/emoji must produce a single-line command with no broken surrogate pair — pinned in Task 7.
+- A free-text donation that arrived first must play before an exact-track donation that arrived second, even though the second resolves instantly and the first is still downloading — pinned in Task 5.
 
 ---
 
@@ -590,8 +591,9 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// Exact-track donation request: no external fetch, no temp file, no SongRequestQueue (see the
-// design spec, edge case A5). Only ownership is checked, not membership in the live playlist —
+// Exact-track donation request: no external fetch, no temp file. Ordering against free-text
+// requests is NOT this function's job — server.ts runs it through the one shared
+// DonationRequestQueue (spec A5). Only ownership is checked, not membership in the live playlist —
 // the playlist may change between copying a command and donating (spec A4). Every failure is
 // logged and returned; a real donation ignores the result (no feedback channel by design), the
 // rule "Test" button reports it.
@@ -635,6 +637,160 @@ Expected: PASS.
 ```bash
 git add src/donations/libraryTrackRequestAction.ts test/donations/libraryTrackRequestAction.test.ts
 git commit -m "feat(donations): resolve an exact library-track donation command by its trailing uuid"
+```
+
+---
+
+### Task 4b: `DonationRequestQueue` — one arrival-ordered queue for every donation action
+
+**Files:**
+- Create: `src/donations/donationRequestQueue.ts` (by `git mv src/donations/songRequestQueue.ts src/donations/donationRequestQueue.ts`, then edit)
+- Test: `test/donations/donationRequestQueue.test.ts` (by `git mv test/donations/songRequestQueue.test.ts test/donations/donationRequestQueue.test.ts`, then edit)
+- Modify: `src/server.ts` (only the import/constructor, so the build stays green; full rewiring is Task 5)
+
+**Interfaces:**
+- Produces: `class DonationRequestQueue { constructor(options?: { taskTimeoutMs?: number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout }); enqueue<R>(task: () => Promise<R>): Promise<R> }`; `DONATION_TASK_TIMEOUT_MS = 90_000`.
+
+- [ ] **Step 1: Rewrite the tests for the task-based API** — replace the moved file's contents:
+
+```ts
+import { DonationRequestQueue } from '../../src/donations/donationRequestQueue';
+
+const later = <T>(ms: number, value: T, log?: string[], tag?: string) =>
+  new Promise<T>((resolve) => setTimeout(() => { log?.push(tag!); resolve(value); }, ms));
+
+describe('DonationRequestQueue', () => {
+  it('processes tasks strictly in enqueue order, even when a later one would resolve faster', async () => {
+    const order: string[] = [];
+    const queue = new DonationRequestQueue();
+    const p1 = queue.enqueue(() => later(50, 'slow free-text', order, 'first'));
+    const p2 = queue.enqueue(() => later(0, 'instant exact-track', order, 'second'));
+    expect(await Promise.all([p1, p2])).toEqual(['slow free-text', 'instant exact-track']);
+    expect(order).toEqual(['first', 'second']);
+  });
+
+  it('does not START the next task until the previous one has settled', async () => {
+    const queue = new DonationRequestQueue();
+    let resolveFirst!: (v: string) => void;
+    const second = jest.fn(() => Promise.resolve('b'));
+    queue.enqueue(() => new Promise<string>((r) => { resolveFirst = r; }));
+    queue.enqueue(second);
+    await Promise.resolve(); await Promise.resolve();
+    expect(second).not.toHaveBeenCalled();
+    resolveFirst('a');
+    await new Promise((r) => setImmediate(r));
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it('a rejecting task never stalls the ones behind it', async () => {
+    const queue = new DonationRequestQueue();
+    const failing = queue.enqueue(() => Promise.reject(new Error('boom')));
+    const next = queue.enqueue(() => Promise.resolve('ok'));
+    await expect(failing).rejects.toThrow('boom');
+    await expect(next).resolves.toBe('ok');
+  });
+
+  it('head-of-line timeout: a hung task stops blocking the queue after taskTimeoutMs (knock-on of one shared queue)', async () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const queue = new DonationRequestQueue({ taskTimeoutMs: 1000 });
+      const hung = queue.enqueue(() => new Promise<string>(() => {}));
+      const behind = jest.fn(() => Promise.resolve('ran'));
+      const p = queue.enqueue(behind);
+      await Promise.resolve();
+      expect(behind).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(1000);
+      await expect(p).resolves.toBe('ran');
+      expect(warn).toHaveBeenCalled();
+      void hung; // never settles; the caller's own promise stays pending, which is fine
+    } finally {
+      warn.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx jest test/donations/donationRequestQueue.test.ts`
+Expected: FAIL — `DonationRequestQueue` is not exported.
+
+- [ ] **Step 3: Implement** — replace `src/donations/donationRequestQueue.ts`'s contents:
+
+```ts
+export const DONATION_TASK_TIMEOUT_MS = 90_000;
+
+// ONE queue for every donation-triggered action (free-text song requests AND exact library-track
+// requests): "whoever donated first plays first". A task is not even started until every task
+// enqueued ahead of it has settled, so a donation's place in the play queue is fixed by when the
+// webhook (or the rule Test button) dispatched it — never by which task happened to finish first.
+// An exact-track task is two indexed queries and resolves almost at once when its turn comes; a
+// free-text task waits on the external media-search download. Deliberately fully sequential.
+//
+// Head-of-line timeout: HttpMediaSearchClient has no timeout of its own, so one hung download
+// would otherwise block every later donation of BOTH types forever. After taskTimeoutMs the queue
+// moves on; the timed-out task is not cancelled, and if it completes later it still inserts — one
+// request out of order (logged), instead of every later donation silently lost.
+export class DonationRequestQueue {
+  private tail: Promise<void> = Promise.resolve();
+  private readonly taskTimeoutMs: number;
+  private readonly setTimer: typeof setTimeout;
+  private readonly clearTimer: typeof clearTimeout;
+
+  constructor(options: { taskTimeoutMs?: number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout } = {}) {
+    this.taskTimeoutMs = options.taskTimeoutMs ?? DONATION_TASK_TIMEOUT_MS;
+    this.setTimer = options.setTimer ?? setTimeout;
+    this.clearTimer = options.clearTimer ?? clearTimeout;
+  }
+
+  // The timeout is armed when the task STARTS (inside the tail callback), not at enqueue time, so
+  // time spent waiting behind other donations never counts against a task's own budget.
+  enqueue<R>(task: () => Promise<R>): Promise<R> {
+    let release!: () => void;
+    const released = new Promise<void>((r) => { release = r; });
+    const result = this.tail.then(() => {
+      const timer = this.setTimer(() => {
+        console.error(`donation task still running after ${this.taskTimeoutMs}ms; releasing the queue so later donations aren't blocked (this one may now land out of order)`);
+        release();
+      }, this.taskTimeoutMs);
+      const run = task();
+      run.then(() => undefined, () => undefined).finally(() => { this.clearTimer(timer); release(); });
+      return run;
+    });
+    // A synchronous throw inside task() rejects `result` without reaching the finally above.
+    result.catch(() => release());
+    this.tail = released;
+    return result;
+  }
+}
+```
+
+(The tests pin this: a task behind a hung one starts exactly `taskTimeoutMs` after the hung one STARTED.)
+
+In `src/server.ts`, replace the `SongRequestQueue` import and construction for now with:
+
+```ts
+  const donationQueue = new DonationRequestQueue();
+  const songRequestQueue = { enqueue: (query: string) => donationQueue.enqueue(() => executeSongRequest(
+    { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
+    query,
+  )) };
+```
+
+(a temporary shim so this task's commit builds; Task 5 replaces it with the handlers object).
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `npx jest test/donations` then `npm run build`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/donations/donationRequestQueue.ts test/donations/donationRequestQueue.test.ts src/server.ts
+git commit -m "refactor(donations): generalize SongRequestQueue into one task-ordered DonationRequestQueue with a head-of-line timeout"
 ```
 
 ---
@@ -818,21 +974,51 @@ Call `await assertKeywordFree(userId(req), input.commandKeyword);` in POST after
 
 `src/api/app.ts`: pass `{ converter: deps.donatelloWebhookDeps.converter, actions: deps.donatelloWebhookDeps.actions }` to `createInteractionRuleRouter`.
 
-`src/server.ts`: import `executeLibraryTrackRequest` and `DonationActionHandlers`; after `songRequestQueue`:
+`src/server.ts`: import `executeLibraryTrackRequest` and `DonationActionHandlers`; replace Task 4b's temporary `songRequestQueue` shim with:
 
 ```ts
-  // One handlers object for both the real webhook and the rule "Test" button. Library requests
-  // deliberately skip SongRequestQueue: no download to race (see the design spec, edge case A5).
+  // ONE arrival-ordered queue for every donation action, shared by the real webhook and the rule
+  // "Test" button: whoever donated first plays first, across BOTH action types (user decision —
+  // see the design spec, edge case A5). An exact-track request waits behind an earlier free-text
+  // request that is still downloading.
+  const donationQueue = new DonationRequestQueue();
   const donationActions: DonationActionHandlers = {
-    songRequest: (query) => songRequestQueue.enqueue(query),
-    libraryTrackRequest: (query) => executeLibraryTrackRequest(
+    songRequest: (query) => donationQueue.enqueue(() => executeSongRequest(
+      { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
+      query,
+    )),
+    libraryTrackRequest: (query) => donationQueue.enqueue(() => executeLibraryTrackRequest(
       { trackRepository, streamInserter: localStreamManager, targetUserId: config.donationTargetUserId },
       query,
-    ),
+    )),
   };
 ```
 
-(`localStreamManager` is declared later in the function today — move this block below the `localStreamManager` construction, which is safe because the closures only run at request time; the existing `songRequestQueue` closure already relies on the same thing.) In `donatelloWebhookDeps` replace `executeSongRequest: …` with `actions: donationActions`.
+(The closures reference `localStreamManager`, which is constructed later in the function — safe because they only run at request time, exactly as the old `songRequestQueue` closure already did.) In `donatelloWebhookDeps` replace `executeSongRequest: …` with `actions: donationActions`.
+
+Add to `test/donations/donatelloWebhookRoutes.test.ts` the end-to-end ordering case through a real `DonationRequestQueue` (the shape `server.ts` builds):
+
+```ts
+  it('one shared queue: an earlier slow free-text donation plays before a later instant exact-track one', async () => {
+    const queue = new DonationRequestQueue();
+    const inserted: string[] = [];
+    const actions = {
+      songRequest: (q: string) => queue.enqueue(() => new Promise((r) => setTimeout(() => { inserted.push(`song:${q}`); r({ ok: true }); }, 30))),
+      libraryTrackRequest: (q: string) => queue.enqueue(async () => { inserted.push(`lib:${q}`); return { ok: true }; }),
+    } as any;
+    const listEnabledByUser = jest.fn().mockResolvedValue([
+      { id: 'r1', userId: 'u1', actionType: 'songRequest', enabled: true, minAmount: 1, commandKeyword: 'song', createdAt: new Date(), updatedAt: new Date() },
+      { id: 'r2', userId: 'u1', actionType: 'libraryTrackRequest', enabled: true, minAmount: 1, commandKeyword: 'track', createdAt: new Date(), updatedAt: new Date() },
+    ]);
+    const app = buildApp({ callbackKey: 'secret', ruleRepository: { listEnabledByUser }, actions, converter: { toUah: (a: number) => a }, targetUserId: 'u1' });
+    await request(app).post('/webhooks/donatello').set('X-Key', 'secret').send({ ...validBody, message: '!song:Believer' });
+    await request(app).post('/webhooks/donatello').set('X-Key', 'secret').send({ ...validBody, message: '!track:X 3f2b9c1e-8d4a-4e2b-9a7c-1b2c3d4e5f60' });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(inserted).toEqual(['song:Believer', 'lib:X 3f2b9c1e-8d4a-4e2b-9a7c-1b2c3d4e5f60']);
+  });
+```
+
+(import `DonationRequestQueue` from `../../src/donations/donationRequestQueue`).
 
 `src/requestPage/publicRequestPageRoutes.ts`: replace the literal `'libraryTrackRequest'` with `LIBRARY_TRACK_REQUEST`.
 
@@ -1368,9 +1554,10 @@ is `{live:false}`), read fresh from the DB at page load (no live updates). Each 
 `!<keyword>:<first 20 code points of its name> <track uuid>`. `executeLibraryTrackRequest`
 (`src/donations/libraryTrackRequestAction.ts`) takes the LAST uuid in the matched query, checks the
 track belongs to `DONATION_TARGET_USER_ID` (ownership only, not membership in the live playlist),
-and calls `LocalStreamManager.enqueueTrack` — no media-search fetch, no temp file, and deliberately
-NOT through `SongRequestQueue` (so it can overtake an earlier free-text request that is still
-downloading). The token is `User.requestPageToken` — 128-bit hex, unique, minted/rotated/disabled
+and calls `LocalStreamManager.enqueueTrack` — no media-search fetch, no temp file — through the
+SAME `DonationRequestQueue` as free-text requests, so the two types play strictly in donation
+order (an exact-track request waits behind an earlier free-text one that is still downloading).
+The token is `User.requestPageToken` — 128-bit hex, unique, minted/rotated/disabled
 only via `POST`/`DELETE /request-page/token` (owner, `requireAuth`), and never the `userId`. The
 public route 404s a malformed token by shape before any DB call, answers the same 404 for an
 unknown one, sets `no-store` + `no-referrer`, and exposes only names/ids/durations. Rule keywords
@@ -1378,6 +1565,8 @@ are unique per user (409), since two rules sharing one would both fire. The webh
 "Test" button dispatch through one shared `DonationActionHandlers` object built in `server.ts`
 (`src/donations/donationActions.ts`).
 ```
+
+  Rewrite the existing "**Donation ordering is by arrival, not by download speed (`songRequestQueue.ts`).**" paragraph for `DonationRequestQueue` (`donationRequestQueue.ts`): one task-generic queue for BOTH action types, `enqueue(() => …)`, still fully sequential, one instance in `server.ts` shared by the webhook and the Test button, plus the 90 s head-of-line timeout (a hung media-search download releases the queue after 90 s; that one task may then land out of order, logged), and the residual race: two webhooks arriving within one `listEnabledByUser` round trip are ordered by when that read resolves. Update the Layout tree's `songRequestQueue.ts` entry accordingly.
 
   Also: add the three new routes to "HTTP API"; add `src/requestPage/` and the new donation files to the Layout tree; add `requestPageToken` to the `prisma/` line; update `InteractionRule` "`actionType` today always `'songRequest'`" → "`'songRequest'` or `'libraryTrackRequest'`".
 
@@ -1396,3 +1585,4 @@ On the stand (192.168.14.26; re-apply and verify the port-8088 mapping after the
 3. Paste it into the rule's Test panel → toast success; `nextTrack` in `/local-stream/status` is that track; it plays after the current one.
 4. If Donatello is available: send a real donation with the copied command (plus a greeting before it and "thanks" after it) → queued. Note the maximum message length Donatello accepted (spec A15).
 5. Regenerate the link → the old URL shows "not valid"; stop the stream → the page shows "not live".
+6. Ordering (user decision): fire a `songRequest` Test and, a second later, a `libraryTrackRequest` Test; confirm via `/local-stream/status`'s `nextTrack` and by listening that the free-text track (the one that had to download) plays first, then the exact track.
