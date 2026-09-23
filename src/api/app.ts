@@ -28,6 +28,7 @@ import { InteractionRuleRepository } from '../donations/interactionRuleRepositor
 import { createInteractionRuleRouter } from '../donations/interactionRuleRoutes';
 import { createDonatelloWebhookRouter, DonatelloWebhookDeps } from '../donations/donatelloWebhookRoutes';
 import { createRequestPageRouter } from '../requestPage/requestPageRoutes';
+import { createPublicRequestPageRouter } from '../requestPage/publicRequestPageRoutes';
 import { errorHandler } from './errorHandler';
 import { openApiSpec } from './openapi';
 
@@ -75,6 +76,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/webhooks/donatello', createDonatelloWebhookRouter({ ...deps.donatelloWebhookDeps, ruleRepository: deps.interactionRuleRepository }));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));
   app.use('/request-page', createRequestPageRouter(deps.authService, deps.userRepository));
+  app.use('/public/request-page', createPublicRequestPageRouter({ users: deps.userRepository, streams: deps.localStreamManager, playlists: deps.playlistRepository, rules: deps.interactionRuleRepository }));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
   app.use(errorHandler);

@@ -65,6 +65,7 @@ describe('API docs', () => {
     const res = await request(buildApp()).get('/openapi.json');
     expect(res.body.paths).toHaveProperty(['/request-page']);
     expect(res.body.paths).toHaveProperty(['/request-page/token']);
+    expect(res.body.paths).toHaveProperty(['/public/request-page/{token}']);
   });
 
   // Full cutover: leaving these reachable would let a caller start a destination-bound encode that

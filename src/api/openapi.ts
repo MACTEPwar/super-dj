@@ -717,6 +717,53 @@ export const openApiSpec = {
         },
       },
     },
+    '/public/request-page/{token}': {
+      get: {
+        summary: 'PUBLIC, unauthenticated: the live playlist behind a share token, for donors to pick an exact track. 404 for an unknown or malformed token; {live:false} when the owner isn\'t streaming',
+        parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': {
+            description: '{live:false}, or {live:true, playlistName, tracks, request} — tracks carry only id/name/durationSeconds, never file paths',
+            content: {
+              'application/json': {
+                schema: {
+                  oneOf: [
+                    { type: 'object', properties: { live: { type: 'boolean', enum: [false] } } },
+                    {
+                      type: 'object',
+                      properties: {
+                        live: { type: 'boolean', enum: [true] },
+                        playlistName: { type: 'string' },
+                        tracks: {
+                          type: 'array',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              id: { type: 'string' },
+                              name: { type: 'string' },
+                              durationSeconds: { type: 'number', nullable: true },
+                            },
+                          },
+                        },
+                        request: {
+                          type: 'object',
+                          nullable: true,
+                          properties: {
+                            keyword: { type: 'string' },
+                            minAmount: { type: 'integer' },
+                          },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          '404': { description: 'Unknown or malformed token' },
+        },
+      },
+    },
     '/auth/register': {
       post: {
         summary: 'Register a new user and start a session',
