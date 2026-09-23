@@ -1658,21 +1658,38 @@ so do not quote a number here as measured. What *was* measured about the relay's
 `RelayProcess` bullet above; latency is not among it. For context on the scale: YouTube's own
 ingest→transcode→CDN→player pipeline typically adds ~20-40 s at `latencyPreference: 'normal'`
 regardless, so this hop is unlikely to be the dominant term either way.
-(r) **`CanvasFeeder.render()` has no "latest request wins" rule** — pre-existing (not introduced
-by the playlist-window burst layer, Phase C's own final review flagged it as worth recording
-because that layer makes it somewhat easier to hit). Two overlapping one-shot renders (e.g. the
-once-a-second timer tick racing a burst's canvas-A/canvas-B re-bake, or a `pause()` render racing
-either) share one fixed overlay PNG path, and whichever one-shot ffmpeg process happens to finish
-last is what actually lands on screen — not necessarily the one that was issued last. Concretely:
-a tick that starts just before a burst's canvas-B render lands could make the window blink off for
-up to ~1s; a `pause()` render landing after canvas B could leave the window missing for the whole
-pause; with no timer element, a bake-A render landing after a track change's own render could leave
-the previous track's overlay (window omitted) on screen until the next re-render. All three need
-one render to finish measurably slower than another that started later — a real but narrow window,
-self-correcting in practice (a one-shot render is normally much faster than the `buildOverlay` that
-precedes the next one). Not fixed here — deliberately out of Phase C's scope. The fix, when someone
-picks it up: a monotonic sequence number in `CanvasFeeder`, so a render only writes if its sequence
-number is still the latest issued by the time it resolves.
+(r) **(Fixed 2026-09-24.)** `CanvasFeeder.render()` had no "latest request wins" rule: two
+overlapping one-shot renders (the once-a-second timer tick racing a burst's canvas-A/canvas-B
+re-bake, or either racing a `pause()` render) shared one fixed overlay PNG path, and whichever
+one-shot ffmpeg process happened to finish last landed on screen regardless of which was issued
+last — occasionally two renders' ffmpeg processes overlapped enough for one to read the file mid-
+overwrite by the other, producing a single frame with the outgoing and incoming rows visibly
+blended/doubled. Reported live, on a real stream, the day the playlist-window burst layer (Phase C)
+made it substantially easier to hit. `render()` now **serializes** every call — a `rendering` flag
+plus a FIFO `pendingQueue`, with the lock handed directly from one call's `finally` to the next
+queued waiter (never released-then-reacquired, which would itself reopen a window for a fresh call
+to slip in) — so two calls' write+spawn+read cycles can never overlap. The first fix attempt tried
+discarding a queued call's result whenever a *newer* call had merely been *issued* (not finished)
+in the meantime, reasoned as a "latest wins" safety net; real review caught that this throws away a
+render's own valid, just-finished work for no reason and, under real host load, could cascade to
+discarding *every* render in a burst, freezing the canvas for the rest of the session — removed
+entirely. Plain FIFO already guarantees the last call to actually finish is the most recently
+issued one, with nothing to discard. Serializing also introduced a new failure mode that didn't
+exist before (a single hung, close-event-never-fires ffmpeg process would now freeze every *later*
+render() call too, not just its own caller) — closed with a `RENDER_TIMEOUT_MS = 5000` timeout in
+`runOneShot` that kills the child (`SIGKILL`) and rejects, letting the queue move on. See
+`test/ffmpeg/canvasFeeder.test.ts`'s "concurrent render() calls" suite for the regression tests
+(FIFO-all-three-run, rejection-doesn't-stall-the-queue, post-close no-op, timeout-releases-queue,
+close-drain-wakes-everyone).
+**Known non-blocking follow-ups from this fix, not yet acted on:** (1) the once-a-second timer
+ticker has no coalescing — if a render is genuinely slow (approaching the 5s timeout) for a
+sustained period, ticks queue up faster than they drain and a track-switch render can end up
+waiting behind a growing backlog of stale ticks; a cheap fix would be having the ticker skip firing
+while a render is already in flight. (2) `StreamController.feedCurrentTrack()`'s auto-advance
+listener is attached to the *decode* child, not gated on the canvas render succeeding — a canvas
+render that rejects (non-zero exit, or now a timeout) already meant, even before this fix, that the
+frame simply doesn't update; not a regression from this fix, but adjacent and worth closing at the
+same time if this area gets touched again.
 
 ## Tooling
 
