@@ -48,7 +48,7 @@ function buildDeps() {
     close: jest.fn(),
   };
   const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
-  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {}, playlistWindowPipe: {} };
+  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {}, playlistWindowPipe: {}, marqueePipe: {} };
   const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const deps: any = {
     library, queue,
@@ -963,6 +963,75 @@ describe('StreamController', () => {
       queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
       controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
       expect(deps.buildOverlay).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('current-track marquee', () => {
+    function withMarquee() {
+      const ctx = buildDeps();
+      const marqueeFeeder = { attach: jest.fn(), activate: jest.fn().mockResolvedValue(undefined), deactivate: jest.fn(), close: jest.fn() };
+      ctx.deps.createMarqueeFeeder = jest.fn().mockReturnValue(marqueeFeeder);
+      ctx.deps.resolveMarqueeRow = jest.fn();
+      return { ...ctx, marqueeFeeder };
+    }
+
+    it('attaches the marquee feeder to pipe:8 on start', async () => {
+      const { deps, marqueeFeeder, encoderChild } = withMarquee();
+      await new StreamController(deps).start();
+      expect(marqueeFeeder.attach).toHaveBeenCalledWith(encoderChild.marqueePipe);
+    });
+
+    it('when resolveMarqueeRow returns a rect, activate()s the feeder and bakes with currentRowOverrideText', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      const rect = { x: 0, y: 0, width: 100, height: 20 };
+      deps.resolveMarqueeRow.mockResolvedValue({ rect, textWidth: 500 });
+      await new StreamController(deps).start();
+      expect(marqueeFeeder.activate).toHaveBeenCalledWith('▶ a', rect, 500);
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS, { currentRowOverrideText: '▶' });
+    });
+
+    it('when resolveMarqueeRow returns null, deactivate()s the feeder and bakes normally (no opts)', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      deps.resolveMarqueeRow.mockResolvedValue(null);
+      await new StreamController(deps).start();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('without resolveMarqueeRow configured, buildOverlay is called exactly as before (no opts arg at all)', async () => {
+      const { deps } = buildDeps(); // no createMarqueeFeeder/resolveMarqueeRow set
+      await new StreamController(deps).start();
+      expect(deps.buildOverlay).toHaveBeenCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('a track change that arrives while resolveMarqueeRow is still resolving does not activate a stale marquee', async () => {
+      const { deps, queue, marqueeFeeder, library } = withMarquee();
+      let resolveFirst!: (v: any) => void;
+      deps.resolveMarqueeRow.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));
+      const controller = new StreamController(deps);
+      const starting = controller.start(); // begins resolving marquee for track 'a'
+      queue.current.mockReturnValue(library.list()[1]);
+      deps.resolveMarqueeRow.mockResolvedValue(null);
+      await controller.next(); // supersedes the in-flight start() before it resolves
+      resolveFirst({ rect: { x: 0, y: 0, width: 1, height: 1 }, textWidth: 999 });
+      await starting;
+      expect(marqueeFeeder.activate).not.toHaveBeenCalled();
+    });
+
+    it('windowRows with no isCurrent row: deactivates the feeder and never throws (defensive — PlaylistQueue.windowSnapshot() always includes one today)', async () => {
+      const { deps, queue, marqueeFeeder } = withMarquee();
+      queue.windowSnapshot.mockReturnValue([{ key: 'b:0', text: '  a', isCurrent: false }]);
+      await expect(new StreamController(deps).start()).resolves.toBeUndefined();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.resolveMarqueeRow).not.toHaveBeenCalled();
+    });
+
+    it('teardown closes the marquee feeder', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.stop();
+      expect(marqueeFeeder.close).toHaveBeenCalled();
     });
   });
 });

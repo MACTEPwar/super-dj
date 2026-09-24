@@ -12,6 +12,7 @@ import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 import { ReconnectPolicy, ReconnectDecision, SHORT_LIVED_UPTIME_MS } from './reconnectPolicy';
 import { PlaylistWindowAnimator, HANDOFF_HOLD_MS } from './playlistWindowAnimator';
+import { MarqueeRowRect } from '../ffmpeg/marqueeFeeder';
 
 export interface LibraryLike {
   list(): Track[];
@@ -27,6 +28,14 @@ export interface PlaylistWindowFeederLike {
   close(): void;
 }
 
+// The structural subset of MarqueeFeeder this controller drives.
+export interface MarqueeFeederLike {
+  attach(pipe: NodeJS.WritableStream): void;
+  activate(text: string, rect: MarqueeRowRect, estimatedTextWidth: number): Promise<void>;
+  deactivate(): void;
+  close(): void;
+}
+
 export interface StreamControllerDeps {
   library: LibraryLike;
   queue: PlaylistQueue;
@@ -36,7 +45,9 @@ export interface StreamControllerDeps {
   createPulseVisualizer?: () => PulseVisualizer;
   // Present only when the template has an on-canvas playlist element — see buildStreamScene().
   createPlaylistWindowFeeder?: () => PlaylistWindowFeederLike;
-  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean }) => Promise<NowPlayingOverlay>;
+  createMarqueeFeeder?: () => MarqueeFeederLike;
+  resolveMarqueeRow?: (currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; textWidth: number } | null>;
+  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean; currentRowOverrideText?: string }) => Promise<NowPlayingOverlay>;
   // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
   // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so the caller
   // (LocalStreamManager — the only constructor of a StreamController now) can fold in
@@ -75,6 +86,8 @@ export class StreamController {
   // playlist element.
   private playlistWindowFeeder: PlaylistWindowFeederLike | null = null;
   private playlistAnimator: PlaylistWindowAnimator | null = null;
+  private marqueeFeeder: MarqueeFeederLike | null = null;
+  private marqueeOverrideText: string | undefined = undefined;
   // The rows the canvas currently shows in the live playlist element (variant B's rows).
   private bakedRows: WindowRow[] = [];
   // The track whose overlay is actually on screen — NOT always queue.current(), which a paused
@@ -188,7 +201,30 @@ export class StreamController {
     this.overlayGeneration += 1;
     const rows = this.windowRows();
     const generation = ++this.sessionGeneration;
-    const overlay = await this.deps.buildOverlay(track, rows);
+
+    if (this.deps.resolveMarqueeRow) {
+      const rowIndex = rows.findIndex((r) => r.isCurrent);
+      const currentRow = rowIndex >= 0 ? rows[rowIndex] : undefined;
+      if (currentRow) {
+        const resolved = await this.deps.resolveMarqueeRow(currentRow.text, rowIndex);
+        if (generation !== this.sessionGeneration) return;
+        if (resolved) {
+          await this.marqueeFeeder?.activate(currentRow.text, resolved.rect, resolved.textWidth);
+          if (generation !== this.sessionGeneration) return;
+          this.marqueeOverrideText = '▶';
+        } else {
+          this.marqueeFeeder?.deactivate();
+          this.marqueeOverrideText = undefined;
+        }
+      } else {
+        this.marqueeFeeder?.deactivate();
+        this.marqueeOverrideText = undefined;
+      }
+    }
+
+    const overlay = this.marqueeOverrideText !== undefined
+      ? await this.deps.buildOverlay(track, rows, { currentRowOverrideText: this.marqueeOverrideText })
+      : await this.deps.buildOverlay(track, rows);
     // The generation may have advanced, or the session may have left 'streaming', while we were
     // awaiting the overlay — a stale overlay must never be fed.
     if (generation !== this.sessionGeneration) return;
@@ -240,7 +276,10 @@ export class StreamController {
     // without feeding (nothing changes on screen until resume).
     const track = this.bakedTrack;
     if (!track || !this.canvasFeeder) return false;
-    const overlay = await this.deps.buildOverlay(track, rows, opts);
+    const buildOpts = this.marqueeOverrideText !== undefined
+      ? { omitLivePlaylist: opts.omitLivePlaylist, currentRowOverrideText: this.marqueeOverrideText }
+      : opts;
+    const overlay = await this.deps.buildOverlay(track, rows, buildOpts);
     if (generation !== this.overlayGeneration || !this.canvasFeeder) return false;
     if (this.state !== 'streaming' && this.state !== 'paused') return false;
     this.currentOverlay = overlay;
@@ -313,6 +352,9 @@ export class StreamController {
     this.playlistWindowFeeder?.close();
     this.playlistAnimator = null;
     this.playlistWindowFeeder = null;
+    this.marqueeFeeder?.close();
+    this.marqueeFeeder = null;
+    this.marqueeOverrideText = undefined;
     this.bakedRows = [];
     this.bakedTrack = null;
     this.overlayGeneration += 1;
@@ -363,6 +405,10 @@ export class StreamController {
         sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref(); }),
         holdMs: HANDOFF_HOLD_MS,
       });
+    }
+    if (this.deps.createMarqueeFeeder) {
+      this.marqueeFeeder = this.deps.createMarqueeFeeder();
+      this.marqueeFeeder.attach(child.marqueePipe);
     }
   }
 
