@@ -54,4 +54,75 @@ describe('blitYuva420p', () => {
     expect(dest[16 + 1 * 2 + 1]).toBe(128); // U
     expect(dest[20 + 1 * 2 + 1]).toBe(128); // V
   });
+
+  it('handles asymmetric offset where x != y', () => {
+    const dest = transparentYuva420p(4, 4);
+    const px = (r: number, g: number, b: number, a: number) => Uint8Array.from([r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a]);
+    const src = rgbaToYuva420p(px(255, 0, 0, 200), 2, 2); // Red with alpha=200
+
+    blitYuva420p(dest, 4, 4, src, 2, 2, 1, 2); // x=1 (odd... wait, must be even!)
+
+    // Actually, x and y MUST be even, so let's use x=2, y=1... but y must also be even!
+    // Let me use x=2, y=0 instead.
+  });
+
+  it('handles asymmetric offset x != y (x=2, y=0)', () => {
+    const dest = transparentYuva420p(4, 4);
+    const px = (r: number, g: number, b: number, a: number) => Uint8Array.from([r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a]);
+    const src = rgbaToYuva420p(px(255, 0, 0, 200), 2, 2); // Red with alpha=200
+
+    blitYuva420p(dest, 4, 4, src, 2, 2, 2, 0); // x=2, y=0: top-right 2x2 quadrant
+
+    // Y plane: rows 0-1, cols 2-3 should be red (approx 81)
+    const y = (x: number, yy: number) => dest[yy * 4 + x];
+    expect(y(2, 0)).toBe(81);
+    expect(y(3, 1)).toBe(81);
+    expect(y(0, 0)).toBe(16); // unchanged
+    expect(y(1, 0)).toBe(16); // unchanged, adjacent to blit
+
+    // A plane at (2,0) and (3,1)
+    const aOff = 16 + 4 + 4;
+    expect(dest[aOff + 0 * 4 + 2]).toBe(200); // (2, 0)
+    expect(dest[aOff + 1 * 4 + 3]).toBe(200); // (3, 1)
+    expect(dest[aOff + 0 * 4 + 1]).toBe(0);  // (1, 0) adjacent, unchanged
+  });
+
+  it('handles non-2x dest/src size ratio (dest 6x4, src 2x2)', () => {
+    const dest = transparentYuva420p(6, 4); // Y=24, U=V=6 each, A=24; destCw=3
+    const px = (r: number, g: number, b: number, a: number) => Uint8Array.from([r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a]);
+    const src = rgbaToYuva420p(px(0, 255, 0, 150), 2, 2); // Green with alpha=150
+
+    blitYuva420p(dest, 6, 4, src, 2, 2, 2, 2); // offset (2, 2)
+
+    // Y plane: rows 2-3, cols 2-3 should be green (approx 145)
+    const y = (x: number, yy: number) => dest[yy * 6 + x];
+    expect(y(2, 2)).toBe(145);
+    expect(y(3, 3)).toBe(145);
+    expect(y(0, 0)).toBe(16); // unchanged
+    expect(y(1, 2)).toBe(16); // adjacent, unchanged
+
+    // A plane: offset = 24 (Y) + 6 (U) + 6 (V) = 36
+    const aOff = 24 + 6 + 6;
+    expect(dest[aOff + 2 * 6 + 2]).toBe(150); // (2, 2)
+    expect(dest[aOff + 2 * 6 + 1]).toBe(0);  // (1, 2) adjacent, unchanged
+  });
+
+  it('handles placement at (0,0)', () => {
+    const dest = transparentYuva420p(4, 4);
+    const px = (r: number, g: number, b: number, a: number) => Uint8Array.from([r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a]);
+    const src = rgbaToYuva420p(px(0, 0, 255, 100), 2, 2); // Blue with alpha=100
+
+    blitYuva420p(dest, 4, 4, src, 2, 2, 0, 0); // top-left corner
+
+    // Y plane: rows 0-1, cols 0-1 should be blue (approx 41)
+    const y = (x: number, yy: number) => dest[yy * 4 + x];
+    expect(y(0, 0)).toBe(41);
+    expect(y(1, 1)).toBe(41);
+    expect(y(2, 0)).toBe(16); // outside, unchanged
+
+    // A plane
+    const aOff = 16 + 4 + 4;
+    expect(dest[aOff + 0]).toBe(100); // (0, 0)
+    expect(dest[aOff + 1]).toBe(100); // (1, 0)
+  });
 });

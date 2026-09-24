@@ -52,11 +52,15 @@ export function rgbaToYuva420p(rgba: Uint8Array, width: number, height: number):
 }
 
 // Copies a smaller yuva420p frame's Y/U/V/A planes into a sub-rectangle of a larger one, in
-// place. x/y/srcWidth/srcHeight must all be even — this is a raw plane copy at the same 2x2
-// chroma-subsampling grid both buffers already share (see rgbaToYuva420p above), so an odd
-// offset would misalign the chroma planes exactly the way an odd ffmpeg `overlay` position does
-// (see GIF_OVERLAY_FORMAT in persistentEncoderArgs.ts) — except here nothing catches it, so
-// callers (MarqueeFeeder) round their own coordinates before calling this.
+// place. x/y/srcWidth/srcHeight/destWidth/destHeight must all be even — this is a raw plane
+// copy at the same 2x2 chroma-subsampling grid both buffers already share (see rgbaToYuva420p
+// above), so an odd offset or odd destination dimensions would misalign the chroma planes exactly
+// the way an odd ffmpeg `overlay` position does (see GIF_OVERLAY_FORMAT in
+// persistentEncoderArgs.ts) — except here nothing catches it, so callers (MarqueeFeeder) round
+// their own coordinates and use even-dimension buffers before calling this. Additionally, the
+// sub-rectangle must fit entirely within dest: x + srcWidth <= destWidth and y + srcHeight <=
+// destHeight. If violated, Buffer.copy silently clips to the target buffer's length instead of
+// throwing, producing quietly-wrong output rather than a loud failure.
 export function blitYuva420p(
   dest: Buffer, destWidth: number, destHeight: number,
   src: Buffer, srcWidth: number, srcHeight: number,
