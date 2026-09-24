@@ -155,25 +155,33 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
 }
 
 // The ONE playlist-window node: the baked canvas and the template preview call it with settled
-// rows (no animation props), which must stay byte-identical to the pre-Phase-C node
-// (test/render/playlistWindowNode.test.ts). pipe:7's burst frames call it with animation props,
-// which only ever ADD row style keys — so a burst's first and last frames are the baked window's
-// own pixels, which is what makes the handoff overlaps invisible (spec, "The handoff protocol").
+// rows (no animation props); pipe:7's burst frames call it with animation props, which only ever
+// ADD row style keys on top of the same base (see the ellipsis-truncation note below) — so a
+// burst's first and last frames are the baked window's own pixels, which is what makes the
+// handoff overlaps invisible (spec, "The handoff protocol"). (Byte-identity with the pre-Phase-C
+// node ended 2026-09-24 when per-row single-line truncation landed — see
+// test/render/playlistWindowNode.test.ts.)
 export function playlistWindowNode(el: PlaylistElement, rows: AnimatedRow[], origin: { x: number; y: number }): SatoriNode {
   return {
     type: 'div',
     props: {
       style: { position: 'absolute', left: origin.x, top: origin.y, width: el.width, fontSize: el.fontSize, display: 'flex', flexDirection: 'column', ...textStyleToCss(el.style, el.color) },
       children: rows.map((r): SatoriNode => {
-        const style: Record<string, unknown> = { display: 'flex' };
+        // Every row is single-line, ellipsis-truncated: a name wider than the window must never
+        // wrap onto a second line (a row's div otherwise defaults to `white-space: normal` while
+        // still stretching to the container's width via flex's `align-items: stretch`, which is
+        // exactly what let a long name wrap — "▶" alone on one line, the name below).
+        const style: Record<string, unknown> = {
+          display: 'flex', maxWidth: el.width, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+        };
         if (r.opacity !== undefined) style.opacity = r.opacity;
         if (r.offsetX !== undefined) style.marginLeft = r.offsetX;
         if (r.maxHeightFactor !== undefined) {
           // Growing the new row's box is what opens the gap: the flex column pushes every row below
           // down by the row's REAL height — no row-height model, so wrapping and natural line height
-          // behave exactly as in the baked window.
+          // behave exactly as in the baked window. overflow is already 'hidden' above, which this
+          // height clip shares harmlessly with the ellipsis truncation.
           style.maxHeight = r.maxHeightFactor * el.fontSize;
-          style.overflow = 'hidden';
         }
         return { type: 'div', props: { style, children: r.text } };
       }),
