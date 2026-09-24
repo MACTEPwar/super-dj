@@ -386,6 +386,112 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
     become load-bearing later (e.g. investigating a reported visual glitch), build the isolated
     harness the original plan describes rather than re-deriving these from production captures.
 
+- **Playlist-window truncation + current-track marquee.** Two related fixes: (A) every row in the
+  playlist window is now single-line, ellipsis-truncated (`overflow: hidden; white-space: nowrap;
+  text-overflow: ellipsis; maxWidth: el.width` on each row's own style, `playlistWindowNode` in
+  `src/render/sceneRenderer.ts`) — a long name used to wrap onto a second line ("▶" alone on one
+  line, the name below), because a row's div had no `white-space` constraint of its own while still
+  stretching to the window's width via flex's `align-items: stretch`. (B) the CURRENTLY PLAYING
+  track's row additionally scrolls as a continuous-loop marquee when its name doesn't fit — every
+  other row just sits truncated, motionless.
+  - **Why this couldn't reuse the timer element's mechanism.** The `timer` element updates by
+    re-rendering a whole new static frame once a second (`CanvasFeeder`'s one-shot render) — fine
+    for a digit that changes once a second, useless for text that must glide a few pixels 30 times
+    a second. A native `drawtext` with a continuous-scroll `x` expression was spiked and confirmed
+    working against a real local ffmpeg (text enters from the right, both edges clip cleanly, loops
+    with no visible seam) — but it was rejected because **`overlay`'s x/y cannot be changed at
+    runtime in this ffmpeg build** (the same wall the `pipe:7` burst layer's own design doc already
+    hit: `sendcmd`/`zmq` reach `overlay`/`drawbox` but answer "Function not implemented"), and the
+    current row's Y position is NOT a session-wide constant — a donation/`play`-by-name track, or a
+    session near its very start (short before-context), can move which row slot is current.
+  - **Chosen design: a pre-rendered text strip + per-frame crop, not per-frame rendering.**
+    `MarqueeFeeder` (`src/ffmpeg/marqueeFeeder.ts`) renders the row's full text through Satori
+    **once per activation** (a track switch to a name that overflows) into a strip padded with a
+    full row-width of blank space on both sides (`renderMarqueeStripPixels`,
+    `src/render/sceneRenderer.ts`, routed through the existing `pipe:7` worker pool via a second
+    named export — a marquee activation is canvas-re-render-frequency work, not
+    burst-frequency work, so it doesn't need a third pool). Every subsequent frame just crops a
+    moving window out of that strip (`cropX = floor((elapsedSec * 80) % (stripWidth - rowWidth))`)
+    and composites it into a region-sized transparent yuva420p frame via `blitYuva420p`
+    (`src/render/yuva420p.ts`) — plain byte copies, **no Satori/resvg call on the per-frame path at
+    all**. Because the strip is padded by a full row-width on both sides, the crop window never
+    needs to read past the strip's own bounds or stitch across a wrap — one period of motion spans
+    the strip exactly, then jumps back to a fully-blank "about to enter" start, with no visible
+    seam. `MARQUEE_SPEED_PX_PER_SEC = 80` (fixed, not user-configurable) is the same value the
+    spike confirmed visually smooth and readable.
+  - **A new dedicated pipe, `pipe:8`, reusing `pipe:7`'s own region.** `persistentEncoderArgs.ts`
+    declares it only when `marquee && playlistWindow` are BOTH present (not `marquee` alone — the
+    marquee's input index and its compositing both depend on `playlistWindow`'s own output), sized
+    to the exact same `computePlaylistWindowRegion` rect `pipe:7` already uses, composited directly
+    above `pipe:7`'s own stage. This is what turns "where does the current row sit" from a static
+    ffmpeg argument into ordinary Node state: the pipe's own `overlay` position is fixed forever at
+    spawn time, but Node freely decides where WITHIN that region's frame to draw the scrolling
+    slice on every tick, so a row index that shifts between tracks is a non-issue.
+  - **Row height is measured, not estimated.** `measureRowHeight` (`src/render/rowHeight.ts`)
+    renders two probe rows of representative text (`'Ag'`, ascenders and descenders present) via
+    the existing `renderPlaylistWindowPixels`, and takes the pixel Y-delta between where each row's
+    ink begins — this is exactly the flex column's real per-row height, not
+    `playlistWindowGeometry.ts`'s own `ROW_HEIGHT_BOUND_FACTOR = 1.4`, which is a deliberately
+    generous BOUND for a different purpose (sizing `pipe:7`'s region) and documents itself as
+    "~1.16-1.2 x fontSize for the bundled fonts" — a 15-20% gap that would have visibly misaligned
+    the marquee against the baked text. Cached by `(fontFamily, bold, italic, fontSize)`. Whether a
+    track needs a marquee at all is decided by `measureTextWidth` (`src/render/textWidth.ts`, real
+    glyph-advance measurement via `@shuding/opentype.js`, pinned to satori's own dependency
+    version) — the same font-metrics engine satori itself uses internally, not a
+    monospace/character-count heuristic.
+  - **Hiding the static text while the marquee is live.** `buildOverlay` (`streamScene.ts`) gained
+    `currentRowOverrideText` — when the marquee is active, the current row's baked text is replaced
+    with a bare `'▶'` before the Satori render, so the live `pipe:8` layer is the only thing drawing
+    that row's name. `StreamController.feedCurrentTrack()` resolves this once per track switch
+    (`resolveMarqueeRow`, gated on the same `livePlaylist` check as `pipe:7`'s own feeder) with the
+    SAME generation-guard discipline `sessionGeneration` already uses elsewhere in that file: the
+    generation is checked after `resolveMarqueeRow`'s own await AND after `marqueeFeeder.activate()`'s
+    — not just once at the end — so a track change arriving mid-resolution can't let a stale
+    `activate()` land or a stale override reach the eventual `buildOverlay` call.
+    `MarqueeFeeder.activate()`/`.deactivate()` also bump their OWN internal generation counter
+    synchronously (mirroring `PlaylistWindowFeeder`), giving real defense-in-depth independent of
+    the controller's own bookkeeping. `bakeCanvas()` (the `pipe:7` burst-handoff re-bake) carries
+    the SAME stored override text, not re-resolving it — otherwise a burst animation occurring
+    while a marquee is active would briefly re-reveal the full static name, then snap back once the
+    next `feedCurrentTrack()` reasserted it.
+  - **Verified against real binaries, live on the demo stand (2026-09-24) — and a real,
+    severe bug was found and fixed by doing so, exactly the kind unit tests structurally cannot
+    catch.** `LocalStreamManager`'s `new StreamController({...})` call (the one file no task's own
+    plan ever listed, and no test exercises — every `streamController.test.ts` fixture hand-builds
+    its own fake deps, bypassing this real integration point entirely) never forwarded
+    `createMarqueeFeeder`/`resolveMarqueeRow` from the `StreamScene` it builds. Both are optional
+    fields, so this compiled cleanly with zero errors and zero test failures — but it meant
+    `MarqueeFeeder.attach()` was never called in production: `pipe:8` was still correctly DECLARED
+    to ffmpeg (that path goes through `createPersistentEncoder` directly, unaffected), but with
+    nothing ever writing to it, ffmpeg blocked forever trying to open a rawvideo input that never
+    sends its first byte — **stalling the ENTIRE persistent encoder** (confirmed via `/proc/<pid>/stat`
+    CPU-tick sampling: zero ticks across repeated windows, reproduced from two independent fresh
+    `start()` calls; no RTMP `Output #0` line ever printed; no MediaMTX publish; HLS preview
+    permanently 404). This broke live streaming for every user whose template includes a playlist
+    element — i.e. the DEFAULT template, used whenever no `templateId` is given — the moment this
+    would have shipped. Root cause found by temporarily patching the deployed `dist/` code with
+    diagnostic logging directly on the running container (`attach()`/`tick()` never fired at all),
+    then tracing back to the missing two lines in `localStreamManager.ts`. Fixed (both fields added,
+    a real — not mocked — `StreamController` regression test added to `localStreamManager.test.ts`
+    that fails against the pre-fix source and passes against the fix), rebuilt, redeployed, and
+    **the entire verification re-run from a clean state confirmed clean**: the real running
+    ffmpeg process's own `/proc/<pid>/cmdline` showed `-i pipe:8` at the correct 354x222 region with
+    the exact designed filter graph (`[4:v]format=yuva420p[mqwin];[vplwin][mqwin]overlay=38:498[vmqwin]`,
+    composited directly above the playlist-window stage as designed); `Input #4, rawvideo, from
+    'pipe:8'` and `Output #0, flv, to 'rtmp://...'` both appeared immediately; MediaMTX logged a
+    real publish (`stream is available and online, 2 tracks`). Two real HLS segments 2 seconds
+    apart, downloaded through the authenticated preview proxy and cropped to the playlist window's
+    region with a real local ffmpeg, show the current row's visible text genuinely scrolling
+    ("...ант_сильно_веселая_2_вар" → "...веселая_2_вариант" — the later portion of the name slid
+    into view, the earlier portion slid out) while the row above it (a short, non-scrolling name)
+    stayed byte-identical across both frames — no bleeding into neighbouring rows, no doubled or
+    ghosted text from the static fallback underneath. CPU sampling (`/proc/<pid>/stat`, 5 s windows,
+    same technique as the `pipe:7` measurements) showed **no regression**: ~39% of one core with
+    the marquee actively scrolling vs. ~46.6% on the same host moments earlier with only a
+    non-scrolling short name current — the two samples are close enough, and in the unexpected
+    direction, to read as ordinary shared-host load variance rather than any real cost, consistent
+    with the design's own expectation that the per-frame path is pure byte copies.
+
 **Local relay (MediaMTX).** Every stream publishes into a `bluenviron/mediamtx:1.21.0`
 container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in
 `docker-compose.yml` with a 512m memory limit and `restart: unless-stopped`). The image is pinned to
