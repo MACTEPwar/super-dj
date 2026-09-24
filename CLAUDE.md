@@ -502,6 +502,51 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
     declaring a pipe (inside `createPersistentEncoder`) and feeding it (a separate factory) are
     still two independently-gated things linked only by this one hand-maintained field list — the
     NEXT new pipe added here will need the same discipline applied to it explicitly.
+  - **A whole-branch review after the above landed found 1 Critical + 3 Important gaps, all now
+    fixed and re-verified against real binaries.** (1) **Critical:** `feedCurrentTrack()` had no
+    error handling around `resolveMarqueeRow`/`activate()` — reproduced live: `measureRowHeight`'s
+    2-row ink-band probe throws whenever the playlist element's style has a text shadow with blur
+    >= 4 (the template editor's own DEFAULT shadow), because the blur bleeds ink across the gap
+    between the two probe rows, merging them into one band. With no try/catch this rejected
+    `feedCurrentTrack` outright — `start()`/`next()`/`previous()` would fail and auto-advance would
+    silently stall — for any user who simply left the default shadow on. Fixed two ways: the whole
+    resolve+activate block now degrades to plain ellipsis-truncated text on any failure
+    (`try`/`catch` around both calls, `marqueeFeeder?.deactivate()` + clear the override + log,
+    never reject); and `measureRowHeight`'s probe element strips `shadow`/`stroke` before rendering
+    — row pitch (line-height) is a font-metric property, independent of paint effects, so this is a
+    correctness fix, not a workaround. (2) **Important:** the static baked marker wasn't actually
+    hidden under the scroll — the marquee strip rendered the FULL `"▶ Name"` text, so the moving
+    strip's own `▶` glyph slid across the row while a SECOND, static `▶` sat underneath at the same
+    spot the whole time. Fixed by separating the 2-character `"▶ "` marker from the name:
+    `resolveMarqueeRow` now measures each width independently and returns
+    `{rect, nameText, textWidth, markerText}` — the rect starts past the marker's own measured
+    width, `MarqueeFeeder.activate()` receives the name only, and the baked override is the marker
+    text (never blank, never the full row). (3) **Important:** the strip had no leading blank pad —
+    `renderMarqueeStripPixels` put text at x=0 instead of after a row-width of blank as designed, so
+    the name was fully visible immediately, scrolled out, sat blank for ~4.4s, then popped back in
+    at full width — not the intended seamless glide. Fixed with an explicit `paddingLeft` field on
+    `MarqueeStripFrameRequest`/`MarqueeFeederOptions.renderStrip`. (4) **Important:** every
+    `pipe:7` burst animation (a donation or `play`-by-name insert) redrew the current row with the
+    FULL untruncated name, because `bakedRows`/`queueChanged()` never applied the marquee override
+    — so pipe:7 showed the full static name UNDER pipe:8's scrolling text for the burst's ~2s
+    duration. Fixed with one shared `displayRows()` helper applying the override, used at every
+    site that bakes or queues rows for display. `StreamScene`'s scene-sourced fields and
+    `PersistentEncoderParams.marquee` were also converted from optional to required-but-nullable,
+    extending the same "silent gap becomes a compile error" fix one layer up from
+    `StreamControllerDeps`. All four fixes were independently re-reviewed (scoped re-review against
+    the fix diff: all findings ADDRESSED, no new breakage) and then **re-verified against real
+    binaries on the demo stand**, specifically re-exercising the Critical scenario: a real stream
+    started with a template whose playlist element uses the template editor's own default shadow
+    (blur 4) and a track whose name overflows the element. `docker logs` across the whole window
+    (start, an explicit track switch onto the shadow-triggering row, real ffmpeg decode/encode) is
+    completely clean of any error/exception — the real pipeline never hit the throw the shadow used
+    to cause. Two real HLS segments ~2.2s apart, downloaded through the authenticated preview proxy
+    and cropped to the playlist-window region with a real local ffmpeg, visually confirm both the
+    marker/name separation and the leading pad: frame A shows the static `▶` marker, then a blank
+    gap, then only the leading edge of the name just entering from the right; frame B (2.2s later)
+    shows the SAME `▶` at the identical position with more of the name now revealed — genuine scroll
+    motion, the marker never covered or duplicated, the row above (not current) unaffected in both
+    frames.
 
 **Local relay (MediaMTX).** Every stream publishes into a `bluenviron/mediamtx:1.21.0`
 container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in
