@@ -293,3 +293,43 @@ export async function renderPlaylistWindowPixels(
   const pixmap = new Resvg(svg, { font: { loadSystemFonts: false } }).render();
   return { pixels: pixmap.pixels, width: pixmap.width, height: pixmap.height };
 }
+
+export interface MarqueeStripFrameRequest {
+  element: PlaylistElement;
+  text: string;
+  stripWidth: number;
+  rowHeight: number;
+}
+
+// A single row's FULL text (no ellipsis, no wrap constraint) rendered into a fixed-size strip —
+// the one-shot Satori/resvg render MarqueeFeeder uses to build the source bitmap it crops per
+// frame for the current track's marquee (see src/ffmpeg/marqueeFeeder.ts and the design spec's
+// "Chosen approach: pre-rendered text strip + per-frame crop"). Called ONCE per marquee
+// activation, never per frame. The caller sizes stripWidth generously around the text's own
+// measured width (measureTextWidth) plus the row's own width on both sides — this render's own
+// width doesn't need to be pixel-exact, any extra blank space is harmless.
+export async function renderMarqueeStripPixels(
+  req: MarqueeStripFrameRequest,
+  loadFont: (family: string, bold: boolean, italic: boolean) => Promise<Buffer> = defaultLoadFont,
+): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+  const { element, text, stripWidth, rowHeight } = req;
+  const variants = collectFontVariants([element]);
+  const fonts = await Promise.all(variants.map(async (v) => ({
+    name: v.family, data: await loadFont(v.family, v.bold, v.italic),
+    weight: (v.bold ? 700 : 400) as 400 | 700, style: (v.italic ? 'italic' : 'normal') as 'italic' | 'normal',
+  })));
+  const root: SatoriNode = {
+    type: 'div',
+    props: {
+      style: {
+        width: stripWidth, height: rowHeight, display: 'flex', position: 'relative',
+        whiteSpace: 'nowrap', fontSize: element.fontSize,
+        ...textStyleToCss(element.style, element.color),
+      },
+      children: text,
+    },
+  };
+  const svg = await satori(root as unknown as Parameters<typeof satori>[0], { width: stripWidth, height: rowHeight, fonts });
+  const pixmap = new Resvg(svg, { font: { loadSystemFonts: false } }).render();
+  return { pixels: pixmap.pixels, width: pixmap.width, height: pixmap.height };
+}
