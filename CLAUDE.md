@@ -457,9 +457,11 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
   - **Verified against real binaries, live on the demo stand (2026-09-24) — and a real,
     severe bug was found and fixed by doing so, exactly the kind unit tests structurally cannot
     catch.** `LocalStreamManager`'s `new StreamController({...})` call (the one file no task's own
-    plan ever listed, and no test exercises — every `streamController.test.ts` fixture hand-builds
-    its own fake deps, bypassing this real integration point entirely) never forwarded
-    `createMarqueeFeeder`/`resolveMarqueeRow` from the `StreamScene` it builds. Both are optional
+    plan ever listed, and no test exercised with the optional feeders present — every
+    `streamController.test.ts` fixture hand-builds its own fake deps, bypassing this real
+    integration point entirely, and `localStreamManager.test.ts` itself always left them
+    `undefined` before this fix) never forwarded `createMarqueeFeeder`/`resolveMarqueeRow` from
+    the `StreamScene` it builds. Both were then-optional
     fields, so this compiled cleanly with zero errors and zero test failures — but it meant
     `MarqueeFeeder.attach()` was never called in production: `pipe:8` was still correctly DECLARED
     to ffmpeg (that path goes through `createPersistentEncoder` directly, unaffected), but with
@@ -491,6 +493,15 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
     non-scrolling short name current — the two samples are close enough, and in the unexpected
     direction, to read as ordinary shared-host load variance rather than any real cost, consistent
     with the design's own expectation that the per-frame path is pure byte copies.
+    **The bug class itself, not just this one instance, is now closed at compile time.**
+    `StreamControllerDeps`'s four scene-sourced fields (`createPulseVisualizer`,
+    `createPlaylistWindowFeeder`, `createMarqueeFeeder`, `resolveMarqueeRow`) went from `field?: T`
+    to `field: T | undefined` — still fine to be `undefined`, but no longer fine to be *absent*, so
+    a future scene field added to this list and left out of `LocalStreamManager`'s object literal
+    fails `npm run build` instead of compiling silently. The underlying hazard this doesn't close:
+    declaring a pipe (inside `createPersistentEncoder`) and feeding it (a separate factory) are
+    still two independently-gated things linked only by this one hand-maintained field list — the
+    NEXT new pipe added here will need the same discipline applied to it explicitly.
 
 **Local relay (MediaMTX).** Every stream publishes into a `bluenviron/mediamtx:1.21.0`
 container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in

@@ -48,7 +48,7 @@ function fakeScene() {
     createMarqueeFeeder: undefined,
     resolveMarqueeRow: undefined,
   };
-  return { scene, encoder, canvasFeeder, audioRelay, createPersistentEncoder };
+  return { scene, encoder, encoderChild, canvasFeeder, audioRelay, createPersistentEncoder };
 }
 
 function destinationRow(overrides: Partial<StreamDestination> = {}): StreamDestination {
@@ -131,7 +131,7 @@ describe('LocalStreamManager.start', () => {
   // would silently skip attaching the feeder — exactly the bug that stalled the persistent
   // encoder forever in production (pipe:8 declared to ffmpeg but never fed).
   it('constructs the playlist-window AND marquee feeders when the scene provides them, proving both reach the real StreamController', async () => {
-    const { manager, scene } = buildManager();
+    const { manager, scene, encoderChild } = buildManager();
     const playlistWindowFeeder = { attach: jest.fn(), showRows: jest.fn().mockResolvedValue(undefined), animate: jest.fn().mockResolvedValue(undefined), goIdle: jest.fn(), close: jest.fn() };
     const marqueeFeeder = { attach: jest.fn(), activate: jest.fn().mockResolvedValue(undefined), deactivate: jest.fn(), close: jest.fn() };
     (scene as { createPlaylistWindowFeeder?: unknown }).createPlaylistWindowFeeder = jest.fn().mockReturnValue(playlistWindowFeeder);
@@ -141,9 +141,14 @@ describe('LocalStreamManager.start', () => {
     await manager.start('user-1', 'playlist-1');
 
     expect(scene.createPlaylistWindowFeeder).toHaveBeenCalled();
-    expect(playlistWindowFeeder.attach).toHaveBeenCalled();
+    expect(playlistWindowFeeder.attach).toHaveBeenCalledWith(encoderChild.playlistWindowPipe);
     expect(scene.createMarqueeFeeder).toHaveBeenCalled();
-    expect(marqueeFeeder.attach).toHaveBeenCalled();
+    expect(marqueeFeeder.attach).toHaveBeenCalledWith(encoderChild.marqueePipe);
+    // Dropping resolveMarqueeRow ALONE (leaving createMarqueeFeeder forwarded) is a milder,
+    // still-silent variant of the same bug class: the feeder gets attached and idles fine, but
+    // the marquee can never activate for any track, because feedCurrentTrack() only calls
+    // resolveMarqueeRow when this.deps.resolveMarqueeRow is set.
+    expect(scene.resolveMarqueeRow).toHaveBeenCalled();
   });
 
   it('rejects with 409 when this user already has an active stream', async () => {

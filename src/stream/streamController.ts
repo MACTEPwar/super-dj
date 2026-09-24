@@ -42,11 +42,19 @@ export interface StreamControllerDeps {
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: () => PersistentEncoder;
-  createPulseVisualizer?: () => PulseVisualizer;
+  // These four are all sourced directly from StreamScene (see buildStreamScene()) and are
+  // deliberately `T | undefined` rather than `field?:` — a real bug (found live on the demo
+  // stand, see CLAUDE.md's marquee section) was LocalStreamManager silently omitting two of
+  // these `?:`-optional fields from the object literal it built, which TypeScript accepted with
+  // zero errors and which stalled the persistent encoder in production. A required-but-nullable
+  // key forces every future caller to make an explicit decision, catching that same omission at
+  // compile time instead of relying on a regression test to keep covering every new field added
+  // here later.
+  createPulseVisualizer: (() => PulseVisualizer) | undefined;
   // Present only when the template has an on-canvas playlist element — see buildStreamScene().
-  createPlaylistWindowFeeder?: () => PlaylistWindowFeederLike;
-  createMarqueeFeeder?: () => MarqueeFeederLike;
-  resolveMarqueeRow?: (currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; textWidth: number } | null>;
+  createPlaylistWindowFeeder: (() => PlaylistWindowFeederLike) | undefined;
+  createMarqueeFeeder: (() => MarqueeFeederLike) | undefined;
+  resolveMarqueeRow: ((currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; textWidth: number } | null>) | undefined;
   buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean; currentRowOverrideText?: string }) => Promise<NowPlayingOverlay>;
   // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
   // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so the caller
