@@ -30,6 +30,9 @@ export interface ChildProcessWithPipes extends ChildProcessLike {
   // The playlist window's burst layer (fd 7) — see PlaylistWindowFeeder. Same "always present,
   // sometimes written" arrangement as pulsePipe.
   readonly playlistWindowPipe: NodeJS.WritableStream;
+  // The current-track marquee layer (fd 8) — see MarqueeFeeder. Same "always present, sometimes
+  // written" arrangement as pulsePipe/playlistWindowPipe above.
+  readonly marqueePipe: NodeJS.WritableStream;
 }
 
 export type PipeSpawner = (command: string, args: string[]) => ChildProcessWithPipes;
