@@ -1,7 +1,7 @@
 import Piscina from 'piscina';
 import * as path from 'path';
 import * as os from 'os';
-import { PlaylistWindowFrameRequest } from './sceneRenderer';
+import { PlaylistWindowFrameRequest, MarqueeStripFrameRequest } from './sceneRenderer';
 
 const RENDER_TIMEOUT_MS = 500;
 let pool: Piscina | null = null;
@@ -28,6 +28,17 @@ export async function renderPlaylistWindowFrame(req: PlaylistWindowFrameRequest)
   try {
     const result: Uint8Array = await getPool().run(req, { signal: controller.signal });
     // Structured clone hands back a plain Uint8Array, never a Buffer (CLAUDE.md, Stage 1a scar).
+    return Buffer.from(result.buffer, result.byteOffset, result.byteLength);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function renderMarqueeStripFrame(req: MarqueeStripFrameRequest): Promise<Buffer> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  try {
+    const result: Uint8Array = await getPool().run(req, { signal: controller.signal, name: 'renderMarqueeStrip' });
     return Buffer.from(result.buffer, result.byteOffset, result.byteLength);
   } finally {
     clearTimeout(timer);

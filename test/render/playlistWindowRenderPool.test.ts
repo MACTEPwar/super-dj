@@ -2,7 +2,7 @@ const runMock = jest.fn();
 const piscinaCtor = jest.fn().mockImplementation(() => ({ run: runMock }));
 jest.mock('piscina', () => piscinaCtor);
 
-import { renderPlaylistWindowFrame } from '../../src/render/playlistWindowRenderPool';
+import { renderPlaylistWindowFrame, renderMarqueeStripFrame } from '../../src/render/playlistWindowRenderPool';
 
 const REQ: any = { element: {}, rows: [], region: { x: 0, y: 0, width: 2, height: 2, originX: 0, originY: 0 } };
 
@@ -28,5 +28,25 @@ describe('renderPlaylistWindowFrame (pool wrapper)', () => {
     runMock.mockResolvedValue(new Uint8Array(10));
     await renderPlaylistWindowFrame(REQ);
     expect(runMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe('renderMarqueeStripFrame (pool wrapper)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('routes through the same pool, named "renderMarqueeStrip"', async () => {
+    runMock.mockResolvedValue(new Uint8Array(16));
+    const req: any = { element: {}, text: 'x', stripWidth: 2, rowHeight: 2 };
+    await renderMarqueeStripFrame(req);
+    expect(runMock.mock.calls[0][0]).toBe(req);
+    expect(runMock.mock.calls[0][1].name).toBe('renderMarqueeStrip');
+    expect(runMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('returns a real Buffer', async () => {
+    runMock.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
+    const result = await renderMarqueeStripFrame({ element: {}, text: 'x', stripWidth: 1, rowHeight: 1 } as any);
+    expect(Buffer.isBuffer(result)).toBe(true);
+    expect(result.length).toBe(4);
   });
 });
