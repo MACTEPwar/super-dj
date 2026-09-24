@@ -50,3 +50,40 @@ export function rgbaToYuva420p(rgba: Uint8Array, width: number, height: number):
   }
   return out;
 }
+
+// Copies a smaller yuva420p frame's Y/U/V/A planes into a sub-rectangle of a larger one, in
+// place. x/y/srcWidth/srcHeight must all be even — this is a raw plane copy at the same 2x2
+// chroma-subsampling grid both buffers already share (see rgbaToYuva420p above), so an odd
+// offset would misalign the chroma planes exactly the way an odd ffmpeg `overlay` position does
+// (see GIF_OVERLAY_FORMAT in persistentEncoderArgs.ts) — except here nothing catches it, so
+// callers (MarqueeFeeder) round their own coordinates before calling this.
+export function blitYuva420p(
+  dest: Buffer, destWidth: number, destHeight: number,
+  src: Buffer, srcWidth: number, srcHeight: number,
+  x: number, y: number,
+): void {
+  const destYSize = destWidth * destHeight;
+  const destCw = destWidth / 2;
+  const destCSize = destCw * (destHeight / 2);
+  const destUOff = destYSize;
+  const destVOff = destYSize + destCSize;
+  const destAOff = destYSize + 2 * destCSize;
+
+  const srcYSize = srcWidth * srcHeight;
+  const srcCw = srcWidth / 2;
+  const srcCSize = srcCw * (srcHeight / 2);
+  const srcUOff = srcYSize;
+  const srcVOff = srcYSize + srcCSize;
+  const srcAOff = srcYSize + 2 * srcCSize;
+
+  for (let sy = 0; sy < srcHeight; sy += 1) {
+    src.copy(dest, (y + sy) * destWidth + x, sy * srcWidth, sy * srcWidth + srcWidth);
+    src.copy(dest, destAOff + (y + sy) * destWidth + x, srcAOff + sy * srcWidth, srcAOff + sy * srcWidth + srcWidth);
+  }
+  const cx = x / 2;
+  const cy = y / 2;
+  for (let scy = 0; scy < srcHeight / 2; scy += 1) {
+    src.copy(dest, destUOff + (cy + scy) * destCw + cx, srcUOff + scy * srcCw, srcUOff + scy * srcCw + srcCw);
+    src.copy(dest, destVOff + (cy + scy) * destCw + cx, srcVOff + scy * srcCw, srcVOff + scy * srcCw + srcCw);
+  }
+}
