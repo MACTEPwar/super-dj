@@ -72,6 +72,13 @@ export type PlaylistWindowLayerConfig = {
   layer: 'below' | 'top';
 };
 
+// The current-track marquee layer (MarqueeFeeder, pipe:8) — reuses the SAME region
+// playlistWindow does (computePlaylistWindowRegion), since the marquee's own row position is
+// decided by Node per-frame within that region, not by this filter graph. Present only when the
+// template has a playlist element (same gate as playlistWindow) AND the current track's own name
+// overflows its row — see streamScene.ts's resolveMarqueeRow.
+export type MarqueeLayerConfig = { x: number; y: number; width: number; height: number; fps: number };
+
 export function buildPersistentEncoderArgs(params: {
   width: number;
   height: number;
@@ -92,8 +99,9 @@ export function buildPersistentEncoderArgs(params: {
   // Present only when the resolved template has a playlist-window element — see
   // PlaylistWindowLayerConfig above.
   playlistWindow?: PlaylistWindowLayerConfig;
+  marquee?: MarqueeLayerConfig;
 }): string[] {
-  const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [], canvasPlacement = 'top', playlistWindow } = params;
+  const { width, height, fps, heartbeatFps, rtmpUrl, streamKey, backgroundPath, equalizer, gifOverlays = [], canvasPlacement = 'top', playlistWindow, marquee } = params;
   const pulseInputIndex = 3 + gifOverlays.length;
   // Appended after the pulse input, not before it, so neither the gif input indices (3...) nor
   // pulseInputIndex above moves when a template gains a second canvas layer.
@@ -101,6 +109,9 @@ export function buildPersistentEncoderArgs(params: {
   // Appended after the above-canvas input (present only for 'split'), so declaring the playlist
   // window's own burst layer never renumbers anything declared before it.
   const playlistWindowInputIndex = aboveCanvasInputIndex + (canvasPlacement === 'split' ? 1 : 0);
+  // Appended after the playlist-window input, so declaring the marquee's own burst layer never
+  // renumbers anything declared before it.
+  const marqueeInputIndex = playlistWindowInputIndex + (playlistWindow ? 1 : 0);
   const inputs = [
     // yuva420p, not yuv420p: this pipe used to carry an opaque frame (CanvasFeeder flattened the
     // background into it before every write), which meant nothing composited "under" [0:v] in
@@ -146,6 +157,16 @@ export function buildPersistentEncoderArgs(params: {
     // runtime x/y commands (sendcmd spike: "Function not implemented").
     ...(playlistWindow
       ? ['-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', `${playlistWindow.width}x${playlistWindow.height}`, '-r', String(playlistWindow.fps), '-i', 'pipe:7']
+      : []),
+    // The current-track marquee layer (MarqueeFeeder). Present only when the template has a
+    // playlist element AND a marquee config was resolved for it — see streamScene.ts. Gated on
+    // BOTH marquee and playlistWindow (not marquee alone): the marquee composites relative to
+    // videoPad AFTER compositePlaylistWindow() has run (step 6 below), and its input index is
+    // computed relative to playlistWindowInputIndex — neither is meaningful without a real
+    // playlist-window layer underneath it. Declared last, same non-renumbering reason as the
+    // playlist-window input above.
+    ...(marquee && playlistWindow
+      ? ['-f', 'rawvideo', '-pix_fmt', 'yuva420p', '-s', `${marquee.width}x${marquee.height}`, '-r', String(marquee.fps), '-i', 'pipe:8']
       : []),
   ];
 
@@ -219,6 +240,12 @@ export function buildPersistentEncoderArgs(params: {
   // here — this and the 'below'-layer call above are mutually exclusive by construction, so the
   // playlist window is never composited twice.
   if (playlistWindow && (playlistWindow.layer === 'top' || canvasPlacement === 'top')) compositePlaylistWindow();
+
+  if (marquee && playlistWindow) {
+    filterLines.push(`[${marqueeInputIndex}:v]format=yuva420p[mqwin]`);
+    filterLines.push(`[${videoPad}][mqwin]overlay=${marquee.x}:${marquee.y}[vmqwin]`);
+    videoPad = 'vmqwin';
+  }
 
   if (equalizer) {
     // format=yuva420p is the actual straight-alpha compositing conversion — the input is declared
