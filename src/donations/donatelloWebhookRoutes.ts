@@ -6,12 +6,12 @@ import { CurrencyConverter } from './currencyConverter';
 import { wrapAsync } from '../api/errorHandler';
 import { ApiError } from '../errors';
 import { InteractionRuleRepository } from './interactionRuleRepository';
-import { SongRequestResult } from './songRequestAction';
+import { DonationActionHandlers, isActionType } from './donationActions';
 
 export interface DonatelloWebhookDeps {
   callbackKey: string;
   ruleRepository: Pick<InteractionRuleRepository, 'listEnabledByUser'>;
-  executeSongRequest: (query: string) => Promise<SongRequestResult>;
+  actions: DonationActionHandlers;
   converter: CurrencyConverter;
   // MVP stopgap — see the design spec and AppConfig.donationTargetUserId.
   targetUserId: string;
@@ -47,13 +47,14 @@ export function createDonatelloWebhookRouter(deps: DonatelloWebhookDeps): Router
     res.status(200).json({ received: true });
 
     const rules = await deps.ruleRepository.listEnabledByUser(deps.targetUserId);
-    // Every matched rule's actionType is "songRequest" today (the only value validated by
-    // interactionRuleRoutes.ts — see Task 12), so dispatching straight to executeSongRequest is
-    // correct for MVP. match.rule.actionType exists for the day a second action type is added;
-    // this loop becomes a real dispatch (switch on actionType) at that point, not before.
     const matches = matchRules(event, rules, deps.converter);
     for (const match of matches) {
-      deps.executeSongRequest(match.query).catch((err) => {
+      const actionType = match.rule.actionType;
+      if (!isActionType(actionType)) {
+        console.error(`donation matched rule ${match.rule.id} with unknown actionType "${actionType}", skipping`);
+        continue;
+      }
+      deps.actions[actionType](match.query).catch((err) => {
         console.error('donation-triggered action failed', err);
       });
     }

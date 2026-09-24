@@ -169,6 +169,9 @@ export class LocalStreamManager extends EventEmitter {
           streamKey: relay.publishStreamKey,
         }),
         createPulseVisualizer: scene.createPulseVisualizer,
+        createPlaylistWindowFeeder: scene.createPlaylistWindowFeeder,
+        createMarqueeFeeder: scene.createMarqueeFeeder,
+        resolveMarqueeRow: scene.resolveMarqueeRow,
         // No isRetryableDestination veto: there is no destination at THIS layer any more — the
         // encoder pushes into a container-network MediaMTX that essentially never drops for network
         // reasons, so reconnect here fires only on a genuine ffmpeg crash/OOM. Destination-side
@@ -270,8 +273,8 @@ export class LocalStreamManager extends EventEmitter {
     this.require(userId).controller.playByName(name);
   }
 
-  insertEphemeralTrack(userId: string, track: Track): void {
-    this.require(userId).controller.insertEphemeralTrack(track);
+  enqueueTrack(userId: string, track: Track): void {
+    this.require(userId).controller.enqueueTrack(track);
   }
 
   /**

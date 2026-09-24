@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { playlistsApi, PlaylistTrack } from '../api/playlists';
 import { tracksApi } from '../api/tracks';
 import { ApiError } from '../api/client';
+import { AddTrackDrawer } from '../components/AddTrackDrawer';
 
 function SortableRow({ track, onRemove, removeLabel }: { track: PlaylistTrack; onRemove: () => void; removeLabel: string }) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: track.id });
@@ -29,6 +30,7 @@ export default function PlaylistEditor() {
   const playlistQuery = useQuery({ queryKey: ['playlists', id], queryFn: () => playlistsApi.get(id!), enabled: !!id });
   const allTracksQuery = useQuery({ queryKey: ['tracks'], queryFn: tracksApi.list });
   const [orderedTracks, setOrderedTracks] = useState<PlaylistTrack[]>([]);
+  const [isAddDrawerOpen, setAddDrawerOpen] = useState(false);
 
   useEffect(() => {
     if (playlistQuery.data) setOrderedTracks(playlistQuery.data.tracks);
@@ -87,7 +89,10 @@ export default function PlaylistEditor() {
       </DndContext>
 
       <div>
-        <h2 className="mb-2 font-medium">{t('playlistEditor.addTracksHeading')}</h2>
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="font-medium">{t('playlistEditor.addTracksHeading')}</h2>
+          <button onClick={() => setAddDrawerOpen(true)} className="text-sm underline">{t('playlistEditor.addNewTrack')}</button>
+        </div>
         <ul className="divide-y rounded-lg border">
           {availableTracks.map((track) => (
             <li key={track.id} className="flex items-center justify-between p-3">
@@ -98,6 +103,15 @@ export default function PlaylistEditor() {
           {availableTracks.length === 0 && <li className="p-3 text-sm text-gray-500">{t('playlistEditor.allAdded')}</li>}
         </ul>
       </div>
+
+      <AddTrackDrawer
+        open={isAddDrawerOpen}
+        onOpenChange={setAddDrawerOpen}
+        onAdded={(track) => {
+          queryClient.invalidateQueries({ queryKey: ['tracks'] });
+          addTrack(track);
+        }}
+      />
     </div>
   );
 }

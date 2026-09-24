@@ -311,6 +311,242 @@ platform receives is a `-c copy` `RelayProcess` reading that relay back out (bel
   `StreamDestinationProvider`/OAuth adapter (deliberately out of MVP scope) — it's just a `custom`
   destination pointed at `rtmp://live.twitch.tv/app` with the channel's stream key, which works
   through the existing `CustomRtmpProvider` path and is forwarded exactly like any other.
+- **The playlist window's insert animation (fd 7 / `pipe:7`, burst-only).** The settled window
+  stays baked in the canvas (`playlistWindowNode`, byte-identical to before) from
+  `PlaylistQueue.windowSnapshot()`, which now lists queued tracks alongside the base playlist. When
+  the template has a playlist element, a yuva420p `pipe:7` exists for the whole session. A
+  `PlaylistWindowFeeder` keeps it fed with a transparent idle frame (`RawFramePacer`, extracted
+  from `PulseVisualizer` behaviour-identically) so ffmpeg's overlay frame-sync never stalls waiting
+  on it. On a visible insert, `PlaylistWindowAnimator` runs frame 0 (== the baked window) → hold →
+  canvas A (window omitted) → hold → a 600ms animation (the SAME Satori node as the baked window,
+  animated via row `maxHeight`/`opacity`/`margin`, rendered in its own dedicated piscina pool,
+  `useAtomics: false`) → canvas B (window with the new rows) → hold → idle. Every switch overlaps
+  identical content for `HANDOFF_HOLD_MS` = 2 canvas heartbeats (400ms), so it never matters which
+  of the two never-frame-synchronized inputs ffmpeg's compositor samples first. Composited directly
+  above whichever canvas layer the playlist element is baked into (before the equalizer). Why not
+  ffmpeg-side motion: a real spike proved `sendcmd`/`zmq` reach `overlay`/`drawbox`, which answer
+  `Function not implemented` for a runtime x/y command — ffmpeg composites a static-position overlay
+  only, so the motion has to be rendered frame-by-frame in Node and streamed in, not commanded.
+
+  **Verified against real binaries** (deployed to the 192.168.14.26 stand, a real account's stream,
+  real ffmpeg 5.1.9, real MediaMTX 1.21.0, real HLS output captured via the authenticated preview
+  proxy over ~15 minutes including two real donation-triggered bursts — narrower than an isolated
+  A/B-with-and-without-pipe:7 harness would give, but against the actual production pipeline rather
+  than a synthetic one; see the design doc's Phase C plan, Task 10, for the fuller harness this
+  substituted for):
+  - **The encoder accepts `pipe:7` and never stalls on it.** Real startup log: `Input #3, rawvideo,
+    from 'pipe:7': ... 704x342, 144460 kb/s, 30 tbr, 30 tbn`, correctly mapped into the filter graph
+    (`Stream #3:0 (rawvideo) -> format:default (graph 0)`) and composited (`overlay:default (graph
+    0) -> Stream #0:0 (libx264)`). The stream ran steadily the whole session; zero errors, crashes
+    or stalls in the backend log across the whole test window (~5 min of log checked, spanning two
+    triggered bursts).
+  - **Idle steady-state cost** (main encoder ffmpeg, sampled via two `/proc/<pid>/stat` reads 10s
+    apart — no `ps` binary in the deploy image): **~104% of one CPU core**, RSS **~148 MiB**, with
+    the playlist window present but transparent (idle). Node's own process stayed near-idle between
+    renders. **No isolated same-host measurement without `pipe:7` was taken this session — this
+    number is NOT a verified delta against a no-`pipe:7` baseline**: the only other number on record
+    (~68% CPU) was measured on a different host, a different template and a different method, so
+    the two are not comparable, and the plan's own fallback rule (drop `PLAYLIST_WINDOW_FPS` to 15
+    if the encoder's CPU exceeds a genuine no-`pipe:7` baseline by more than 10 percentage points)
+    cannot honestly be called "not triggered" from this data — the only number available (a 36-point
+    gap) points the other way. `PLAYLIST_WINDOW_FPS` stays at `VIDEO_FPS` (30) for now because
+    nothing OBSERVED during the live test (no dropped frames, no growing latency, no stall)
+    indicated a real problem, but this is provisional: run the real A-vs-B (same host, same
+    template, a build with `pipe:7` vs one without) before trusting the capacity math in
+    `MAX_CONCURRENT_LOCAL_STREAMS`, which is sized off the encoder's own cost.
+  - **A real donation visibly, correctly inserts a row into the baked window**, confirmed by
+    downloading real HLS `.ts` segments through the authenticated preview proxy before and after a
+    real `libraryTrackRequest` donation and extracting frames with `ffmpeg` (cropped to the
+    `computePlaylistWindowRegion` box): the pre-donation frame showed the ordinary 3-row window: the
+    donated track then appeared as an extra row in exactly the position `windowSnapshot()` predicts
+    (immediately after the current-track row), with the base after-context row still correctly
+    following it — 4 rows total, no corruption, no duplicate/missing rows, no stale content left
+    over from the transition. The two segments spanning the actual burst were measurably larger than
+    steady-state segments (~130 KB vs ~108-111 KB for the same 2s duration) — **consistent with**
+    the animation's extra motion being encoded (canvas A and canvas B's own re-bakes would also
+    enlarge those segments, and no mid-animation frame was captured to isolate the two causes, so
+    this is corroborating, not conclusive).
+  - **Burst cost stays off the main encoder.** Sampling the encoder's own CPU ticks immediately
+    before, at, and 2s after triggering a fresh burst showed no meaningful spike on the persistent
+    encoder process itself — consistent with the design (burst rendering happens in Node's piscina
+    pool and short-lived one-shot `ffmpeg` renders, not inside the long-lived encoder). One
+    additional short-lived `ffmpeg` process (RSS ~55 MiB) was observed appearing and disappearing
+    around a trigger, consistent with `CanvasFeeder`'s one-shot canvas-A/canvas-B renders firing as
+    part of the handoff.
+  - **Not measured this session** (narrower scope than the plan's full Task 10 harness — this was a
+    deliberate scoping decision by the orchestrator, reusing this session's own deploy/capture
+    tooling against the real demo stand instead of building the plan's isolated-container harness
+    from scratch): a true idle-vs-baseline A/B without `pipe:7` present at all (see above — this is
+    the one gap worth closing before trusting capacity numbers);
+    frame-accurate motion capture of the animation in progress (only before/after settled states
+    were captured, not the moving frames themselves); the elaborate per-frame luma-histogram/
+    row-projection pixel forensics (handoff-overlap deviation, colour-match tolerance, fringe
+    detection) the plan's Task 10 originally specified; exact wall-clock donation-to-visible latency
+    (bounded well under the observation window, not measured to the millisecond). If any of these
+    become load-bearing later (e.g. investigating a reported visual glitch), build the isolated
+    harness the original plan describes rather than re-deriving these from production captures.
+
+- **Playlist-window truncation + current-track marquee.** Two related fixes: (A) every row in the
+  playlist window is now single-line, ellipsis-truncated (`overflow: hidden; white-space: nowrap;
+  text-overflow: ellipsis; maxWidth: el.width` on each row's own style, `playlistWindowNode` in
+  `src/render/sceneRenderer.ts`) — a long name used to wrap onto a second line ("▶" alone on one
+  line, the name below), because a row's div had no `white-space` constraint of its own while still
+  stretching to the window's width via flex's `align-items: stretch`. (B) the CURRENTLY PLAYING
+  track's row additionally scrolls as a continuous-loop marquee when its name doesn't fit — every
+  other row just sits truncated, motionless.
+  - **Why this couldn't reuse the timer element's mechanism.** The `timer` element updates by
+    re-rendering a whole new static frame once a second (`CanvasFeeder`'s one-shot render) — fine
+    for a digit that changes once a second, useless for text that must glide a few pixels 30 times
+    a second. A native `drawtext` with a continuous-scroll `x` expression was spiked and confirmed
+    working against a real local ffmpeg (text enters from the right, both edges clip cleanly, loops
+    with no visible seam) — but it was rejected because **`overlay`'s x/y cannot be changed at
+    runtime in this ffmpeg build** (the same wall the `pipe:7` burst layer's own design doc already
+    hit: `sendcmd`/`zmq` reach `overlay`/`drawbox` but answer "Function not implemented"), and the
+    current row's Y position is NOT a session-wide constant — a donation/`play`-by-name track, or a
+    session near its very start (short before-context), can move which row slot is current.
+  - **Chosen design: a pre-rendered text strip + per-frame crop, not per-frame rendering.**
+    `MarqueeFeeder` (`src/ffmpeg/marqueeFeeder.ts`) renders the row's full text through Satori
+    **once per activation** (a track switch to a name that overflows) into a strip padded with a
+    full row-width of blank space on both sides (`renderMarqueeStripPixels`,
+    `src/render/sceneRenderer.ts`, routed through the existing `pipe:7` worker pool via a second
+    named export — a marquee activation is canvas-re-render-frequency work, not
+    burst-frequency work, so it doesn't need a third pool). Every subsequent frame just crops a
+    moving window out of that strip (`cropX = floor((elapsedSec * 80) % (stripWidth - rowWidth))`)
+    and composites it into a region-sized transparent yuva420p frame via `blitYuva420p`
+    (`src/render/yuva420p.ts`) — plain byte copies, **no Satori/resvg call on the per-frame path at
+    all**. Because the strip is padded by a full row-width on both sides, the crop window never
+    needs to read past the strip's own bounds or stitch across a wrap — one period of motion spans
+    the strip exactly, then jumps back to a fully-blank "about to enter" start, with no visible
+    seam. `MARQUEE_SPEED_PX_PER_SEC = 80` (fixed, not user-configurable) is the same value the
+    spike confirmed visually smooth and readable.
+  - **A new dedicated pipe, `pipe:8`, reusing `pipe:7`'s own region.** `persistentEncoderArgs.ts`
+    declares it only when `marquee && playlistWindow` are BOTH present (not `marquee` alone — the
+    marquee's input index and its compositing both depend on `playlistWindow`'s own output), sized
+    to the exact same `computePlaylistWindowRegion` rect `pipe:7` already uses, composited directly
+    above `pipe:7`'s own stage. This is what turns "where does the current row sit" from a static
+    ffmpeg argument into ordinary Node state: the pipe's own `overlay` position is fixed forever at
+    spawn time, but Node freely decides where WITHIN that region's frame to draw the scrolling
+    slice on every tick, so a row index that shifts between tracks is a non-issue.
+  - **Row height is measured, not estimated.** `measureRowHeight` (`src/render/rowHeight.ts`)
+    renders two probe rows of representative text (`'Ag'`, ascenders and descenders present) via
+    the existing `renderPlaylistWindowPixels`, and takes the pixel Y-delta between where each row's
+    ink begins — this is exactly the flex column's real per-row height, not
+    `playlistWindowGeometry.ts`'s own `ROW_HEIGHT_BOUND_FACTOR = 1.4`, which is a deliberately
+    generous BOUND for a different purpose (sizing `pipe:7`'s region) and documents itself as
+    "~1.16-1.2 x fontSize for the bundled fonts" — a 15-20% gap that would have visibly misaligned
+    the marquee against the baked text. Cached by `(fontFamily, bold, italic, fontSize)`. Whether a
+    track needs a marquee at all is decided by `measureTextWidth` (`src/render/textWidth.ts`, real
+    glyph-advance measurement via `@shuding/opentype.js`, pinned to satori's own dependency
+    version) — the same font-metrics engine satori itself uses internally, not a
+    monospace/character-count heuristic.
+  - **Hiding the static text while the marquee is live.** `buildOverlay` (`streamScene.ts`) gained
+    `currentRowOverrideText` — when the marquee is active, the current row's baked text is replaced
+    with a bare `'▶'` before the Satori render, so the live `pipe:8` layer is the only thing drawing
+    that row's name. `StreamController.feedCurrentTrack()` resolves this once per track switch
+    (`resolveMarqueeRow`, gated on the same `livePlaylist` check as `pipe:7`'s own feeder) with the
+    SAME generation-guard discipline `sessionGeneration` already uses elsewhere in that file: the
+    generation is checked after `resolveMarqueeRow`'s own await AND after `marqueeFeeder.activate()`'s
+    — not just once at the end — so a track change arriving mid-resolution can't let a stale
+    `activate()` land or a stale override reach the eventual `buildOverlay` call.
+    `MarqueeFeeder.activate()`/`.deactivate()` also bump their OWN internal generation counter
+    synchronously (mirroring `PlaylistWindowFeeder`), giving real defense-in-depth independent of
+    the controller's own bookkeeping. `bakeCanvas()` (the `pipe:7` burst-handoff re-bake) carries
+    the SAME stored override text, not re-resolving it — otherwise a burst animation occurring
+    while a marquee is active would briefly re-reveal the full static name, then snap back once the
+    next `feedCurrentTrack()` reasserted it.
+  - **Verified against real binaries, live on the demo stand (2026-09-24) — and a real,
+    severe bug was found and fixed by doing so, exactly the kind unit tests structurally cannot
+    catch.** `LocalStreamManager`'s `new StreamController({...})` call (the one file no task's own
+    plan ever listed, and no test exercised with the optional feeders present — every
+    `streamController.test.ts` fixture hand-builds its own fake deps, bypassing this real
+    integration point entirely, and `localStreamManager.test.ts` itself always left them
+    `undefined` before this fix) never forwarded `createMarqueeFeeder`/`resolveMarqueeRow` from
+    the `StreamScene` it builds. Both were then-optional
+    fields, so this compiled cleanly with zero errors and zero test failures — but it meant
+    `MarqueeFeeder.attach()` was never called in production: `pipe:8` was still correctly DECLARED
+    to ffmpeg (that path goes through `createPersistentEncoder` directly, unaffected), but with
+    nothing ever writing to it, ffmpeg blocked forever trying to open a rawvideo input that never
+    sends its first byte — **stalling the ENTIRE persistent encoder** (confirmed via `/proc/<pid>/stat`
+    CPU-tick sampling: zero ticks across repeated windows, reproduced from two independent fresh
+    `start()` calls; no RTMP `Output #0` line ever printed; no MediaMTX publish; HLS preview
+    permanently 404). This broke live streaming for every user whose template includes a playlist
+    element — i.e. the DEFAULT template, used whenever no `templateId` is given — the moment this
+    would have shipped. Root cause found by temporarily patching the deployed `dist/` code with
+    diagnostic logging directly on the running container (`attach()`/`tick()` never fired at all),
+    then tracing back to the missing two lines in `localStreamManager.ts`. Fixed (both fields added,
+    a real — not mocked — `StreamController` regression test added to `localStreamManager.test.ts`
+    that fails against the pre-fix source and passes against the fix), rebuilt, redeployed, and
+    **the entire verification re-run from a clean state confirmed clean**: the real running
+    ffmpeg process's own `/proc/<pid>/cmdline` showed `-i pipe:8` at the correct 354x222 region with
+    the exact designed filter graph (`[4:v]format=yuva420p[mqwin];[vplwin][mqwin]overlay=38:498[vmqwin]`,
+    composited directly above the playlist-window stage as designed); `Input #4, rawvideo, from
+    'pipe:8'` and `Output #0, flv, to 'rtmp://...'` both appeared immediately; MediaMTX logged a
+    real publish (`stream is available and online, 2 tracks`). Two real HLS segments 2 seconds
+    apart, downloaded through the authenticated preview proxy and cropped to the playlist window's
+    region with a real local ffmpeg, show the current row's visible text genuinely scrolling
+    ("...ант_сильно_веселая_2_вар" → "...веселая_2_вариант" — the later portion of the name slid
+    into view, the earlier portion slid out) while the row above it (a short, non-scrolling name)
+    stayed byte-identical across both frames — no bleeding into neighbouring rows, no doubled or
+    ghosted text from the static fallback underneath. CPU sampling (`/proc/<pid>/stat`, 5 s windows,
+    same technique as the `pipe:7` measurements) showed **no regression**: ~39% of one core with
+    the marquee actively scrolling vs. ~46.6% on the same host moments earlier with only a
+    non-scrolling short name current — the two samples are close enough, and in the unexpected
+    direction, to read as ordinary shared-host load variance rather than any real cost, consistent
+    with the design's own expectation that the per-frame path is pure byte copies.
+    **The bug class itself, not just this one instance, is now closed at compile time.**
+    `StreamControllerDeps`'s four scene-sourced fields (`createPulseVisualizer`,
+    `createPlaylistWindowFeeder`, `createMarqueeFeeder`, `resolveMarqueeRow`) went from `field?: T`
+    to `field: T | undefined` — still fine to be `undefined`, but no longer fine to be *absent*, so
+    a future scene field added to this list and left out of `LocalStreamManager`'s object literal
+    fails `npm run build` instead of compiling silently. The underlying hazard this doesn't close:
+    declaring a pipe (inside `createPersistentEncoder`) and feeding it (a separate factory) are
+    still two independently-gated things linked only by this one hand-maintained field list — the
+    NEXT new pipe added here will need the same discipline applied to it explicitly.
+  - **A whole-branch review after the above landed found 1 Critical + 3 Important gaps, all now
+    fixed and re-verified against real binaries.** (1) **Critical:** `feedCurrentTrack()` had no
+    error handling around `resolveMarqueeRow`/`activate()` — reproduced live: `measureRowHeight`'s
+    2-row ink-band probe throws whenever the playlist element's style has a text shadow with blur
+    >= 4 (the template editor's own DEFAULT shadow), because the blur bleeds ink across the gap
+    between the two probe rows, merging them into one band. With no try/catch this rejected
+    `feedCurrentTrack` outright — `start()`/`next()`/`previous()` would fail and auto-advance would
+    silently stall — for any user who simply left the default shadow on. Fixed two ways: the whole
+    resolve+activate block now degrades to plain ellipsis-truncated text on any failure
+    (`try`/`catch` around both calls, `marqueeFeeder?.deactivate()` + clear the override + log,
+    never reject); and `measureRowHeight`'s probe element strips `shadow`/`stroke` before rendering
+    — row pitch (line-height) is a font-metric property, independent of paint effects, so this is a
+    correctness fix, not a workaround. (2) **Important:** the static baked marker wasn't actually
+    hidden under the scroll — the marquee strip rendered the FULL `"▶ Name"` text, so the moving
+    strip's own `▶` glyph slid across the row while a SECOND, static `▶` sat underneath at the same
+    spot the whole time. Fixed by separating the 2-character `"▶ "` marker from the name:
+    `resolveMarqueeRow` now measures each width independently and returns
+    `{rect, nameText, textWidth, markerText}` — the rect starts past the marker's own measured
+    width, `MarqueeFeeder.activate()` receives the name only, and the baked override is the marker
+    text (never blank, never the full row). (3) **Important:** the strip had no leading blank pad —
+    `renderMarqueeStripPixels` put text at x=0 instead of after a row-width of blank as designed, so
+    the name was fully visible immediately, scrolled out, sat blank for ~4.4s, then popped back in
+    at full width — not the intended seamless glide. Fixed with an explicit `paddingLeft` field on
+    `MarqueeStripFrameRequest`/`MarqueeFeederOptions.renderStrip`. (4) **Important:** every
+    `pipe:7` burst animation (a donation or `play`-by-name insert) redrew the current row with the
+    FULL untruncated name, because `bakedRows`/`queueChanged()` never applied the marquee override
+    — so pipe:7 showed the full static name UNDER pipe:8's scrolling text for the burst's ~2s
+    duration. Fixed with one shared `displayRows()` helper applying the override, used at every
+    site that bakes or queues rows for display. `StreamScene`'s scene-sourced fields and
+    `PersistentEncoderParams.marquee` were also converted from optional to required-but-nullable,
+    extending the same "silent gap becomes a compile error" fix one layer up from
+    `StreamControllerDeps`. All four fixes were independently re-reviewed (scoped re-review against
+    the fix diff: all findings ADDRESSED, no new breakage) and then **re-verified against real
+    binaries on the demo stand**, specifically re-exercising the Critical scenario: a real stream
+    started with a template whose playlist element uses the template editor's own default shadow
+    (blur 4) and a track whose name overflows the element. `docker logs` across the whole window
+    (start, an explicit track switch onto the shadow-triggering row, real ffmpeg decode/encode) is
+    completely clean of any error/exception — the real pipeline never hit the throw the shadow used
+    to cause. Two real HLS segments ~2.2s apart, downloaded through the authenticated preview proxy
+    and cropped to the playlist-window region with a real local ffmpeg, visually confirm both the
+    marker/name separation and the leading pad: frame A shows the static `▶` marker, then a blank
+    gap, then only the leading edge of the name just entering from the right; frame B (2.2s later)
+    shows the SAME `▶` at the identical position with more of the name now revealed — genuine scroll
+    motion, the marker never covered or duplicated, the row above (not current) unaffected in both
+    frames.
 
 **Local relay (MediaMTX).** Every stream publishes into a `bluenviron/mediamtx:1.21.0`
 container (`docker/mediamtx.yml`, mounted read-only, plus the `mediamtx` service in
@@ -591,9 +827,12 @@ lands:
   `CustomRtmpProvider`/`YoutubeProvider`/the ffmpeg pipeline do not consume templates yet — this
   stage is renderer + CRUD only.
 - **Stage 1a (done):** `renderScene()`'s output replaces the hand-built `drawtext` filter graph in
-  `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping went away with it — `formatDuration`/
-  `buildPlaylistWindowLines` are all that's left there). Still one ffmpeg process per segment,
-  architecture otherwise untouched. Notable decisions from this stage, since they're easy to
+  `src/ffmpeg/segmentArgs.ts` (`overlayText.ts`'s escaping went away with it — at the time,
+  `formatDuration`/`buildPlaylistWindowLines` were all that was left there; the donation
+  library-track-request Phase C rework later deleted `buildPlaylistWindowLines` too, once
+  `PlaylistQueue.windowSnapshot()` took over listing the window's rows — `formatDuration` alone
+  remains). Still one ffmpeg process per segment, architecture otherwise untouched. Notable
+  decisions from this stage, since they're easy to
   second-guess without the context:
   - **`templateId` is optional, not required** (today on `POST /local-stream/start` and
     `POST /stream-presets`; at the time, on the two now-deleted start routes) — deliberately, so a
@@ -786,23 +1025,27 @@ connection) opens in a shared `Drawer` component (a slide-out panel built on the
 primitive) rather than being inlined on the page.
 
 **Donation-triggered song requests.** A per-user `InteractionRule` (Prisma model: `actionType`
-today always `'songRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
+`'songRequest'` or `'libraryTrackRequest'`, `enabled`, `minAmount`, `commandKeyword`) lets a donation on
 Donatello.to trigger a one-off track play: a donation message containing `!<keyword>:<query>` at
 or above the rule's `minAmount` (converted to UAH) fetches audio for `<query>` from the streamer's
-own external media-search service and **interrupts whatever is currently playing to play it
-immediately** — not queued to play "next" after the current track ends. Once it (and any donation
-tracks that queued up behind it — see below) finishes, the track it interrupted resumes at the
-exact position it was cut off at, never restarted from 0. The whole module lives in
+own external media-search service and is **queued to play next**, exactly like `play`-by-name: it
+plays once the current track ends, never cutting it off (it used to interrupt and resume; that was
+removed — see `docs/superpowers/specs/2026-09-23-donation-library-track-request-design.md`, Phase
+B). A donation arriving while the stream is `paused` no longer wakes it either — it just queues,
+and plays once the streamer manually resumes. The whole module lives in
 `src/donations/`: `donatelloWebhookRoutes.ts` (`POST /webhooks/donatello` — the inbound event,
 authenticated by a shared `X-Key` header rather than the session cookie, since Donatello is not a
 browser), `donationEvent.ts` (payload parsing), `ruleMatcher.ts` (`parseCommand`/`matchRules` —
 keyword/threshold matching against a user's enabled rules), `currencyConverter.ts`,
 `mediaSearchClient.ts` (the external media-search HTTP client), `songRequestAction.ts`
 (`executeSongRequest` — fetches audio, writes it to a dedicated temp dir, and calls
-`LocalStreamManager.insertEphemeralTrack`; resolves a `SongRequestResult` rather than throwing on
+`LocalStreamManager.enqueueTrack`; resolves a `SongRequestResult` rather than throwing on
 failure, so both the real webhook path — which only logs it — and the interaction-rule "Test"
 button — which reports it back to the caller — can share one implementation),
-`songRequestQueue.ts` (`SongRequestQueue` — see below), `tempFileCleanup.ts` (the sweep backstop —
+`donationRequestQueue.ts` (`DonationRequestQueue` — see below), `libraryTrackRequestAction.ts`
+(`executeLibraryTrackRequest` — the exact-track counterpart to `executeSongRequest`, see below),
+`donationActions.ts` (the `ActionType` union and the shared `DonationActionHandlers` dispatch
+object both the webhook and the rule "Test" route use), `tempFileCleanup.ts` (the sweep backstop —
 see "Configuration" below), and `interactionRuleRepository.ts`/`interactionRuleRoutes.ts` (CRUD
 plus `POST /interaction-rules/{id}/test`, mounted at `/interaction-rules`, cookie-authenticated and
 owner-scoped like every other resource route). `frontend/src/pages/Donations.tsx` +
@@ -811,54 +1054,130 @@ panel that calls the `/test` route directly — bypassing Donatello entirely —
 `minAmount` (not editable client-side) and an editable message defaulted to a working `!keyword:`
 command.
 
-**The interrupt-and-resume mechanism (`StreamController`).** `insertEphemeralTrack` enqueues onto
-`PlaylistQueue`'s `donationQueue` — a FIFO kept entirely SEPARATE from `insertedQueue` (which
-`playByName` still uses, unchanged: queued to play after the current track ends, joins `history`
-normally). The first donation track of an "episode" (i.e. arriving while `interruptedForDonation`
-is null) captures whatever is actually playing right now — `StreamController.nowPlayingTrack`, its
-own field tracking what's audible, deliberately NOT `PlaylistQueue.current()` — plus its elapsed
-position, stores that as `interruptedForDonation`, and switches to the donation track immediately;
-a donation arriving while one is already playing just extends the FIFO, no re-interruption. Once
-the whole `donationQueue` drains, the captured track resumes via `feedCurrentTrack(track,
-elapsedSeconds)` — the same `-ss`-seek path `pause()`/`resume()`/reconnect already use.
-`PlaylistQueue.current()`/`position`/`history` are **never touched** by any of this — a donation
-track is never part of playlist "previous" navigation, and the playlist's own resume point survives
-the whole interruption untouched. This has real consequences elsewhere in `StreamController`, all
-addressed the same way — read `nowPlayingTrack` (falling back to `queue.current()` only when it's
-genuinely unset), never `queue.current()` directly:
-- **`next()`/`previous()` reject with 409 while `interruptedForDonation` is set** — a donation
-  track can never be skipped, by design.
-- **`pause()`/`resume()`** act on the donation track itself when one is playing, not on
-  `queue.current()` (the track it interrupted) — resuming from the wrong one would silently abandon
-  the donation track mid-playback.
-- **A crash/reconnect mid-donation-track restores the SAME donation track at its captured offset**,
-  not `queue.current()` from 0 — `interruptedForDonation` is restored immediately after `teardown()`
-  in `handleUnexpectedExit`, before the 'reconnecting' state is even entered, so `next()`/`previous()`
-  stay rejected for the whole reconnect window too (closing the "queue moved during the wait" case
-  `performReconnect`'s plain-playlist path exists to handle — it genuinely cannot apply here).
-- **A donation arriving while `paused` wakes the stream and plays it immediately** — a donation
-  is meant to be heard right away, not wait for a manual resume.
-- The overlay's playlist-window element uses `PlaylistQueue.positionInBase()` (the base-playlist
-  index most recently reached by REAL advancement, untouched by donation pulls) plus
-  `overlayText.ts`'s `buildEphemeralPlaylistWindowLines()` to show sensible before/current/after
-  context around a donation track — it would otherwise render as a completely empty window for as
-  long as any donation track plays, since the track is never findable by name in the playlist's own
-  snapshot (the bug the ordinary `buildPlaylistWindowLines()` has for any track not in `tracks`).
+**Exact library-track requests + the public request page.** A second action type,
+`libraryTrackRequest`, lets a donor request an EXACT track. The streamer shares
+`/r/<requestPageToken>` (a public frontend page, outside the authenticated shell), which reads
+`GET /public/request-page/:token` — the ONE unauthenticated read besides `/auth/*` — listing the
+tracks of the owner's currently-live playlist (`streaming`/`paused`/`reconnecting`; anything else
+is `{live:false}`), read fresh from the DB at page load (no live updates). Each track copies
+`!<keyword>:<first 20 code points of its name> <track uuid>`. `executeLibraryTrackRequest`
+(`src/donations/libraryTrackRequestAction.ts`) takes the LAST uuid in the matched query, checks the
+track belongs to `DONATION_TARGET_USER_ID` (ownership only, not membership in the live playlist),
+and calls `LocalStreamManager.enqueueTrack` — no media-search fetch, no temp file — through the
+SAME `DonationRequestQueue` as free-text requests, so the two types play strictly in donation
+order (an exact-track request waits behind an earlier free-text one that is still downloading).
+The token is `User.requestPageToken` — 128-bit hex, unique, minted/rotated/disabled
+only via `POST`/`DELETE /request-page/token` (owner, `requireAuth`), and never the `userId`. The
+public route 404s a malformed token by shape before any DB call, answers the same 404 for an
+unknown one, sets `no-store` + `no-referrer`, and exposes only names/ids/durations. Rule keywords
+are unique per user (409), since two rules sharing one would both fire. The webhook and the rule
+"Test" button dispatch through one shared `DonationActionHandlers` object built in `server.ts`
+(`src/donations/donationActions.ts`).
 
-**Donation ordering is by arrival, not by download speed (`songRequestQueue.ts`).** Two donations
-racing on the external media-search HTTP fetch could otherwise insert — and therefore play — in
-whichever order their downloads happened to finish, not the order the donations actually arrived
-in. `SongRequestQueue.enqueue()` chains every request onto one promise tail, so a query is not even
-started (its own `fetchAudio()` call not fired) until every request enqueued ahead of it has fully
-resolved — deliberately fully sequential rather than "download in parallel, deliver in order":
-simpler, and ordering is what was asked for, not throughput. `server.ts` constructs ONE
-`SongRequestQueue` instance and hands the same `enqueue` function to both the real webhook path and
+**One queue (`StreamController.enqueueTrack`).** Every donation request and every `play`-by-name
+goes through the one `PlaylistQueue.insertNext()` FIFO via `enqueueTrack(track)` — play after the
+current track ends, in call order, never interrupting, and skippable like any other track. A
+donation's temp-file track carries `ephemeral: true` plus `_onFinished`: `PlaylistQueue.next()`
+never pushes an ephemeral track into `history` (its file is deleted the moment it finishes, so
+`previous()` must never reach it), and `StreamController.next()`/`previous()` call
+`releaseTrack()` on an ephemeral track they move off mid-play, so skipping one still deletes its
+file. A stop or crash mid-donation leaves the file to the 12-hour sweep, as before.
+`status().currentTrack` is `queue.current()` while a session exists
+(`streaming`/`paused`/`reconnecting`) and `null` otherwise. The overlay's playlist window lists
+queued tracks via `PlaylistQueue.windowSnapshot()`, and each visible insertion animates on the
+`pipe:7` burst layer (see `PlaylistWindowAnimator` under "Backend streaming pipeline" above) —
+which covers both donation tracks and `play`-by-name picks from outside the running playlist.
+
+**Donation ordering is by arrival, not by download speed (`donationRequestQueue.ts`).** Two
+donations racing on the external media-search HTTP fetch — or one free-text and one exact-track
+donation arriving moments apart — could otherwise insert, and therefore play, in whichever order
+their work happened to finish, not the order the donations actually arrived in.
+`DonationRequestQueue.enqueue(() => task)` is task-generic (not query-string-specific any more —
+that's what let it become the one shared queue for BOTH action types) and chains every task onto
+one promise tail, so a task is not even started until every task enqueued ahead of it has fully
+settled — deliberately fully sequential rather than "run in parallel, deliver in order": simpler,
+and ordering is what was asked for, not throughput. An exact-track task is two indexed DB
+queries and settles almost instantly once its turn comes; a free-text task waits on the external
+media-search download — so a free-text donation that arrived first still plays before a
+later-arriving exact-track one, even though the exact-track one resolves first once it's running.
+`server.ts` constructs ONE `DonationRequestQueue` instance and both `donationActions.songRequest`
+and `donationActions.libraryTrackRequest` enqueue onto it, shared by both the real webhook path and
 the interaction-rule "Test" button, so a manual test and a real donation queued moments apart still
-resolve in the order they were actually issued.
+resolve in the order they were actually issued. A **head-of-line timeout**
+(`DONATION_TASK_TIMEOUT_MS = 90_000`) is the knock-on of sharing one queue across a
+fetch-bound task and near-instant ones: a hung media-search download would otherwise block every
+later donation of BOTH types for as long as it hangs. After 90s the queue moves on; the timed-out
+task is not cancelled and still resolves its own caller's promise if it eventually completes — one
+request landing out of order (logged), instead of the whole queue stalling. The residual race this
+doesn't remove: two webhooks arriving within one `listEnabledByUser` DB round trip are ordered by
+whichever `matchRules` call resolves first, not by which HTTP request the platform sent first —
+narrow, and unchanged from the original arrival-ordering design's own scope.
 
 **MVP scope note:** `DONATION_TARGET_USER_ID` hard-codes which single
 account's stream every donation is routed to (see "Configuration" below) — there is no per-donor
 or per-channel routing yet.
+
+**Adding library tracks via the media-search service.** Alongside uploading a file, a track can be
+added by typing a text query and previewing the result before it's ever saved to the library.
+`POST /tracks/search-preview` (`{query}`, 400 on a missing/empty string) fetches audio for it from
+the same external media-search service the donation feature uses — `MediaSearchClient`/
+`HttpMediaSearchClient`/`MediaSearchError` moved out of `src/donations/` into `src/media/
+mediaSearchClient.ts` when this landed, since the client itself was never donation-specific, and
+both features now share the one `HttpMediaSearchClient` instance `server.ts` constructs off
+`MEDIA_SEARCH_SERVICE_URL` — no new env var was needed. The fetched audio is written to a
+dedicated temp dir (`path.join(os.tmpdir(), 'super-dj-track-previews')`) and registered in
+`TrackPreviewRegistry` (`src/tracks/trackPreviewRegistry.ts` — in-memory `previewId -> {userId,
+query, tempFilePath, createdAt}`, the same discipline as `MediaMtxAuthRegistry`); a
+`MediaSearchError` from the client maps to a 502 carrying the upstream service's own `detail`
+text. The registry keeps the **original query text**, not just the temp path, for a concrete
+reason: `TrackUploadService.upload()`'s own filename-based name fallback is meaningless for a
+preview file, since its `originalname` is a synthetic `${previewId}.mp3` rather than anything a
+streamer actually typed — so `TrackPreviewService.confirm()` (`src/tracks/trackPreviewService.ts`)
+defaults an empty/omitted name to the registry's stored query instead of falling through to that
+synthetic filename. The frontend streams the temp file straight back for an in-browser `<audio>`
+preview via `GET /tracks/preview/{previewId}` (owner-checked, 404/403 like every other resource
+route, `Cache-Control: no-store`) — **nothing is saved to the library yet** at this point.
+`POST /tracks/from-preview/{previewId}` hands that SAME temp file to the existing
+`TrackUploadService.upload()` **completely unchanged** — no second fetch from the external
+service, no parallel upload code path — and it's that function's own pre-existing `moveFile`
+(a `rename`, falling back to copy+unlink across filesystems) that actually consumes the temp file,
+moving it into `{UPLOADS_DIR}/{userId}/{trackId}/` exactly as a normal upload would.
+`DELETE /tracks/preview/{previewId}` discards an unconfirmed preview explicitly (unlinks the temp
+file, drops the registry entry); a preview abandoned without that explicit discard is reaped by a
+**second** `startTempFileCleanupSweep` instance (`server.ts`, alongside the pre-existing donation
+one, both stopped on shutdown) pointed at that same temp dir — 1 hour max age, 10 min interval,
+deliberately much shorter than the donation feature's 12-hour sweep, since an abandoned preview is
+a forgotten draft the streamer navigated away from, not a track a running stream might still be
+about to play.
+
+`AddTrackDrawer.tsx` (`frontend/src/components/`) gained a tab switcher — "Upload" (`UploadTab`,
+the pre-existing flow, unchanged) and "Через сервис" (`ServiceTab`: query -> search -> listen to
+the preview `<audio>` -> optional name/cover -> confirm). Its `onUploaded: () => void` prop was
+renamed to **`onAdded: (track: Track) => void`** (a breaking change propagated to both call sites,
+`pages/Library.tsx` and the new one in `pages/PlaylistEditor.tsx`), because the playlist editor
+needs the confirmed track's id/name back, not just an "something changed, go refetch" signal: it
+stages the returned track straight into the page's own **pre-existing** local `addTrack()` — the
+playlist's in-memory, unsaved-until-"Save" track list — with no separate "add to playlist" API
+call of its own; nothing reaches `PUT /playlists/{id}/tracks` until the page's existing Save
+button is pressed.
+
+Four things were raised and explicitly accepted during design review rather than engineered around
+(see `docs/superpowers/specs/2026-09-22-track-library-via-media-service-design.md`'s "Reviewed and
+explicitly accepted, not fixed" section for the full reasoning). Three are backstopped by the same
+1-hour sweep rather than fixed at the source: abandoning a pending preview by switching the
+drawer's tab or closing the drawer outright (rather than clicking "Другой запрос"/try-another-
+query, the only path that calls `discardPreview`) leaves the temp file and registry entry to be
+reaped by the sweep; a double-click on "Добавить"/confirm can race `confirm()` against itself,
+since the second call's `moveFile` finds the temp file the first call already renamed away; and a
+track added from the playlist editor is created in the library immediately on confirm even if the
+playlist page's own "Save" is never pressed afterward. **The fourth is NOT sweep-backstopped and
+is currently unmitigated:** switching away from the Upload tab while its own upload request is
+still in flight, then having that request resolve later, can still close the whole drawer out from
+under the streamer — `onSuccess` fires and calls `onOpenChange(false)` regardless of which tab is
+now active, since it's wired on `UploadTab`'s own `useMutation` independently of which tab is
+currently rendered. This is a new edge case the tab switcher itself introduces (a single-tab drawer
+had nothing to switch away *to* mid-request) and is a genuine UX surprise, not a self-healing one
+like the other three.
 
 ## Layout
 
@@ -874,7 +1193,13 @@ src/
                             passwordHash.ts (bcrypt hash/verify)
   tracks/                   trackRepository.ts (Prisma), trackUploadService.ts (multer file ->
                             {UPLOADS_DIR}/{userId}/{trackId}/, ffprobe duration cached on create),
-                            trackRoutes.ts
+                            trackPreviewRegistry.ts (in-memory previewId -> {userId, query,
+                            tempFilePath, createdAt}, same discipline as MediaMtxAuthRegistry),
+                            trackPreviewService.ts (search/getPreviewPath/confirm/discard — the
+                            add-a-track-by-search-query flow, see "Adding library tracks via the
+                            media-search service" below), trackRoutes.ts (incl.
+                            POST /search-preview, GET /preview/:previewId,
+                            POST /from-preview/:previewId, DELETE /preview/:previewId)
   playlists/                playlistRepository.ts (Prisma, ordered PlaylistTrack join),
                             playlistRoutes.ts
   destinations/             destinationRepository.ts (Prisma), destinationRoutes.ts,
@@ -886,6 +1211,11 @@ src/
                             (interface + DestinationLifecyclePhase), customRtmpProvider.ts /
                             youtubeProvider.ts (StreamDestinationProvider impls)
   crypto/streamKeyCipher.ts AES-256-GCM encrypt/decrypt for stream keys at rest
+  media/mediaSearchClient.ts MediaSearchClient/HttpMediaSearchClient/MediaSearchError — the
+                            external media-search HTTP client, shared by
+                            donations/songRequestAction.ts and tracks/trackPreviewService.ts
+                            (moved here out of donations/ when the track-library-via-media-service
+                            feature landed, since it's no longer donation-specific)
   stream/                   localStreamManager.ts (the one manager: per-userId StreamController +
                             per-userId Map<destinationId, DestinationForward>; concurrency/duration
                             caps, auth-registry lifecycle, 'starting'/previewReady),
@@ -903,8 +1233,13 @@ src/
                             localStreamPreviewRoutes.ts (the authenticated HLS proxy, mounted at
                             /local-stream/preview), streamPresetRepository.ts (Prisma; reads the
                             repurposed StreamSession tables) / streamPresetRoutes.ts (mounted at
-                            /stream-presets)
-  playlist/                 queue.ts (cursor + insertNext), types.ts — shared by streamController
+                            /stream-presets), playlistWindowAnimator.ts (PlaylistWindowAnimator —
+                            the one-burst-at-a-time canvas/pipe:7 handoff protocol, coalescing,
+                            abort)
+  playlist/                 queue.ts (cursor + insertNext + windowSnapshot — the keyed rows a
+                            stream's on-screen window shows, incl. queued tracks), window.ts
+                            (WindowRow + window-size constants), types.ts — shared by
+                            streamController
   ffmpeg/                   canvasFeeder.ts (video leg: one-shot renders + heartbeat resend),
                             audioRelay.ts / audioRelayArgs.ts (audio leg: per-track decode-only
                             process), persistentEncoder.ts / persistentEncoderArgs.ts (the one
@@ -913,9 +1248,17 @@ src/
                             destination forward: MediaMTX in, destination RTMP out, never
                             transcoding), segmentArgs.ts (canvas-
                             frame render args + overlay/timer types), duration.ts (ffprobe),
-                            overlayText.ts (formatDuration, playlist-window text),
+                            overlayText.ts (formatDuration — the playlist-window text builders
+                            that used to live here were deleted when Phase C's windowSnapshot()
+                            took over),
                             types.ts (Spawner, ChildProcessLike, PipeSpawner, ChildProcessWithPipes
-                            — pipes: fd3 canvas, fd4 audio, fd5 equalizer, fd6 above-canvas)
+                            — pipes: fd3 canvas, fd4 audio, fd5 equalizer, fd6 above-canvas,
+                            fd7 playlist-window burst layer),
+                            rawFramePacer.ts (paces a raw-video pipe at its declared fps from
+                            wall-clock time; shared by PulseVisualizer and the playlist-window
+                            burst layer), playlistWindowTransition.ts (pure insert-transition
+                            planning + animated row props), playlistWindowFeeder.ts (the pipe:7
+                            frame player: idle transparent frame, showRows, one 600ms animate burst)
   templates/                templateRepository.ts (Prisma), templateRoutes.ts (mounted at
                             /templates, incl. POST /:id/preview), templateTypes.ts
                             (TemplateElement union + isValidTemplateElement(s) +
@@ -927,19 +1270,34 @@ src/
                             thread), renderOverlay.ts (renderTemplatePng() — the one shared,
                             happy-path-only entry point both /templates/{id}/preview and the live
                             pipeline call), blankOverlay.ts (hand-built transparent-PNG fallback,
-                            independent of satori/resvg)
+                            independent of satori/resvg), playlistWindowGeometry.ts
+                            (computePlaylistWindowRegion — the fixed pixel region pipe:7's burst
+                            frames render into), yuva420p.ts (transparentYuva420p/rgbaToYuva420p —
+                            pipe:7's pixel format, BT.601 limited range), playlistWindowRenderWorker.ts
+                            / playlistWindowRenderPool.ts (a SEPARATE small dedicated piscina pool,
+                            not renderWorkerPool.ts, producing pipe:7 burst frames)
   donations/                donatelloWebhookRoutes.ts (POST /webhooks/donatello, X-Key
                             authenticated), donationEvent.ts (payload parsing), ruleMatcher.ts
-                            (parseCommand/matchRules), currencyConverter.ts, mediaSearchClient.ts
-                            (external media-search HTTP client), songRequestAction.ts
-                            (executeSongRequest — fetch, temp-write, insertEphemeralTrack),
-                            songRequestQueue.ts (SongRequestQueue — serializes donation-triggered
-                            requests so play order matches arrival order, not download speed),
+                            (parseCommand/matchRules), currencyConverter.ts, songRequestAction.ts
+                            (executeSongRequest — fetch, temp-write, enqueueTrack; fetches
+                            through media/mediaSearchClient.ts, above),
+                            libraryTrackRequestAction.ts (executeLibraryTrackRequest — exact-track
+                            counterpart: resolve a donated uuid to an owned track, enqueueTrack,
+                            no fetch/temp file), donationActions.ts (ActionType union,
+                            DonationActionHandlers — the shared dispatch object both the webhook
+                            and the rule "Test" route use), donationRequestQueue.ts
+                            (DonationRequestQueue — serializes EVERY donation-triggered action, both
+                            types, so play order matches arrival order, not download/DB speed; a
+                            head-of-line timeout keeps a hung task from blocking later donations),
                             tempFileCleanup.ts (age-based sweep backstop),
                             interactionRuleRepository.ts (Prisma) / interactionRuleRoutes.ts
-                            (mounted at /interaction-rules)
-prisma/                     schema.prisma (User, Session, Track, Playlist, PlaylistTrack,
-                            StreamDestination — incl. the reused youtubeLiveStreamId,
+                            (mounted at /interaction-rules, incl. per-user keyword uniqueness)
+  requestPage/               requestPageRoutes.ts (owner routes, mounted at /request-page: mint/
+                            rotate/disable the public share token), publicRequestPageRoutes.ts
+                            (the ONE unauthenticated read besides /auth/*, mounted at
+                            /public/request-page — token-gated live playlist for donors)
+prisma/                     schema.prisma (User — incl. requestPageToken, Session, Track, Playlist,
+                            PlaylistTrack, StreamDestination — incl. the reused youtubeLiveStreamId,
                             OAuthConnection, OAuthState, StreamSession +
                             StreamSessionDestination — kept under their old names, now read as
                             saved PRESETS, StreamTemplate, InteractionRule) + migrations/
@@ -955,14 +1313,19 @@ frontend/                   React + Vite SPA
                             covers /local-stream/* — start, transport, the destination toggle, the
                             combined status/SSE payload and the preview URLs;
                             streamPresets.ts covers /stream-presets; interactionRules.ts covers
-                            /interaction-rules)
+                            /interaction-rules; tracks.ts covers /tracks incl.
+                            searchPreview/previewUrl/confirmPreview/discardPreview)
     pages/                  route page components (incl. Stream.tsx — THE stream page: start form,
                             preset picker, transport controls, destination checklist, embedded
                             preview; Templates.tsx list/create/delete,
                             TemplateEditor.tsx the Stage 3 drag-and-drop overlay editor;
-                            Donations.tsx — InteractionRule list/create/edit/delete)
+                            Donations.tsx — InteractionRule list/create/edit/delete;
+                            PlaylistEditor.tsx — reuses AddTrackDrawer to stage a newly-added
+                            track into its own local, unsaved-until-"Save" track list)
     components/             shared UI components (Drawer.tsx + the drawers built on it:
-                            AddTrackDrawer, CreatePlaylistDrawer, AddDestinationModal;
+                            AddTrackDrawer — two tabs, "Upload" (UploadTab) and "Через сервис"
+                            (ServiceTab, search/preview/confirm against /tracks/search-preview
+                            etc.), CreatePlaylistDrawer, AddDestinationModal;
                             DestinationToggles.tsx — the checklist, purely local intent, no
                             backend calls of its own; DestinationSettingsDrawer.tsx — the
                             commit-time settings step, one section per destination that needs one;
@@ -1162,14 +1525,17 @@ top of this same CRUD API. `POST /templates/{id}/preview`
 stream pipeline which falls back to a blank overlay instead of failing the request.
 
 `POST /interaction-rules` (`actionType`, `enabled`, `minAmount`, `commandKeyword` — every field
-required and validated: `actionType` must be a known type (only `songRequest` today),
+required and validated: `actionType` must be one of `songRequest`/`libraryTrackRequest`,
 `minAmount` a positive whole number, `commandKeyword` 1-20 letters/digits, stored lowercased and
-**bare, without a leading `!`**), `GET /interaction-rules`, `PUT /interaction-rules/{id}` (same
-validation, full replace — a partial body is rejected, not merged, except `actionType` which
-defaults to the existing rule's own value when omitted), `DELETE /interaction-rules/{id}` — cookie-
-authenticated and owner-scoped (404 if the rule isn't the caller's) like every other resource
-route. Backs the donation song-request feature's per-user rule set — see "Donation-triggered song
-requests" above.
+**bare, without a leading `!`**, and unique per user — **409** if another of the caller's own rules
+already uses it, case-insensitively, regardless of that other rule's action type, since two rules
+sharing a keyword would both fire on one donation), `GET /interaction-rules`,
+`PUT /interaction-rules/{id}` (same validation, full replace — a partial body is rejected, not
+merged, except `actionType` which defaults to the existing rule's own value when omitted; the
+keyword-uniqueness check excludes the rule's own id, so keeping an unchanged keyword never 409s
+against itself), `DELETE /interaction-rules/{id}` — cookie-authenticated and owner-scoped (404 if
+the rule isn't the caller's) like every other resource route. Backs the donation feature's per-user
+rule set — see "Donation-triggered song requests" and "Exact library-track requests" above.
 
 `POST /webhooks/donatello` — the inbound Donatello.to donation event. **Not session-cookie
 authenticated** (Donatello is a server-to-server caller, not a browser): a shared secret is
@@ -1177,6 +1543,21 @@ compared against the `X-Key` request header (`timingSafeEqual`), 401 on a missin
 Answers `200` fast, before any rule matching or media fetch, so Donatello never sees our own
 downstream decisions (no rule matched, the media fetch failed) as a delivery failure and retries
 forever; a structurally invalid payload is the only case that 400s.
+
+`GET /request-page` (returns `{token: string | null}`, never mints one as a side effect),
+`POST /request-page/token` (mints or rotates the caller's public share token, invalidating any
+previous link immediately), `DELETE /request-page/token` (disables it — no `Content-Type` guard,
+matching every other DELETE route in the app, since a bodiless browser DELETE carries no body to
+guard) — cookie-authenticated, no id in the URL (there is exactly one token per account, like the
+local-stream routes). See "Exact library-track requests" above.
+
+`GET /public/request-page/{token}` — **the one unauthenticated read besides `/auth/*`.** A donor
+opens this from the streamer's shared link; the token alone resolves to a user's currently-live
+playlist. 404s a malformed token by shape before any DB call, and the identical 404 for an unknown
+one; `{live: false}` (200, not 404) for a valid token whose stream isn't
+`streaming`/`paused`/`reconnecting`. Every response carries `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`, and exposes only track id/name/duration plus which command
+keyword/minAmount to use (never file paths, covers or the owner's email).
 
 `GET /openapi.json`, `GET /docs` (Swagger UI).
 
@@ -1213,8 +1594,11 @@ never defaulted, because a defaulted shared secret is a backdoor), `DONATELLO_CA
 shared secret `POST /webhooks/donatello` compares against the inbound `X-Key` header),
 `DONATION_TARGET_USER_ID` (the single account id every donation-triggered song request is routed
 to — MVP has no per-donor/per-channel routing, see "Donation-triggered song requests" above), and
-`MEDIA_SEARCH_SERVICE_URL` (base URL of the external media-search service `songRequestAction.ts`
-fetches audio from). The app throws at boot if any of the three is unset.
+`MEDIA_SEARCH_SERVICE_URL` (base URL of the external media-search service — fetched from by both
+`songRequestAction.ts`'s donation-triggered song requests and `TrackPreviewService.search()`'s
+add-a-track-by-query flow, see "Adding library tracks via the media-search service" above; no new
+env var was needed when the latter was added, since both share one `HttpMediaSearchClient`
+instance constructed once in `server.ts`). The app throws at boot if any of the three is unset.
 Optional: `PORT` (3000), `SESSION_TTL_DAYS` (30), `UPLOADS_DIR` (`/data/uploads`), `FIFO_DIR`
 (`/tmp`), `DEFAULT_COVER_PATH`, `BACKGROUND_IMAGE_PATH`, `MEDIAMTX_RTMP_URL`
 (`rtmp://mediamtx:1935`), `MEDIAMTX_HLS_URL` (`http://mediamtx:8888`), `MEDIAMTX_AUTH_PORT` (3001),
@@ -1436,6 +1820,38 @@ so do not quote a number here as measured. What *was* measured about the relay's
 `RelayProcess` bullet above; latency is not among it. For context on the scale: YouTube's own
 ingest→transcode→CDN→player pipeline typically adds ~20-40 s at `latencyPreference: 'normal'`
 regardless, so this hop is unlikely to be the dominant term either way.
+(r) **(Fixed 2026-09-24.)** `CanvasFeeder.render()` had no "latest request wins" rule: two
+overlapping one-shot renders (the once-a-second timer tick racing a burst's canvas-A/canvas-B
+re-bake, or either racing a `pause()` render) shared one fixed overlay PNG path, and whichever
+one-shot ffmpeg process happened to finish last landed on screen regardless of which was issued
+last — occasionally two renders' ffmpeg processes overlapped enough for one to read the file mid-
+overwrite by the other, producing a single frame with the outgoing and incoming rows visibly
+blended/doubled. Reported live, on a real stream, the day the playlist-window burst layer (Phase C)
+made it substantially easier to hit. `render()` now **serializes** every call — a `rendering` flag
+plus a FIFO `pendingQueue`, with the lock handed directly from one call's `finally` to the next
+queued waiter (never released-then-reacquired, which would itself reopen a window for a fresh call
+to slip in) — so two calls' write+spawn+read cycles can never overlap. The first fix attempt tried
+discarding a queued call's result whenever a *newer* call had merely been *issued* (not finished)
+in the meantime, reasoned as a "latest wins" safety net; real review caught that this throws away a
+render's own valid, just-finished work for no reason and, under real host load, could cascade to
+discarding *every* render in a burst, freezing the canvas for the rest of the session — removed
+entirely. Plain FIFO already guarantees the last call to actually finish is the most recently
+issued one, with nothing to discard. Serializing also introduced a new failure mode that didn't
+exist before (a single hung, close-event-never-fires ffmpeg process would now freeze every *later*
+render() call too, not just its own caller) — closed with a `RENDER_TIMEOUT_MS = 5000` timeout in
+`runOneShot` that kills the child (`SIGKILL`) and rejects, letting the queue move on. See
+`test/ffmpeg/canvasFeeder.test.ts`'s "concurrent render() calls" suite for the regression tests
+(FIFO-all-three-run, rejection-doesn't-stall-the-queue, post-close no-op, timeout-releases-queue,
+close-drain-wakes-everyone).
+**Known non-blocking follow-ups from this fix, not yet acted on:** (1) the once-a-second timer
+ticker has no coalescing — if a render is genuinely slow (approaching the 5s timeout) for a
+sustained period, ticks queue up faster than they drain and a track-switch render can end up
+waiting behind a growing backlog of stale ticks; a cheap fix would be having the ticker skip firing
+while a render is already in flight. (2) `StreamController.feedCurrentTrack()`'s auto-advance
+listener is attached to the *decode* child, not gated on the canvas render succeeding — a canvas
+render that rejects (non-zero exit, or now a timeout) already meant, even before this fix, that the
+frame simply doesn't update; not a regression from this fix, but adjacent and worth closing at the
+same time if this area gets touched again.
 
 ## Tooling
 

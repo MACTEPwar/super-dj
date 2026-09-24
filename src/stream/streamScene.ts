@@ -8,19 +8,24 @@ import { CanvasPlacement, GifOverlayConfig } from '../ffmpeg/persistentEncoderAr
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { getAudioDurationSeconds } from '../ffmpeg/duration';
 import { getImageFrameCount } from '../ffmpeg/imageFrameCount';
-import { buildPlaylistWindowLines, buildEphemeralPlaylistWindowLines } from '../ffmpeg/overlayText';
+import { PlaylistWindowFeeder } from '../ffmpeg/playlistWindowFeeder';
 import { Spawner, PipeSpawner } from '../ffmpeg/types';
+import { computePlaylistWindowRegion } from '../render/playlistWindowGeometry';
+import { WindowRow, windowRowLines, PLAYLIST_WINDOW_VISIBLE_ROWS } from '../playlist/window';
 import { ApiError } from '../errors';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { TrackRepository, TrackOverlayOverride } from '../tracks/trackRepository';
 import { TemplateRepository } from '../templates/templateRepository';
 import { TemplateImageService, InvalidAssetIdError } from '../templates/templateImageService';
 import {
-  TemplateElement, TimerElement, EqualizerElement, DEFAULT_TEMPLATE_ELEMENTS,
+  TemplateElement, TimerElement, EqualizerElement, PlaylistElement, DEFAULT_TEMPLATE_ELEMENTS,
   normalizeEqualizerElement, globalPulseStrength,
 } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
+import { measureTextWidth } from '../render/textWidth';
+import { measureRowHeight } from '../render/rowHeight';
+import { MarqueeFeeder, MarqueeRowRect } from '../ffmpeg/marqueeFeeder';
 import { LibraryLike } from './streamController';
 
 // Also declared (as '1280x720'/'30fps'-shaped strings) in src/destinations/youtubeApiClient.ts's
@@ -32,8 +37,7 @@ export const VIDEO_FPS = 30;
 // persistentEncoderArgs.ts's heartbeatFps for why these two must always match.
 export const CANVAS_HEARTBEAT_MS = 200;
 export const CANVAS_HEARTBEAT_FPS = 1000 / CANVAS_HEARTBEAT_MS;
-const PLAYLIST_WINDOW_BEFORE = 2;
-const PLAYLIST_WINDOW_AFTER = 7;
+export const PLAYLIST_WINDOW_FPS = VIDEO_FPS; // Task 10's measured fallback rule may lower this to 15
 
 // Where the encoder pushes. Supplied by the caller because that is the ONE thing this module
 // deliberately knows nothing about: LocalStreamManager passes a minted MediaMTX publish URL, and
@@ -72,14 +76,35 @@ export interface StreamScene {
   playlistName: string;
   tracks: Track[];
   library: LibraryLike;
-  // baseAnchorIndex is PlaylistQueue.positionInBase() — required only when `track` is a donation
-  // track that isn't itself in this scene's playlist; optional otherwise (StreamController always
-  // supplies it, but it's ignored whenever the track IS found in the playlist by name).
-  buildOverlay: (track: Track, baseAnchorIndex?: number) => Promise<NowPlayingOverlay>;
+  // windowRows is PlaylistQueue.windowSnapshot() — the playlist element's lines. omitLivePlaylist
+  // renders "variant A": the first playlist element left out, while the pipe:7 burst layer draws
+  // it instead (see PlaylistWindowAnimator).
+  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean; currentRowOverrideText?: string }) => Promise<NowPlayingOverlay>;
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: (target: RtmpTarget) => PersistentEncoder;
-  createPulseVisualizer?: () => PulseVisualizer;
+  // These four are deliberately `T | undefined` rather than `field?:` — LocalStreamManager's own
+  // forwarding of this object's fields into StreamControllerDeps had the identical `field?:` shape
+  // once, and silently dropping two of them (a real bug found live on the demo stand — see
+  // CLAUDE.md's marquee section) compiled clean and stalled the encoder in production. A required-
+  // but-nullable key forces every future reader of THIS object (there is currently only one:
+  // localStreamManager.ts) to make an explicit decision about each field, closing the same bug
+  // class one layer up from where it was actually fixed.
+  createPulseVisualizer: (() => PulseVisualizer) | undefined;
+  // Present only when the template has an on-canvas playlist element (pipe:7 exists exactly then).
+  createPlaylistWindowFeeder: (() => PlaylistWindowFeeder) | undefined;
+  // Present only when the template has an on-canvas playlist element — same gate as
+  // createPlaylistWindowFeeder.
+  createMarqueeFeeder: (() => MarqueeFeeder) | undefined;
+  // Given the current row's own rendered text (already prefixed "▶ ...") and its index within the
+  // window, decides whether the NAME portion (marker stripped) overflows the space left after the
+  // marker and, if so, the exact rect for just the name (starting right after the marker, so the
+  // marker itself never scrolls and is never covered), the name text alone (what
+  // MarqueeFeeder.activate() should render — NOT the marker), the measured name width, and the
+  // marker text itself (what the caller should use as the baked row's override, so the marker
+  // stays visibly baked while only the name scrolls live). Returns null when the name fits, or
+  // when there's no room for it at all. Absent when the template has no playlist element.
+  resolveMarqueeRow: ((currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; nameText: string; textWidth: number; markerText: string } | null>) | undefined;
 }
 
 // Applies a track's overlayOverride.color to every title/text element's own color — playlist/
@@ -230,31 +255,90 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
     ? path.join(deps.fifoDir, `super-dj-overlay-above-${sceneId}.png`)
     : undefined;
 
-  const buildOverlay = async (track: Track, baseAnchorIndex?: number): Promise<NowPlayingOverlay> => {
-    const currentIndex = tracks.findIndex((t) => t.name === track.name);
-    // A donation-requested track is never in this playlist's own snapshot — falling through to
-    // buildPlaylistWindowLines would always miss and render an empty window for as long as it
-    // plays. baseAnchorIndex (PlaylistQueue.positionInBase()) is what StreamController passes for
-    // exactly this case — the base-playlist track the donation is standing in front of.
-    const playlistLines = currentIndex >= 0
-      ? buildPlaylistWindowLines(tracks, currentIndex, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER)
-      : buildEphemeralPlaylistWindowLines(tracks, baseAnchorIndex ?? -1, track.name, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
+  // The FIRST playlist element gets a burst layer (pipe:7) for insert animations. It stays BAKED
+  // in the canvas like before — the layer is transparent except during a burst (see
+  // PlaylistWindowAnimator). Later playlist elements (rare) are only ever baked. The layer sits
+  // directly above whichever canvas layer the element is baked into.
+  const livePlaylistElement = templateElements.find((e): e is PlaylistElement => e.type === 'playlist') ?? null;
+  const livePlaylistRegion = livePlaylistElement
+    ? computePlaylistWindowRegion(livePlaylistElement, { width: VIDEO_WIDTH, height: VIDEO_HEIGHT }, PLAYLIST_WINDOW_VISIBLE_ROWS)
+    : null;
+  const livePlaylist = livePlaylistElement && livePlaylistRegion
+    ? {
+        element: livePlaylistElement,
+        region: livePlaylistRegion,
+        layer: (canvasPlacement !== 'top' && belowElements.includes(livePlaylistElement) ? 'below' : 'top') as 'below' | 'top',
+      }
+    : null;
+
+  // PlaylistQueue.windowSnapshot() always prefixes the current row with exactly this 2-character
+  // marker (queue.ts: `▶ ${name}`, not itself an exported constant there — matching that file's
+  // own convention of not extracting one). Pinned here as a named length, not a silent
+  // `.slice(0, 2)`, so the coupling is visible if that prefix ever changes.
+  const CURRENT_ROW_MARKER_LENGTH = 2; // '▶' + ' '
+
+  const resolveMarqueeRow = livePlaylist
+    ? async (
+        currentRowText: string,
+        rowIndex: number,
+      ): Promise<{ rect: MarqueeRowRect; nameText: string; textWidth: number; markerText: string } | null> => {
+        const el = livePlaylist.element;
+        const markerText = currentRowText.slice(0, CURRENT_ROW_MARKER_LENGTH);
+        const nameText = currentRowText.slice(CURRENT_ROW_MARKER_LENGTH);
+        const markerWidth = await measureTextWidth(markerText, el.style.fontFamily, el.style.bold, el.style.italic, el.fontSize);
+        // No room for any scrolling text at all — fall back to the plain, already-ellipsis-
+        // truncated full row (no marquee), rather than a marquee rect with zero or negative width.
+        if (markerWidth >= el.width) return null;
+        const nameWidth = await measureTextWidth(nameText, el.style.fontFamily, el.style.bold, el.style.italic, el.fontSize);
+        if (nameWidth <= el.width - markerWidth) return null;
+        const rowHeight = await measureRowHeight(el);
+        const rect: MarqueeRowRect = { x: el.x + markerWidth, y: el.y + rowIndex * rowHeight, width: el.width - markerWidth, height: rowHeight };
+        // Defense in depth: computePlaylistWindowRegion clamps pipe:8's own region to the canvas,
+        // but a rowIndex far enough down (a playlist element near the canvas bottom) could still
+        // push this rect outside that region. blitYuva420p has no bounds check of its own — an
+        // out-of-range y here would write into the wrong plane offsets and corrupt the frame
+        // rather than fail cleanly, so skip the marquee entirely rather than risk that.
+        const region = livePlaylist.region;
+        const fitsRegion = rect.x >= region.x && rect.y >= region.y
+          && rect.x + rect.width <= region.x + region.width
+          && rect.y + rect.height <= region.y + region.height;
+        if (!fitsRegion) return null;
+        return { rect, nameText, textWidth: nameWidth, markerText };
+      }
+    : undefined;
+
+  const buildOverlay = async (
+    track: Track,
+    windowRows: WindowRow[],
+    opts: { omitLivePlaylist?: boolean; currentRowOverrideText?: string } = {},
+  ): Promise<NowPlayingOverlay> => {
+    // The rows come from PlaylistQueue.windowSnapshot() — queued (inserted) tracks included, and
+    // an inserted current track anchored where the base playlist will pick back up.
+    const effectiveRows = opts.currentRowOverrideText !== undefined
+      ? windowRows.map((r) => (r.isCurrent ? { ...r, text: opts.currentRowOverrideText! } : r))
+      : windowRows;
+    const playlistLines = windowRowLines(effectiveRows);
     const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
-    const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => renderTemplatePng({
-      elements: applyOverlayOverride(elements, track.overlayOverride),
-      title: track.name,
-      playlistLines,
-      coverPath: track.coverPath ?? deps.defaultCoverPath,
-      width: VIDEO_WIDTH,
-      height: VIDEO_HEIGHT,
-      fontPath: deps.fontFile,
-      fontFamily: deps.fontFamily,
-      imageAssets: resolveImageAssets(elements, deps.templateImageService, userId, templateId ?? ''),
-      // The track's own background override is the bottom-most thing in the scene, so it only ever
-      // belongs on the lower layer — painted on the upper one it would cover every gif.
-      background: layer === 'below' ? track.overlayOverride?.backgroundColor : undefined,
-    });
+    const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => {
+      // Variant A: identity-filter exactly the live element, so a second playlist element (or
+      // anything else) stays baked. Without omitLivePlaylist this is the original element list.
+      const shown = opts.omitLivePlaylist && livePlaylist ? elements.filter((e) => e !== livePlaylist.element) : elements;
+      return renderTemplatePng({
+        elements: applyOverlayOverride(shown, track.overlayOverride),
+        title: track.name,
+        playlistLines,
+        coverPath: track.coverPath ?? deps.defaultCoverPath,
+        width: VIDEO_WIDTH,
+        height: VIDEO_HEIGHT,
+        fontPath: deps.fontFile,
+        fontFamily: deps.fontFamily,
+        imageAssets: resolveImageAssets(shown, deps.templateImageService, userId, templateId ?? ''),
+        // The track's own background override is the bottom-most thing in the scene, so it only ever
+        // belongs on the lower layer — painted on the upper one it would cover every gif.
+        background: layer === 'below' ? track.overlayOverride?.backgroundColor : undefined,
+      });
+    };
 
     let overlayPng: Buffer;
     let overlayPngAbove: Buffer | undefined;
@@ -325,7 +409,24 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
         : undefined,
       gifOverlays,
       canvasPlacement,
+      playlistWindow: livePlaylist
+        ? {
+            x: livePlaylist.region.x, y: livePlaylist.region.y,
+            width: livePlaylist.region.width, height: livePlaylist.region.height,
+            fps: PLAYLIST_WINDOW_FPS, layer: livePlaylist.layer,
+          }
+        : undefined,
+      marquee: livePlaylist
+        ? { x: livePlaylist.region.x, y: livePlaylist.region.y, width: livePlaylist.region.width, height: livePlaylist.region.height, fps: PLAYLIST_WINDOW_FPS }
+        : undefined,
     }),
+    createPlaylistWindowFeeder: livePlaylist
+      ? () => new PlaylistWindowFeeder({ element: livePlaylist.element, region: livePlaylist.region, fps: PLAYLIST_WINDOW_FPS })
+      : undefined,
+    createMarqueeFeeder: livePlaylist
+      ? () => new MarqueeFeeder({ element: livePlaylist.element, region: livePlaylist.region, fps: PLAYLIST_WINDOW_FPS })
+      : undefined,
+    resolveMarqueeRow,
     createPulseVisualizer: equalizerElement
       ? () => new PulseVisualizer({
           width: Math.round(equalizerElement.width),

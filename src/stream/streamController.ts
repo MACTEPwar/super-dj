@@ -6,13 +6,34 @@ import { PersistentEncoder } from '../ffmpeg/persistentEncoder';
 import { PulseVisualizer } from '../ffmpeg/pulseVisualizer';
 import { NowPlayingOverlay } from '../ffmpeg/segmentArgs';
 import { formatDuration } from '../ffmpeg/overlayText';
+import { InsertTransition } from '../ffmpeg/playlistWindowTransition';
+import { WindowRow, PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER } from '../playlist/window';
 import { ApiError } from '../errors';
 import { SessionState, StreamStatus } from './types';
 import { ReconnectPolicy, ReconnectDecision, SHORT_LIVED_UPTIME_MS } from './reconnectPolicy';
+import { PlaylistWindowAnimator, HANDOFF_HOLD_MS } from './playlistWindowAnimator';
+import { MarqueeRowRect } from '../ffmpeg/marqueeFeeder';
 
 export interface LibraryLike {
   list(): Track[];
   findByName(name: string): Track | undefined;
+}
+
+// The structural subset of PlaylistWindowFeeder this controller drives.
+export interface PlaylistWindowFeederLike {
+  attach(pipe: NodeJS.WritableStream): void;
+  showRows(rows: WindowRow[]): Promise<void>;
+  animate(plan: InsertTransition): Promise<void>;
+  goIdle(): void;
+  close(): void;
+}
+
+// The structural subset of MarqueeFeeder this controller drives.
+export interface MarqueeFeederLike {
+  attach(pipe: NodeJS.WritableStream): void;
+  activate(text: string, rect: MarqueeRowRect, estimatedTextWidth: number): Promise<void>;
+  deactivate(): void;
+  close(): void;
 }
 
 export interface StreamControllerDeps {
@@ -21,8 +42,20 @@ export interface StreamControllerDeps {
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: () => PersistentEncoder;
-  createPulseVisualizer?: () => PulseVisualizer;
-  buildOverlay: (track: Track, baseAnchorIndex?: number) => Promise<NowPlayingOverlay>;
+  // These four are all sourced directly from StreamScene (see buildStreamScene()) and are
+  // deliberately `T | undefined` rather than `field?:` — a real bug (found live on the demo
+  // stand, see CLAUDE.md's marquee section) was LocalStreamManager silently omitting two of
+  // these `?:`-optional fields from the object literal it built, which TypeScript accepted with
+  // zero errors and which stalled the persistent encoder in production. A required-but-nullable
+  // key forces every future caller to make an explicit decision, catching that same omission at
+  // compile time instead of relying on a regression test to keep covering every new field added
+  // here later.
+  createPulseVisualizer: (() => PulseVisualizer) | undefined;
+  // Present only when the template has an on-canvas playlist element — see buildStreamScene().
+  createPlaylistWindowFeeder: (() => PlaylistWindowFeederLike) | undefined;
+  createMarqueeFeeder: (() => MarqueeFeederLike) | undefined;
+  resolveMarqueeRow: ((currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; nameText: string; textWidth: number; markerText: string } | null>) | undefined;
+  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean; currentRowOverrideText?: string }) => Promise<NowPlayingOverlay>;
   // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
   // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so the caller
   // (LocalStreamManager — the only constructor of a StreamController now) can fold in
@@ -49,21 +82,6 @@ export class StreamController {
   private pausedElapsedSeconds = 0;
   private currentOverlay: NowPlayingOverlay | null = null;
   private timerTicker: NodeJS.Timeout | null = null;
-  // What's actually audible right now — set on every feedCurrentTrack() call. Normally identical
-  // to queue.current(), but the two deliberately diverge for the whole span a donation track is
-  // interrupting: queue.current() stays pointed at the real playlist's resume point (untouched —
-  // see PlaylistQueue.shiftDonation), while this reflects the donation track that's actually
-  // playing. status()/pause()/resume()/reconnect all read THIS, never queue.current(), for
-  // exactly that reason — using queue.current() during a donation interruption would pause/
-  // reconnect/report the wrong track.
-  private nowPlayingTrack: Track | null = null;
-  // Non-null for the entire span from "a donation track first interrupted something" through
-  // "the last queued donation track finished and the interrupted track resumed" — set once per
-  // episode (NOT overwritten by later donation arrivals queueing behind the first one), cleared
-  // the instant the original track is handed back to feedCurrentTrack(). next()/previous() reject
-  // outright while this is set (a donation track can never be skipped), and the close handler
-  // consults it instead of always calling advanceToNextTrack().
-  private interruptedForDonation: { track: Track; elapsedSeconds: number } | null = null;
   // Distinguishes "this track ended naturally" (advance to the next one) from "this track was
   // superseded/torn down by next/previous/pause/stop/start" (do nothing) — same role
   // segmentGeneration always had, renamed because there's no more per-segment process for
@@ -71,6 +89,21 @@ export class StreamController {
   // respawn captures this value at schedule time and bails if it no longer matches when its timer
   // fires (the same pattern feedCurrentTrack already uses for a stale overlay probe).
   private sessionGeneration = 0;
+
+  // The playlist window's pipe:7 burst layer — both null when the template has no on-canvas
+  // playlist element.
+  private playlistWindowFeeder: PlaylistWindowFeederLike | null = null;
+  private playlistAnimator: PlaylistWindowAnimator | null = null;
+  private marqueeFeeder: MarqueeFeederLike | null = null;
+  private marqueeOverrideText: string | undefined = undefined;
+  // The rows the canvas currently shows in the live playlist element (variant B's rows).
+  private bakedRows: WindowRow[] = [];
+  // The track whose overlay is actually on screen — NOT always queue.current(), which a paused
+  // next()/previous() moves without feeding.
+  private bakedTrack: Track | null = null;
+  // Separate from sessionGeneration on purpose: pause() bumps sessionGeneration, and a burst's
+  // canvas-B bake must still land while paused. Only a track change / teardown invalidates a bake.
+  private overlayGeneration = 0;
 
   // When the currently-running encoder (if any) was spawned — used to compute how long it lived
   // once it exits unexpectedly (see reconnectPolicy.ts's SHORT_LIVED_UPTIME_MS: exit codes carry
@@ -136,11 +169,7 @@ export class StreamController {
   async resume(): Promise<void> {
     if (this.state !== 'paused') throw new ApiError(409, 'stream is not paused');
     this.state = 'streaming';
-    // nowPlayingTrack, not queue.current(): if a donation track was interrupting when pause() was
-    // called, queue.current() still points at the ORIGINAL interrupted track, not the donation
-    // track that was actually paused — resuming from queue.current() would silently abandon the
-    // donation track mid-playback and jump back to the wrong one.
-    const track = this.nowPlayingTrack ?? this.deps.queue.current();
+    const track = this.deps.queue.current();
     if (track) {
       await this.feedCurrentTrack(track, this.pausedElapsedSeconds);
     }
@@ -149,9 +178,10 @@ export class StreamController {
 
   async next(): Promise<void> {
     if (this.state === 'idle' || this.state === 'error') throw new ApiError(409, 'stream is not active');
-    if (this.interruptedForDonation !== null) throw new ApiError(409, 'cannot skip a donation-requested track');
+    const before = this.deps.queue.current();
     const track = this.deps.queue.next();
     if (!track) throw new ApiError(409, 'no tracks in queue');
+    if (before && before !== track) this.releaseTrack(before);
     this.pausedElapsedSeconds = 0;
     if (this.state === 'streaming') {
       await this.feedCurrentTrack(track);
@@ -161,8 +191,9 @@ export class StreamController {
 
   async previous(): Promise<void> {
     if (this.state === 'idle' || this.state === 'error') throw new ApiError(409, 'stream is not active');
-    if (this.interruptedForDonation !== null) throw new ApiError(409, 'cannot skip a donation-requested track');
+    const before = this.deps.queue.current();
     const track = this.deps.queue.previous();
+    if (before && track && before !== track) this.releaseTrack(before);
     this.pausedElapsedSeconds = 0;
     if (track && this.state === 'streaming') {
       await this.feedCurrentTrack(track);
@@ -171,15 +202,69 @@ export class StreamController {
   }
 
   private async feedCurrentTrack(track: Track, startOffsetSeconds = 0): Promise<void> {
+    // A track change (or resume) supersedes any in-progress window burst: the layer goes
+    // transparent at once and any pending canvas A/B bake from it is invalidated, so the new
+    // track's full overlay (window included) is what lands — no stale moving rows on top.
+    this.playlistAnimator?.abort();
+    this.overlayGeneration += 1;
+    const rows = this.windowRows();
     const generation = ++this.sessionGeneration;
-    const overlay = await this.deps.buildOverlay(track, this.deps.queue.positionInBase());
+
+    if (this.deps.resolveMarqueeRow) {
+      const rowIndex = rows.findIndex((r) => r.isCurrent);
+      const currentRow = rowIndex >= 0 ? rows[rowIndex] : undefined;
+      if (currentRow) {
+        // Never let a marquee failure fail the whole track feed — before the marquee existed,
+        // buildOverlay's own render failures already degraded to a blank overlay rather than
+        // rejecting (see its try/catch), and this must degrade the same way: to plain,
+        // already-ellipsis-truncated static text, not a broken stream. A real failure mode this
+        // guards: measureRowHeight's probe can throw for some template styles (see its own doc
+        // comment), and a strip render can time out — either would otherwise reject
+        // feedCurrentTrack entirely, breaking start()/next()/previous() and stalling auto-advance.
+        try {
+          const resolved = await this.deps.resolveMarqueeRow(currentRow.text, rowIndex);
+          if (generation !== this.sessionGeneration) return;
+          // Only bake the blank-marker override when there's actually a feeder that will draw
+          // the scrolling name over it — resolveMarqueeRow/createMarqueeFeeder are two separate
+          // optional deps (always set together by streamScene.ts's own livePlaylist gate, but
+          // nothing in the type system enforces that pairing), and hiding the name with nothing
+          // drawing it would be strictly worse than the plain truncated text this falls back to.
+          if (resolved && this.marqueeFeeder) {
+            await this.marqueeFeeder.activate(resolved.nameText, resolved.rect, resolved.textWidth);
+            if (generation !== this.sessionGeneration) return;
+            this.marqueeOverrideText = resolved.markerText;
+          } else {
+            this.marqueeFeeder?.deactivate();
+            this.marqueeOverrideText = undefined;
+          }
+        } catch (err) {
+          console.error('marquee resolution failed, falling back to plain truncated text', err);
+          this.marqueeFeeder?.deactivate();
+          this.marqueeOverrideText = undefined;
+        }
+      } else {
+        this.marqueeFeeder?.deactivate();
+        this.marqueeOverrideText = undefined;
+      }
+    }
+
+    const overlay = this.marqueeOverrideText !== undefined
+      ? await this.deps.buildOverlay(track, rows, { currentRowOverrideText: this.marqueeOverrideText })
+      : await this.deps.buildOverlay(track, rows);
     // The generation may have advanced, or the session may have left 'streaming', while we were
     // awaiting the overlay — a stale overlay must never be fed.
     if (generation !== this.sessionGeneration) return;
     if (this.state !== 'streaming') return;
 
-    this.nowPlayingTrack = track;
+    // Re-feeding the SAME track (resume, or previous() landing back on it) leaves
+    // bakedTrack === queue.current() during the wait above, so an enqueueTrack() could have started
+    // a burst meanwhile. Cancel it here, before this full render lands, so the catch-up below
+    // restarts it cleanly instead of racing it (baked rows under moving pipe:7 rows).
+    this.playlistAnimator?.abort();
+    this.overlayGeneration += 1;
     this.currentOverlay = overlay;
+    this.bakedRows = this.displayRows(rows);
+    this.bakedTrack = track;
     this.trackStartedAt = Date.now();
     this.trackStartOffsetSeconds = startOffsetSeconds;
     const child = this.audioRelay!.switchTrack(track.audioPath, startOffsetSeconds);
@@ -191,69 +276,70 @@ export class StreamController {
     child.once('close', () => {
       if (generation !== this.sessionGeneration) return;
       if (this.state !== 'streaming') return;
-      // Self-disarming: track objects can be re-fed (e.g. previous() pops an ephemeral track back
-      // out of PlaylistQueue's history and plays it again) — clearing the hook before invoking it
-      // guarantees it can never fire a second time for the same track, even across a later re-feed
-      // whose own close event would otherwise find it still armed.
-      const onFinished = track._onFinished;
-      track._onFinished = undefined;
-      try {
-        onFinished?.();
-      } catch (err) {
-        console.error('a track\'s _onFinished hook threw', err);
-      }
-      this.advanceAfterTrackFinished();
+      this.releaseTrack(track);
+      this.advanceToNextTrack();
     });
-  }
 
-  // What runs a track's natural end into next — split from advanceToNextTrack() because a
-  // donation episode in progress must never fall through to the ordinary playlist advance: while
-  // interruptedForDonation is set, this track's natural end means either "play the next queued
-  // donation track" or, once that queue is empty, "hand the original interrupted track back to
-  // feedCurrentTrack() at the position it was cut off at" — never queue.next().
-  private advanceAfterTrackFinished(): void {
-    if (this.interruptedForDonation !== null) {
-      if (this.deps.queue.hasDonationPending()) {
-        this.playNextDonationTrack();
-      } else {
-        const { track, elapsedSeconds } = this.interruptedForDonation;
-        this.interruptedForDonation = null;
-        this.pausedElapsedSeconds = 0;
-        this.deps.onStatusChanged?.();
-        this.feedCurrentTrack(track, elapsedSeconds).catch((err) => {
-          console.error('failed to resume the track a donation request interrupted', err);
-        });
-      }
-      return;
+    // An enqueueTrack() that arrived while this feed was awaiting its overlay skipped its burst
+    // (bakedTrack was still the previous track then), so `rows` may predate it. Catch the window
+    // up; a plain no-op ('none' plan, no bake) when nothing was queued in the meantime.
+    if (this.playlistAnimator && generation === this.sessionGeneration && this.state === 'streaming') {
+      this.playlistAnimator.queueChanged(this.displayRows(this.windowRows()));
     }
-    this.advanceToNextTrack();
   }
 
-  // Begins (or continues) a donation-interrupt episode: pulls the next queued donation track and
-  // feeds it immediately. Called both for the very first donation track (from
-  // interruptCurrentTrackForDonation) and for every subsequent one once its predecessor finishes
-  // (from advanceAfterTrackFinished) — same call, same generation-bump-based supersession safety
-  // feedCurrentTrack already provides for next()/previous()/etc.
-  private playNextDonationTrack(): void {
-    const track = this.deps.queue.shiftDonation();
-    this.pausedElapsedSeconds = 0;
-    if (!track) return; // Only reachable if called when hasDonationPending() was already false.
-    this.feedCurrentTrack(track).catch((err) => {
-      console.error('failed to play the next donation-requested track', err);
-    });
+  private windowRows(): WindowRow[] {
+    return this.deps.queue.windowSnapshot(PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
   }
 
-  // Captures what's playing right now (track + elapsed position) as the thing to resume once the
-  // whole donation queue drains, then immediately switches to the first donation track. Only ever
-  // called once per episode — see insertEphemeralTrack's interruptedForDonation === null guard.
-  private interruptCurrentTrackForDonation(): void {
-    const track = this.nowPlayingTrack ?? this.deps.queue.current();
-    if (!track) return;
-    const elapsedSeconds = this.state === 'paused' ? this.pausedElapsedSeconds : this.elapsedTrackSeconds();
-    this.interruptedForDonation = { track, elapsedSeconds };
-    this.stopTimerTicker();
-    this.state = 'streaming'; // Waking a paused stream is deliberate — a donation should be heard right away, not wait for a manual resume.
-    this.playNextDonationTrack();
+  // Rows as actually DISPLAYED. pipe:7 (PlaylistWindowFeeder) renders WindowRow[] directly with
+  // no override mechanism of its own — unlike the baked-canvas render (buildOverlay), which
+  // replaces the isCurrent row's text independently via its own currentRowOverrideText opt —
+  // so anything handed to the animator/feeder must already reflect the marquee override, or the
+  // burst layer would draw the current row's FULL name underneath pipe:8's own scrolling marker,
+  // doubling it and covering the marquee's clean blank-marker baseline for the whole burst.
+  private displayRows(rows: WindowRow[]): WindowRow[] {
+    return this.marqueeOverrideText !== undefined
+      ? rows.map((r) => (r.isCurrent ? { ...r, text: this.marqueeOverrideText! } : r))
+      : rows;
+  }
+
+  // The animator's hook back into the canvas: builds the current track's overlay from `rows`
+  // (variant A omits the live playlist element), makes it currentOverlay — so the once-a-second
+  // timer tick and pause()'s frozen frame re-render the RIGHT variant — and renders it. Returns
+  // false when a track change (feedCurrentTrack bumps overlayGeneration) made the result stale.
+  private async bakeCanvas(rows: WindowRow[], opts: { omitLivePlaylist: boolean }): Promise<boolean> {
+    const generation = this.overlayGeneration;
+    // The track actually on screen — NOT queue.current(), which a paused next()/previous() moves
+    // without feeding (nothing changes on screen until resume).
+    const track = this.bakedTrack;
+    if (!track || !this.canvasFeeder) return false;
+    const buildOpts = this.marqueeOverrideText !== undefined
+      ? { omitLivePlaylist: opts.omitLivePlaylist, currentRowOverrideText: this.marqueeOverrideText }
+      : opts;
+    const overlay = await this.deps.buildOverlay(track, rows, buildOpts);
+    if (generation !== this.overlayGeneration || !this.canvasFeeder) return false;
+    if (this.state !== 'streaming' && this.state !== 'paused') return false;
+    this.currentOverlay = overlay;
+    if (!opts.omitLivePlaylist) this.bakedRows = this.displayRows(rows);
+    const elapsed = this.state === 'paused' ? this.pausedElapsedSeconds : this.elapsedTrackSeconds();
+    await this.canvasFeeder.render(overlay, this.timerText(elapsed));
+    return true;
+  }
+
+  // Fires a one-off track's cleanup hook once it stops being the current track — naturally (the
+  // decode 'close' above) or because next()/previous() moved off it mid-play. Self-disarming:
+  // track objects can be re-fed (a non-ephemeral one via previous()), so the hook is cleared
+  // before it's invoked and can never fire twice. A throwing hook is logged, never propagated —
+  // it must not skip auto-advance or reject a transport command.
+  private releaseTrack(track: Track): void {
+    const onFinished = track._onFinished;
+    track._onFinished = undefined;
+    try {
+      onFinished?.();
+    } catch (err) {
+      console.error('a track\'s _onFinished hook threw', err);
+    }
   }
 
   private startTimerTicker(): void {
@@ -300,6 +386,16 @@ export class StreamController {
   private teardown(): void {
     this.clearPendingReconnect();
     this.stopTimerTicker();
+    this.playlistAnimator?.abort();
+    this.playlistWindowFeeder?.close();
+    this.playlistAnimator = null;
+    this.playlistWindowFeeder = null;
+    this.marqueeFeeder?.close();
+    this.marqueeFeeder = null;
+    this.marqueeOverrideText = undefined;
+    this.bakedRows = [];
+    this.bakedTrack = null;
+    this.overlayGeneration += 1;
     this.audioRelay?.close();
     this.canvasFeeder?.close();
     this.pulseVisualizer?.close();
@@ -313,8 +409,6 @@ export class StreamController {
     this.trackStartOffsetSeconds = 0;
     this.pausedElapsedSeconds = 0;
     this.currentOverlay = null;
-    this.nowPlayingTrack = null;
-    this.interruptedForDonation = null;
   }
 
   // Creates the persistent encoder and wires CanvasFeeder/AudioRelay/PulseVisualizer to its
@@ -337,6 +431,22 @@ export class StreamController {
       this.pulseVisualizer = this.deps.createPulseVisualizer();
       this.pulseVisualizer.attach(child.pulsePipe);
       this.audioRelay.attachTap(this.pulseVisualizer.audioSink);
+    }
+    if (this.deps.createPlaylistWindowFeeder) {
+      const feeder = this.deps.createPlaylistWindowFeeder();
+      feeder.attach(child.playlistWindowPipe);
+      this.playlistWindowFeeder = feeder;
+      this.playlistAnimator = new PlaylistWindowAnimator({
+        feeder,
+        bakeCanvas: (rows, opts) => this.bakeCanvas(rows, opts),
+        getBakedRows: () => this.bakedRows,
+        sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref(); }),
+        holdMs: HANDOFF_HOLD_MS,
+      });
+    }
+    if (this.deps.createMarqueeFeeder) {
+      this.marqueeFeeder = this.deps.createMarqueeFeeder();
+      this.marqueeFeeder.attach(child.marqueePipe);
     }
   }
 
@@ -363,22 +473,13 @@ export class StreamController {
   // all running indefinitely against a dead pipe until a human called start()/stop().
   private handleUnexpectedExit(exitCode: number | null): void {
     const uptimeMs = this.encoderStartedAt !== null ? Date.now() - this.encoderStartedAt : 0;
-    // Must be captured BEFORE teardown() resets trackStartedAt/trackStartOffsetSeconds/
-    // nowPlayingTrack/interruptedForDonation — this is the position a successful reconnect needs
-    // to resume from. nowPlayingTrack, not queue.current(): if a donation track was interrupting
-    // when the encoder died, queue.current() still points at the track it interrupted, not the
-    // donation track that was actually playing.
+    // Must be captured BEFORE teardown() resets trackStartedAt/trackStartOffsetSeconds — this is
+    // the position a successful reconnect needs to resume from.
     const capturedElapsedSeconds = this.elapsedTrackSeconds();
-    const capturedTrack = this.nowPlayingTrack ?? this.deps.queue.current();
-    const wasInterruptedForDonation = this.interruptedForDonation;
+    const capturedTrack = this.deps.queue.current();
     const generationAtExit = this.sessionGeneration;
 
     this.teardown();
-    // Restored right away, not just at reconnect time — a donation track was still
-    // non-skippable a moment before the crash, and stays non-skippable for the whole
-    // 'reconnecting' window too; next()/previous() must keep rejecting throughout, not just
-    // start rejecting again once performReconnect() eventually runs.
-    this.interruptedForDonation = wasInterruptedForDonation;
 
     const decision: ReconnectDecision = (this.deps.reconnectPolicy && capturedTrack)
       ? this.evaluateReconnect(uptimeMs)
@@ -433,16 +534,6 @@ export class StreamController {
     this.state = 'streaming';
     this.deps.onStatusChanged?.();
 
-    // A donation interruption survives the crash (handleUnexpectedExit restores
-    // interruptedForDonation right after teardown(), and next()/previous() reject outright while
-    // it's set — so unlike the plain-playlist case below, the queue genuinely cannot have moved
-    // on): resume exactly the captured donation track at exactly its captured offset.
-    if (this.interruptedForDonation !== null) {
-      await this.feedCurrentTrack(capturedTrack, capturedElapsedSeconds);
-      this.resetReconnectBookkeeping();
-      return;
-    }
-
     const current = this.deps.queue.current();
     if (!current) return;
     // next()/previous() are allowed while 'reconnecting' (they just mutate the queue without
@@ -461,30 +552,35 @@ export class StreamController {
   playByName(name: string): void {
     const track = this.deps.library.findByName(name);
     if (!track) throw new ApiError(404, `track not found: ${name}`);
-    this.deps.queue.insertNext(track);
-    this.deps.onStatusChanged?.();
+    this.enqueueTrack(track);
   }
 
-  // Like playByName, but the caller already has a Track object in hand (an ephemeral, DB-less
-  // track built by the donation song-request flow) instead of a name to look up in the library —
-  // and, unlike playByName, it interrupts whatever is playing right now rather than waiting for it
-  // to end. Only the FIRST donation track of an episode triggers the interrupt: while
-  // interruptedForDonation is already set, later arrivals just extend the donation FIFO and will
-  // play in their turn once the one ahead of them finishes (see advanceAfterTrackFinished).
-  insertEphemeralTrack(track: Track): void {
-    this.deps.queue.enqueueDonation(track);
-    if ((this.state === 'streaming' || this.state === 'paused') && this.interruptedForDonation === null) {
-      this.interruptCurrentTrackForDonation();
+  // The ONE "queue this next" path: plays after the current track ends, never interrupts, joins
+  // history normally unless ephemeral (see PlaylistQueue.next()). Used by playByName and by every
+  // donation request (free-text via songRequestAction.ts, exact via libraryTrackRequestAction.ts,
+  // Phase A).
+  enqueueTrack(track: Track): void {
+    this.deps.queue.insertNext(track);
+    // Animate only when a picture is actually being produced, AND only while the queue's current
+    // track is still the one on screen. After a paused next()/previous() the snapshot's current row
+    // has moved but the screen deliberately hasn't (nothing changes until resume). Baking now
+    // would show the NEXT track's title/cover under the old audio. In both skip cases the next
+    // feedCurrentTrack() simply bakes the new snapshot.
+    if (this.playlistAnimator && (this.state === 'streaming' || this.state === 'paused')
+      && this.deps.queue.current() === this.bakedTrack) {
+      this.playlistAnimator.queueChanged(this.displayRows(this.windowRows()));
     }
     this.deps.onStatusChanged?.();
   }
 
   status(): StreamStatus {
+    // Only while a session exists: an idle or errored controller keeps its own queue
+    // (LocalStreamManager retains only an errored entry — an idle one is discarded on stop()), and
+    // reporting queue.current() then would claim a track is playing when none is.
+    const live = this.state === 'streaming' || this.state === 'paused' || this.state === 'reconnecting';
     return {
       state: this.state,
-      // nowPlayingTrack, not queue.current(): during a donation interruption they deliberately
-      // differ, and it's what's actually audible that a status consumer needs to see.
-      currentTrack: this.nowPlayingTrack?.name ?? null,
+      currentTrack: live ? this.deps.queue.current()?.name ?? null : null,
       nextTrack: this.deps.queue.peekNext()?.name ?? null,
     };
   }

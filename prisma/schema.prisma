@@ -12,6 +12,11 @@ model User {
   email              String              @unique
   passwordHash       String
   createdAt          DateTime            @default(now())
+  // Bearer token for the public "request a track" page (/r/<token>). 128-bit hex, minted only by
+  // an explicit owner action, rotated by overwrite, disabled by null. Deliberately NOT the userId,
+  // so it can rotate without touching account identity. See the 2026-09-23 donation
+  // library-track-request design spec.
+  requestPageToken   String?             @unique
   sessions           Session[]
   tracks             Track[]
   playlists          Playlist[]

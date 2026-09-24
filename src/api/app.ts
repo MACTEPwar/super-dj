@@ -3,9 +3,11 @@ import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { AuthService } from '../auth/authService';
 import { createAuthRouter } from '../auth/authRoutes';
+import { UserRepository } from '../auth/userRepository';
 import { TrackRepository } from '../tracks/trackRepository';
 import { TrackUploadService } from '../tracks/trackUploadService';
 import { createTrackRouter } from '../tracks/trackRoutes';
+import { TrackPreviewService } from '../tracks/trackPreviewService';
 import { PlaylistRepository } from '../playlists/playlistRepository';
 import { createPlaylistRouter } from '../playlists/playlistRoutes';
 import { DestinationRepository } from '../destinations/destinationRepository';
@@ -25,13 +27,17 @@ import { createStreamPresetRouter } from '../stream/streamPresetRoutes';
 import { InteractionRuleRepository } from '../donations/interactionRuleRepository';
 import { createInteractionRuleRouter } from '../donations/interactionRuleRoutes';
 import { createDonatelloWebhookRouter, DonatelloWebhookDeps } from '../donations/donatelloWebhookRoutes';
+import { createRequestPageRouter } from '../requestPage/requestPageRoutes';
+import { createPublicRequestPageRouter } from '../requestPage/publicRequestPageRoutes';
 import { errorHandler } from './errorHandler';
 import { openApiSpec } from './openapi';
 
 export interface AppDeps {
   authService: AuthService;
+  userRepository: UserRepository;
   trackRepository: TrackRepository;
   trackUploadService: TrackUploadService;
+  trackPreviewService: TrackPreviewService;
   playlistRepository: PlaylistRepository;
   destinationRepository: DestinationRepository;
   destinationEncryptionKey: string;
@@ -54,7 +60,7 @@ export function createApp(deps: AppDeps): Express {
   app.use(cors({ origin: deps.frontendOrigin, credentials: true }));
   app.use(express.json());
   app.use('/auth', createAuthRouter(deps.authService));
-  app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository));
+  app.use('/tracks', createTrackRouter(deps.authService, deps.trackUploadService, deps.trackRepository, deps.trackPreviewService));
   app.use('/playlists', createPlaylistRouter(deps.authService, deps.playlistRepository, deps.trackRepository));
   // Both routers share this prefix safely today because createDestinationRouter has no GET /:id —
   // adding one would shadow createOAuthRouter's GET /:provider/oauth/{start,callback}. Keep that
@@ -65,10 +71,12 @@ export function createApp(deps: AppDeps): Express {
   app.use('/stream-presets', createStreamPresetRouter(deps.authService, deps.streamPresetRepository, deps.playlistRepository, deps.templateRepository, deps.destinationRepository));
   app.use('/interaction-rules', createInteractionRuleRouter(deps.authService, deps.interactionRuleRepository, {
     converter: deps.donatelloWebhookDeps.converter,
-    executeSongRequest: deps.donatelloWebhookDeps.executeSongRequest,
+    actions: deps.donatelloWebhookDeps.actions,
   }));
   app.use('/webhooks/donatello', createDonatelloWebhookRouter({ ...deps.donatelloWebhookDeps, ruleRepository: deps.interactionRuleRepository }));
   app.use('/templates', createTemplateRouter(deps.authService, deps.templateRepository, deps.trackRepository, deps.templateRendererDeps, deps.templateImageService));
+  app.use('/request-page', createRequestPageRouter(deps.authService, deps.userRepository));
+  app.use('/public/request-page', createPublicRequestPageRouter({ users: deps.userRepository, streams: deps.localStreamManager, playlists: deps.playlistRepository, rules: deps.interactionRuleRepository }));
   app.get('/openapi.json', (_req, res) => res.json(openApiSpec));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
   app.use(errorHandler);

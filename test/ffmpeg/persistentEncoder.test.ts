@@ -12,6 +12,8 @@ function fakeChild(): ChildProcessWithPipes & { emitExit: (code: number | null) 
     audioPipe: new PassThrough(),
     pulsePipe: new PassThrough(),
     aboveCanvasPipe: new PassThrough(),
+    playlistWindowPipe: new PassThrough(),
+    marqueePipe: new PassThrough(),
     kill: jest.fn(),
     once: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
       if (event === 'exit') exitListener = listener as (code: number | null) => void;
@@ -24,6 +26,7 @@ function buildEncoder(spawner: PipeSpawner) {
   return new PersistentEncoder({
     spawner, width: 1280, height: 720, fps: 30, heartbeatFps: 5,
     rtmpUrl: 'rtmp://x', streamKey: 'k', backgroundPath: '/assets/background.png',
+    playlistWindow: undefined, marquee: undefined,
   });
 }
 

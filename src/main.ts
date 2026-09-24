@@ -3,7 +3,7 @@ import { buildServer } from './server';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort, tempFileCleanupSweep } = buildServer(config);
+  const { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort, tempFileCleanupSweep, previewCleanupSweep, previewRegistryPruneSweep } = buildServer(config);
 
   await prisma.$connect();
 
@@ -22,6 +22,8 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     tempFileCleanupSweep.stop();
+    previewCleanupSweep.stop();
+    previewRegistryPruneSweep.stop();
     try {
       await prisma.$disconnect();
     } catch (err) {

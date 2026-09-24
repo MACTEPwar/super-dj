@@ -7,6 +7,8 @@ import { SessionRepository } from './auth/sessionRepository';
 import { AuthService } from './auth/authService';
 import { TrackRepository } from './tracks/trackRepository';
 import { TrackUploadService } from './tracks/trackUploadService';
+import { TrackPreviewRegistry } from './tracks/trackPreviewRegistry';
+import { TrackPreviewService } from './tracks/trackPreviewService';
 import { PlaylistRepository } from './playlists/playlistRepository';
 import { DestinationRepository } from './destinations/destinationRepository';
 import { OAuthConnectionRepository } from './destinations/oauthConnectionRepository';
@@ -27,9 +29,11 @@ import { TemplateImageService } from './templates/templateImageService';
 import { StreamPresetRepository } from './stream/streamPresetRepository';
 import { InteractionRuleRepository } from './donations/interactionRuleRepository';
 import { StubCurrencyConverter } from './donations/currencyConverter';
-import { HttpMediaSearchClient } from './donations/mediaSearchClient';
+import { HttpMediaSearchClient } from './media/mediaSearchClient';
 import { executeSongRequest } from './donations/songRequestAction';
-import { SongRequestQueue } from './donations/songRequestQueue';
+import { executeLibraryTrackRequest } from './donations/libraryTrackRequestAction';
+import { DonationRequestQueue } from './donations/donationRequestQueue';
+import { DonationActionHandlers } from './donations/donationActions';
 import { startTempFileCleanupSweep } from './donations/tempFileCleanup';
 import * as os from 'os';
 import * as path from 'path';
@@ -64,11 +68,11 @@ export function createSpawner(): Spawner {
 export function createPipeSpawner(): PipeSpawner {
   return (command: string, args: string[]): ChildProcessWithPipes => {
     // fd0 (stdin) unused, fd1 (stdout) unused — this process's real output is the RTMP push, not
-    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4/fd5/fd6
-    // are the video/audio/pulse/above-canvas pipes ffmpeg's own args reference as
-    // pipe:3/pipe:4/pipe:5/pipe:6. The slots are always opened; whether ffmpeg is told to read
-    // pipe:5 or pipe:6 depends on the template (see buildPersistentEncoderArgs).
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] });
+    // anything on stdout. fd2 (stderr) drained the same way createSpawner() does. fd3/fd4/fd5/fd6/
+    // fd7/fd8 are the video/audio/pulse/above-canvas/playlist-window/marquee pipes ffmpeg's own args reference
+    // as pipe:3/pipe:4/pipe:5/pipe:6/pipe:7/pipe:8. The slots are always opened; whether ffmpeg is told to
+    // read pipe:5, pipe:6, pipe:7 or pipe:8 depends on the template (see buildPersistentEncoderArgs).
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] });
     child.on('error', (err) => {
       console.error('persistent encoder process failed to spawn', err);
     });
@@ -84,6 +88,8 @@ export function createPipeSpawner(): PipeSpawner {
     const audioPipe = stdio[4];
     const pulsePipe = stdio[5];
     const aboveCanvasPipe = stdio[6];
+    const playlistWindowPipe = stdio[7];
+    const marqueePipe = stdio[8];
     // An 'error' event with no listener is an uncaught exception in Node, which would crash the
     // whole process (every tenant's active stream, not just this one) — the same hazard the
     // earlier per-segment pipeline's FIFO write-stream guard existed for. Writes fail with EPIPE
@@ -93,7 +99,9 @@ export function createPipeSpawner(): PipeSpawner {
     audioPipe.on('error', (err) => { console.error('audio pipe write error', err); });
     pulsePipe.on('error', (err) => { console.error('pulse pipe write error', err); });
     aboveCanvasPipe.on('error', (err) => { console.error('above-canvas pipe write error', err); });
-    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe, pulsePipe, aboveCanvasPipe }) as ChildProcessWithPipes;
+    playlistWindowPipe.on('error', (err) => { console.error('playlist window pipe write error', err); });
+    marqueePipe.on('error', (err) => { console.error('marquee pipe write error', err); });
+    return Object.assign(child as unknown as ChildProcessLike, { videoPipe, audioPipe, pulsePipe, aboveCanvasPipe, playlistWindowPipe, marqueePipe }) as ChildProcessWithPipes;
   };
 }
 
@@ -150,6 +158,29 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   const interactionRuleRepository = new InteractionRuleRepository(prisma);
   const donationTempDir = path.join(os.tmpdir(), 'super-dj-donation-songs');
   const mediaSearchClient = new HttpMediaSearchClient(config.mediaSearchServiceUrl);
+
+  const trackPreviewRegistry = new TrackPreviewRegistry();
+  const previewTempDir = path.join(os.tmpdir(), 'super-dj-track-previews');
+  const trackPreviewService = new TrackPreviewService({
+    mediaSearchClient, registry: trackPreviewRegistry, trackUploadService, previewTempDir,
+  });
+  // Much shorter-lived than the donation sweep (12h) — an unconfirmed preview is a forgotten
+  // draft the moment the streamer navigates away, not a track a stream might still be about to
+  // play, so there's no reason to hold onto it for hours.
+  const previewCleanupSweep = startTempFileCleanupSweep(previewTempDir, 60 * 60 * 1000, 10 * 60 * 1000);
+  // The file sweep above reaps the temp file on disk but never touches TrackPreviewRegistry's
+  // in-memory Map — since the common abandonment paths (switching drawer tabs, closing the drawer)
+  // never call discardPreview, every abandoned preview would otherwise leave a permanent entry in
+  // this process-lifetime Map. Same 1-hour/10-minute cadence as previewCleanupSweep, deliberately,
+  // so both age out together rather than drifting apart under two separately-tuned constants.
+  const previewRegistryPruneSweep = (() => {
+    const timer = setInterval(() => {
+      trackPreviewRegistry.pruneOlderThan(60 * 60 * 1000);
+    }, 10 * 60 * 1000);
+    timer.unref();
+    return { stop: () => clearInterval(timer) };
+  })();
+
   const currencyConverter = new StubCurrencyConverter();
 
   // 12-hour staleness threshold, swept every 10 minutes — a slow backstop for crash-leftover files,
@@ -165,14 +196,21 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
   // here.
   const tempFileCleanupSweep = startTempFileCleanupSweep(donationTempDir, 12 * 60 * 60 * 1000, 10 * 60 * 1000);
 
-  // Serializes every donation-triggered song request (from the real webhook AND the interaction-
-  // rule "Test" button, which shares this same instance below) so two requests racing on the
-  // external media-search fetch still play in the order they were donated, never in whichever
-  // order their downloads happened to finish — see songRequestQueue.ts.
-  const songRequestQueue = new SongRequestQueue((query: string) => executeSongRequest(
-    { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
-    query,
-  ));
+  // ONE arrival-ordered queue for every donation action, shared by the real webhook and the rule
+  // "Test" button: whoever donated first plays first, across BOTH action types (user decision —
+  // see the design spec, edge case A5). An exact-track request waits behind an earlier free-text
+  // request that is still downloading.
+  const donationQueue = new DonationRequestQueue();
+  const donationActions: DonationActionHandlers = {
+    songRequest: (query) => donationQueue.enqueue(() => executeSongRequest(
+      { mediaSearchClient, streamInserter: localStreamManager, tempDir: donationTempDir, targetUserId: config.donationTargetUserId },
+      query,
+    )),
+    libraryTrackRequest: (query) => donationQueue.enqueue(() => executeLibraryTrackRequest(
+      { trackRepository, streamInserter: localStreamManager, targetUserId: config.donationTargetUserId },
+      query,
+    )),
+  };
 
   // The destination-free half of the pipeline — everything a stream needs that has no destination
   // concept in it. LocalStreamManager below is constructed by spreading this same value, not a
@@ -215,8 +253,10 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
 
   const app = createApp({
     authService,
+    userRepository,
     trackRepository,
     trackUploadService,
+    trackPreviewService,
     playlistRepository,
     destinationRepository,
     destinationEncryptionKey: config.streamKeyEncryptionKey,
@@ -234,10 +274,10 @@ export function buildServer(config: AppConfig, spawner: Spawner = createSpawner(
       callbackKey: config.donatelloCallbackKey,
       converter: currencyConverter,
       targetUserId: config.donationTargetUserId,
-      executeSongRequest: (query: string) => songRequestQueue.enqueue(query),
+      actions: donationActions,
     },
     frontendOrigin: config.frontendOrigin,
   });
 
-  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep };
+  return { app, prisma, mediaMtxAuthApp, mediaMtxAuthPort: config.mediaMtxAuthPort, tempFileCleanupSweep, previewCleanupSweep, previewRegistryPruneSweep };
 }

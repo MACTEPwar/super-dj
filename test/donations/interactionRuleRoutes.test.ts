@@ -40,10 +40,13 @@ function buildFakeRepository(seed: FakeRule[] = []) {
   };
 }
 
-function buildTestDeps(overrides: Partial<{ converter: any; executeSongRequest: any }> = {}) {
+function buildTestDeps(overrides: Partial<{ converter: any; actions: any }> = {}) {
   return {
     converter: { toUah: (amount: number) => amount },
-    executeSongRequest: jest.fn().mockResolvedValue({ ok: true }),
+    actions: {
+      songRequest: jest.fn().mockResolvedValue({ ok: true }),
+      libraryTrackRequest: jest.fn().mockResolvedValue({ ok: true }),
+    },
     ...overrides,
   };
 }
@@ -255,7 +258,7 @@ describe('interaction rule routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ matched: false });
-      expect(testDeps.executeSongRequest).not.toHaveBeenCalled();
+      expect(testDeps.actions.songRequest).not.toHaveBeenCalled();
     });
 
     it('returns matched:false when the rule is disabled, mirroring real webhook behavior', async () => {
@@ -268,12 +271,13 @@ describe('interaction rule routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ matched: false });
-      expect(testDeps.executeSongRequest).not.toHaveBeenCalled();
+      expect(testDeps.actions.songRequest).not.toHaveBeenCalled();
     });
 
-    it('matches, calls executeSongRequest with the parsed query, and returns its result', async () => {
+    it('matches, calls the songRequest action with the parsed query, and returns its result', async () => {
       const ruleRepository = buildFakeRepository([seedRule]);
-      const testDeps = buildTestDeps({ executeSongRequest: jest.fn().mockResolvedValue({ ok: true }) });
+      const testDeps = buildTestDeps();
+      testDeps.actions.songRequest.mockResolvedValue({ ok: true });
 
       const res = await request(buildApp(ruleRepository, 'user-1', testDeps))
         .post('/interaction-rules/r1/test')
@@ -281,14 +285,13 @@ describe('interaction rule routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ matched: true, query: 'Artist - Title', result: { ok: true } });
-      expect(testDeps.executeSongRequest).toHaveBeenCalledWith('Artist - Title');
+      expect(testDeps.actions.songRequest).toHaveBeenCalledWith('Artist - Title');
     });
 
-    it('surfaces a failed executeSongRequest result without erroring the request', async () => {
+    it('surfaces a failed songRequest action result without erroring the request', async () => {
       const ruleRepository = buildFakeRepository([seedRule]);
-      const testDeps = buildTestDeps({
-        executeSongRequest: jest.fn().mockResolvedValue({ ok: false, reason: 'noActiveStream', message: 'local stream is not active' }),
-      });
+      const testDeps = buildTestDeps();
+      testDeps.actions.songRequest.mockResolvedValue({ ok: false, reason: 'noActiveStream', message: 'local stream is not active' });
 
       const res = await request(buildApp(ruleRepository, 'user-1', testDeps))
         .post('/interaction-rules/r1/test')
@@ -365,6 +368,49 @@ describe('interaction rule routes', () => {
 
       expect(res.status).toBe(404);
       expect(ruleRepository.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('libraryTrackRequest and keyword uniqueness', () => {
+    it('accepts the new action type', async () => {
+      const repo = buildFakeRepository();
+      const res = await request(buildApp(repo)).post('/interaction-rules')
+        .send({ actionType: 'libraryTrackRequest', enabled: true, minAmount: 50, commandKeyword: 'track' });
+      expect(res.status).toBe(201);
+    });
+
+    it('409s a keyword already used by another of the caller\'s rules, case-insensitively', async () => {
+      const repo = buildFakeRepository([{ id: 'r1', userId: 'user-1', actionType: 'songRequest', enabled: true, minAmount: 50, commandKeyword: 'song' }]);
+      const res = await request(buildApp(repo)).post('/interaction-rules')
+        .send({ actionType: 'libraryTrackRequest', enabled: true, minAmount: 50, commandKeyword: 'SONG' });
+      expect(res.status).toBe(409);
+    });
+
+    it('a keyword used only by ANOTHER user is fine', async () => {
+      const repo = buildFakeRepository([{ id: 'r1', userId: 'user-2', actionType: 'songRequest', enabled: true, minAmount: 50, commandKeyword: 'song' }]);
+      const res = await request(buildApp(repo)).post('/interaction-rules').send(validBody);
+      expect(res.status).toBe(201);
+    });
+
+    it('PUT may keep its own keyword but not take a sibling\'s', async () => {
+      const repo = buildFakeRepository([
+        { id: 'r1', userId: 'user-1', actionType: 'songRequest', enabled: true, minAmount: 50, commandKeyword: 'song' },
+        { id: 'r2', userId: 'user-1', actionType: 'libraryTrackRequest', enabled: true, minAmount: 50, commandKeyword: 'track' },
+      ]);
+      const app = buildApp(repo);
+      expect((await request(app).put('/interaction-rules/r1').send({ enabled: false, minAmount: 60, commandKeyword: 'song' })).status).toBe(200);
+      expect((await request(app).put('/interaction-rules/r1').send({ enabled: false, minAmount: 60, commandKeyword: 'track' })).status).toBe(409);
+    });
+
+    it('the test route dispatches by the rule\'s own actionType', async () => {
+      const repo = buildFakeRepository([{ id: 'r2', userId: 'user-1', actionType: 'libraryTrackRequest', enabled: true, minAmount: 50, commandKeyword: 'track' }]);
+      const testDeps = buildTestDeps();
+      testDeps.actions.libraryTrackRequest.mockResolvedValue({ ok: false, reason: 'trackNotFound', message: 'x' });
+      const res = await request(buildApp(repo, 'user-1', testDeps)).post('/interaction-rules/r2/test')
+        .send({ message: '!track:Believer 3f2b9c1e-8d4a-4e2b-9a7c-1b2c3d4e5f60' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ matched: true, query: 'Believer 3f2b9c1e-8d4a-4e2b-9a7c-1b2c3d4e5f60', result: { ok: false, reason: 'trackNotFound', message: 'x' } });
+      expect(testDeps.actions.songRequest).not.toHaveBeenCalled();
     });
   });
 });

@@ -7,17 +7,14 @@ import { InteractionRuleRepository } from './interactionRuleRepository';
 import { matchRules } from './ruleMatcher';
 import { DonationEvent } from './donationEvent';
 import { CurrencyConverter } from './currencyConverter';
-import { SongRequestResult } from './songRequestAction';
+import { ACTION_TYPES, DonationActionHandlers, isActionType } from './donationActions';
 
 export interface InteractionRuleTestDeps {
   converter: CurrencyConverter;
-  executeSongRequest: (query: string) => Promise<SongRequestResult>;
+  actions: DonationActionHandlers;
 }
 
 const COMMAND_KEYWORD_PATTERN = /^[a-zA-Z0-9]{1,20}$/;
-// Only one action type exists today — validated explicitly (not just "any non-empty string") so
-// a typo doesn't silently create a rule nothing will ever execute.
-const KNOWN_ACTION_TYPES = ['songRequest'];
 
 function requireJsonRequest(req: AuthenticatedRequest, _res: unknown, next: (err?: unknown) => void) {
   if (!req.is('application/json')) {
@@ -34,8 +31,8 @@ function validateRuleBody(body: unknown): { actionType: string; enabled: boolean
   const minAmount = raw.minAmount;
   const commandKeyword = raw.commandKeyword;
 
-  if (typeof actionType !== 'string' || !KNOWN_ACTION_TYPES.includes(actionType)) {
-    throw new ApiError(400, `body.actionType must be one of: ${KNOWN_ACTION_TYPES.join(', ')}`);
+  if (typeof actionType !== 'string' || !isActionType(actionType)) {
+    throw new ApiError(400, `body.actionType must be one of: ${ACTION_TYPES.join(', ')}`);
   }
   if (typeof enabled !== 'boolean') {
     throw new ApiError(400, 'body.enabled must be a boolean');
@@ -59,6 +56,16 @@ export function createInteractionRuleRouter(
   const auth = requireAuth(authService);
   const userId = (req: AuthenticatedRequest) => req.user!.id;
 
+  // Two rules sharing a keyword would BOTH fire on one donation (matchRules returns every match)
+  // — e.g. a copied library command also sent to the media-search service as garbage free text.
+  // Enforced here rather than as a DB constraint so pre-existing duplicates keep working.
+  const assertKeywordFree = async (ownerId: string, keyword: string, exceptRuleId?: string) => {
+    const rules = await ruleRepository.listByUser(ownerId);
+    if (rules.some((r) => r.id !== exceptRuleId && r.commandKeyword.toLowerCase() === keyword)) {
+      throw new ApiError(409, `another rule already uses the command keyword "!${keyword}"`);
+    }
+  };
+
   router.get('/', auth, wrapAsync(async (req, res) => {
     const rules = await ruleRepository.listByUser(userId(req as AuthenticatedRequest));
     res.status(200).json(rules);
@@ -66,6 +73,7 @@ export function createInteractionRuleRouter(
 
   router.post('/', auth, requireJsonRequest, wrapAsync(async (req, res) => {
     const input = validateRuleBody(req.body);
+    await assertKeywordFree(userId(req as AuthenticatedRequest), input.commandKeyword);
     const rule = await ruleRepository.create({ ...input, userId: userId(req as AuthenticatedRequest) });
     res.status(201).json(rule);
   }));
@@ -76,6 +84,7 @@ export function createInteractionRuleRouter(
       throw new ApiError(404, 'interaction rule not found');
     }
     const input = validateRuleBody({ actionType: existing.actionType, ...req.body });
+    await assertKeywordFree(userId(req as AuthenticatedRequest), input.commandKeyword, existing.id);
     const rule = await ruleRepository.update(req.params.id, input);
     res.status(200).json(rule);
   }));
@@ -111,7 +120,9 @@ export function createInteractionRuleRouter(
       return;
     }
 
-    const result = await testDeps.executeSongRequest(match.query);
+    const actionType = match.rule.actionType;
+    if (!isActionType(actionType)) throw new ApiError(409, `rule has an unsupported action type: ${actionType}`);
+    const result = await testDeps.actions[actionType](match.query);
     res.status(200).json({ matched: true, query: match.query, result });
   }));
 

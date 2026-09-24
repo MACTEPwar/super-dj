@@ -99,4 +99,54 @@ describe('tracks API', () => {
     expect(init.method).toBe('PATCH');
     expect(JSON.parse(init.body)).toEqual({ overlayOverride: null });
   });
+
+  describe('tracksApi.searchPreview', () => {
+    it('POSTs the query to /tracks/search-preview and returns the previewId', async () => {
+      mockFetchOnce({ previewId: 'p1' });
+      const result = await tracksApi.searchPreview('Blur - Song 2');
+      const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toContain('/tracks/search-preview');
+      expect(JSON.parse(init.body)).toEqual({ query: 'Blur - Song 2' });
+      expect(result).toEqual({ previewId: 'p1' });
+    });
+  });
+
+  describe('tracksApi.previewUrl', () => {
+    it('builds the preview streaming URL', () => {
+      expect(tracksApi.previewUrl('p1')).toContain('/tracks/preview/p1');
+    });
+  });
+
+  describe('tracksApi.confirmPreview', () => {
+    it('POSTs a multipart form with name and cover to /tracks/from-preview/{id}', async () => {
+      mockFetchOnce({ id: 't1', name: 'x', durationSeconds: 1, hasCover: true, overlayOverride: null });
+      const cover = new File(['data'], 'cover.png', { type: 'image/png' });
+      await tracksApi.confirmPreview('p1', 'My Song', cover);
+      const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toContain('/tracks/from-preview/p1');
+      expect(init.body).toBeInstanceOf(FormData);
+      const form = init.body as FormData;
+      expect(form.get('name')).toBe('My Song');
+      expect(form.get('cover')).toBe(cover);
+    });
+
+    it('omits name/cover from the form when not given', async () => {
+      mockFetchOnce({ id: 't1', name: 'x', durationSeconds: 1, hasCover: false, overlayOverride: null });
+      await tracksApi.confirmPreview('p1', undefined, null);
+      const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      const form = init.body as FormData;
+      expect(form.has('name')).toBe(false);
+      expect(form.has('cover')).toBe(false);
+    });
+  });
+
+  describe('tracksApi.discardPreview', () => {
+    it('DELETEs /tracks/preview/{id}', async () => {
+      mockFetchOnce({});
+      await tracksApi.discardPreview('p1');
+      const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toContain('/tracks/preview/p1');
+      expect(init.method).toBe('DELETE');
+    });
+  });
 });

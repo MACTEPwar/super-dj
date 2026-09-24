@@ -2,7 +2,9 @@ import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 import { resolveFontFile, FONT_FAMILIES } from './fontRegistry';
 import { loadFontData } from './fontCache';
-import { ColorValue, TextStyle, TemplateElement, normalizeColorValue } from '../templates/templateTypes';
+import { ColorValue, TextStyle, TemplateElement, PlaylistElement, normalizeColorValue } from '../templates/templateTypes';
+import { AnimatedRow, settledRows } from '../ffmpeg/playlistWindowTransition';
+import { PlaylistWindowRegion } from './playlistWindowGeometry';
 
 export interface SceneData {
   title: string;
@@ -116,16 +118,7 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
         },
       };
     case 'playlist':
-      return {
-        type: 'div',
-        props: {
-          style: { ...position, width: el.width, fontSize: el.fontSize, display: 'flex', flexDirection: 'column', ...textStyleToCss(el.style, el.color) },
-          children: scene.playlistLines.map((line): SatoriNode => ({
-            type: 'div',
-            props: { style: { display: 'flex' }, children: line },
-          })),
-        },
-      };
+      return playlistWindowNode(el, settledRows(scene.playlistLines.map((text, i) => ({ key: String(i), text, isCurrent: false }))), { x: el.x, y: el.y });
     case 'text':
       return {
         type: 'div',
@@ -161,9 +154,44 @@ function elementNode(el: TemplateElement, scene: SceneData): SatoriNode | null {
   }
 }
 
+// The ONE playlist-window node: the baked canvas and the template preview call it with settled
+// rows (no animation props); pipe:7's burst frames call it with animation props, which only ever
+// ADD row style keys on top of the same base (see the ellipsis-truncation note below) — so a
+// burst's first and last frames are the baked window's own pixels, which is what makes the
+// handoff overlaps invisible (spec, "The handoff protocol"). (Byte-identity with the pre-Phase-C
+// node ended 2026-09-24 when per-row single-line truncation landed — see
+// test/render/playlistWindowNode.test.ts.)
+export function playlistWindowNode(el: PlaylistElement, rows: AnimatedRow[], origin: { x: number; y: number }): SatoriNode {
+  return {
+    type: 'div',
+    props: {
+      style: { position: 'absolute', left: origin.x, top: origin.y, width: el.width, fontSize: el.fontSize, display: 'flex', flexDirection: 'column', ...textStyleToCss(el.style, el.color) },
+      children: rows.map((r): SatoriNode => {
+        // Every row is single-line, ellipsis-truncated: a name wider than the window must never
+        // wrap onto a second line (a row's div otherwise defaults to `white-space: normal` while
+        // still stretching to the container's width via flex's `align-items: stretch`, which is
+        // exactly what let a long name wrap — "▶" alone on one line, the name below).
+        const style: Record<string, unknown> = {
+          display: 'flex', maxWidth: el.width, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+        };
+        if (r.opacity !== undefined) style.opacity = r.opacity;
+        if (r.offsetX !== undefined) style.marginLeft = r.offsetX;
+        if (r.maxHeightFactor !== undefined) {
+          // Growing the new row's box is what opens the gap: the flex column pushes every row below
+          // down by the row's REAL height — no row-height model, so wrapping and natural line height
+          // behave exactly as in the baked window. overflow is already 'hidden' above, which this
+          // height clip shares harmlessly with the ellipsis truncation.
+          style.maxHeight = r.maxHeightFactor * el.fontSize;
+        }
+        return { type: 'div', props: { style, children: r.text } };
+      }),
+    },
+  };
+}
+
 // Collects every distinct (family, weight, style) combination actually used across a scene's
 // elements, so satori() registers exactly the font files it needs — not a fixed single entry.
-function collectFontVariants(elements: TemplateElement[]): { family: string; bold: boolean; italic: boolean }[] {
+export function collectFontVariants(elements: TemplateElement[]): { family: string; bold: boolean; italic: boolean }[] {
   const seen = new Map<string, { family: string; bold: boolean; italic: boolean }>();
   for (const el of elements) {
     if (el.type !== 'title' && el.type !== 'playlist' && el.type !== 'text') continue;
@@ -237,4 +265,79 @@ export async function renderScene(
   });
 
   return new Resvg(svg).render().asPng();
+}
+
+export interface PlaylistWindowFrameRequest { element: PlaylistElement; rows: AnimatedRow[]; region: PlaylistWindowRegion }
+
+// One pipe:7 burst frame: ONLY the playlist element, in region coordinates (origin shifted by an
+// integer offset, so rasterization is identical to the baked canvas's), as raw PREMULTIPLIED RGBA.
+// loadSystemFonts: false — satori already turned every glyph into a path, and the scan costs
+// ~130ms per call (pulse spike).
+export async function renderPlaylistWindowPixels(
+  req: PlaylistWindowFrameRequest,
+  loadFont: (family: string, bold: boolean, italic: boolean) => Promise<Buffer> = defaultLoadFont,
+): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+  const variants = collectFontVariants([req.element]);
+  const fonts = await Promise.all(variants.map(async (v) => ({
+    name: v.family, data: await loadFont(v.family, v.bold, v.italic),
+    weight: (v.bold ? 700 : 400) as 400 | 700, style: (v.italic ? 'italic' : 'normal') as 'italic' | 'normal',
+  })));
+  const root: SatoriNode = {
+    type: 'div',
+    props: {
+      style: { width: req.region.width, height: req.region.height, display: 'flex', position: 'relative' },
+      children: [playlistWindowNode(req.element, req.rows, { x: req.region.originX, y: req.region.originY })],
+    },
+  };
+  const svg = await satori(root as unknown as Parameters<typeof satori>[0], { width: req.region.width, height: req.region.height, fonts });
+  const pixmap = new Resvg(svg, { font: { loadSystemFonts: false } }).render();
+  return { pixels: pixmap.pixels, width: pixmap.width, height: pixmap.height };
+}
+
+export interface MarqueeStripFrameRequest {
+  element: PlaylistElement;
+  text: string;
+  stripWidth: number;
+  rowHeight: number;
+  // How much blank space to leave BEFORE the text starts, within the strip — the row's own
+  // width, so a crop window sliding across the strip shows a full row-width of blank before the
+  // text is first revealed (a clean "gliding in from the right" start) and, symmetrically, a
+  // full row-width of blank after it (the strip is sized to exactly fit `paddingLeft + text +
+  // paddingLeft` — see MarqueeFeeder.activate()). Without this, the text starts at the strip's
+  // own left edge, so the visible loop pops the name in and out at full width instead of easing
+  // through a blank gap on both sides.
+  paddingLeft: number;
+}
+
+// A single row's FULL text (no ellipsis, no wrap constraint) rendered into a fixed-size, padded
+// strip — the one-shot Satori/resvg render MarqueeFeeder uses to build the source bitmap it crops
+// per frame for the current track's marquee (see src/ffmpeg/marqueeFeeder.ts and the design
+// spec's "Chosen approach: pre-rendered text strip + per-frame crop"). Called ONCE per marquee
+// activation, never per frame. The caller sizes stripWidth generously around the text's own
+// measured width (measureTextWidth) plus the row's own width on both sides — this render's own
+// width doesn't need to be pixel-exact, any extra blank space is harmless.
+export async function renderMarqueeStripPixels(
+  req: MarqueeStripFrameRequest,
+  loadFont: (family: string, bold: boolean, italic: boolean) => Promise<Buffer> = defaultLoadFont,
+): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+  const { element, text, stripWidth, rowHeight, paddingLeft } = req;
+  const variants = collectFontVariants([element]);
+  const fonts = await Promise.all(variants.map(async (v) => ({
+    name: v.family, data: await loadFont(v.family, v.bold, v.italic),
+    weight: (v.bold ? 700 : 400) as 400 | 700, style: (v.italic ? 'italic' : 'normal') as 'italic' | 'normal',
+  })));
+  const root: SatoriNode = {
+    type: 'div',
+    props: {
+      style: {
+        width: stripWidth, height: rowHeight, display: 'flex', position: 'relative',
+        whiteSpace: 'nowrap', fontSize: element.fontSize, paddingLeft,
+        ...textStyleToCss(element.style, element.color),
+      },
+      children: text,
+    },
+  };
+  const svg = await satori(root as unknown as Parameters<typeof satori>[0], { width: stripWidth, height: rowHeight, fonts });
+  const pixmap = new Resvg(svg, { font: { loadSystemFonts: false } }).render();
+  return { pixels: pixmap.pixels, width: pixmap.width, height: pixmap.height };
 }

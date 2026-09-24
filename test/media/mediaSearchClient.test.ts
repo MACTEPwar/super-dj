@@ -1,4 +1,4 @@
-import { HttpMediaSearchClient, MediaSearchError } from '../../src/donations/mediaSearchClient';
+import { HttpMediaSearchClient, MediaSearchError } from '../../src/media/mediaSearchClient';
 
 function fakeFetch(response: Partial<Response> & { ok: boolean; status: number }): typeof fetch {
   return jest.fn().mockResolvedValue(response) as unknown as typeof fetch;

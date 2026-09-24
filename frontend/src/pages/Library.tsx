@@ -125,7 +125,7 @@ export default function Library() {
       <AddTrackDrawer
         open={isDrawerOpen}
         onOpenChange={setDrawerOpen}
-        onUploaded={() => queryClient.invalidateQueries({ queryKey: ['tracks'] })}
+        onAdded={() => queryClient.invalidateQueries({ queryKey: ['tracks'] })}
       />
 
       <ConfirmDialog

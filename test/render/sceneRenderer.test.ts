@@ -289,3 +289,46 @@ describe('renderScene — gradient colors', () => {
     expect(png.length).toBeGreaterThan(0);
   });
 });
+
+describe('renderMarqueeStripPixels', () => {
+  const el = { type: 'playlist' as const, x: 0, y: 0, width: 100, fontSize: 20, color: { mode: 'solid' as const, color: '#ffffff' }, style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } };
+
+  it('renders the full text (no ellipsis) into a strip of the requested size, straight (non-premultiplied-looking) alpha somewhere non-zero', async () => {
+    const { renderMarqueeStripPixels } = await import('../../src/render/sceneRenderer');
+    const { pixels, width, height } = await renderMarqueeStripPixels(
+      { element: el, text: 'A Rather Long Track Name That Would Never Fit In One Row', stripWidth: 800, rowHeight: 30, paddingLeft: 100 },
+      testLoadFont,
+    );
+    expect(width).toBe(800);
+    expect(height).toBe(30);
+    expect(pixels.length).toBe(800 * 30 * 4);
+    expect(pixels.some((v: number, i: number) => i % 4 === 3 && v > 0)).toBe(true);
+  });
+
+  it('a short text still renders without throwing, mostly transparent in a wide strip', async () => {
+    const { renderMarqueeStripPixels } = await import('../../src/render/sceneRenderer');
+    const { pixels } = await renderMarqueeStripPixels(
+      { element: el, text: 'Hi', stripWidth: 400, rowHeight: 30, paddingLeft: 100 },
+      testLoadFont,
+    );
+    const opaqueCount = pixels.filter((v: number, i: number) => i % 4 === 3 && v > 0).length;
+    // Two short glyphs in a 400-wide strip: opaque pixels are a small minority.
+    expect(opaqueCount).toBeGreaterThan(0);
+    expect(opaqueCount).toBeLessThan(400 * 30 * 0.2);
+  });
+
+  it('paddingLeft pushes the text right — no opaque pixel appears before the padding column', async () => {
+    const { renderMarqueeStripPixels } = await import('../../src/render/sceneRenderer');
+    const { pixels, width, height } = await renderMarqueeStripPixels(
+      { element: el, text: 'Hi', stripWidth: 400, rowHeight: 30, paddingLeft: 120 },
+      testLoadFont,
+    );
+    let firstOpaqueX = -1;
+    outer: for (let x = 0; x < width; x += 1) {
+      for (let y = 0; y < height; y += 1) {
+        if (pixels[(y * width + x) * 4 + 3] > 0) { firstOpaqueX = x; break outer; }
+      }
+    }
+    expect(firstOpaqueX).toBeGreaterThanOrEqual(120);
+  });
+});

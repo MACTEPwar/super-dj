@@ -2,6 +2,7 @@ import { StreamController } from '../../src/stream/streamController';
 import { ApiError } from '../../src/errors';
 import { Track } from '../../src/playlist/types';
 
+const BASE_ROWS = [{ key: 'b:0', text: '▶ a', isCurrent: true }, { key: 'b:1', text: '  b', isCurrent: false }];
 const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
 const overlayFor = (t: Track) => ({ title: t.name, playlistLines: [`▶ ${t.name}`], durationSeconds: 100, overlayPng: Buffer.from('png'), timer: null });
 
@@ -31,9 +32,7 @@ function buildDeps() {
     insertNext: jest.fn(),
     peekNext: jest.fn().mockReturnValue(tracks[1]),
     positionInBase: jest.fn().mockReturnValue(0),
-    enqueueDonation: jest.fn(),
-    hasDonationPending: jest.fn().mockReturnValue(false),
-    shiftDonation: jest.fn(),
+    windowSnapshot: jest.fn().mockReturnValue(BASE_ROWS),
   };
   const children: FakeChild[] = [];
   const audioRelay = {
@@ -49,7 +48,7 @@ function buildDeps() {
     close: jest.fn(),
   };
   const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
-  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {} };
+  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {}, playlistWindowPipe: {}, marqueePipe: {} };
   const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const deps: any = {
     library, queue,
@@ -380,39 +379,6 @@ describe('StreamController', () => {
       }
     });
 
-    it('a donation interruption in progress survives a crash: the reconnect resumes the donation track itself, not queue.current() (the track it interrupted)', async () => {
-      const { deps, encoder, audioRelay, queue } = buildDeps();
-      deps.reconnectPolicy = { decide: jest.fn().mockReturnValue({ retry: true, delayMs: 5000 }) };
-      jest.useFakeTimers();
-      try {
-        jest.setSystemTime(0);
-        const controller = new StreamController(deps);
-        await controller.start(); // interrupts 'a' (queue.current() stays 'a' throughout)
-
-        const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
-        queue.shiftDonation.mockReturnValueOnce(donation);
-        controller.insertEphemeralTrack(donation);
-        await Promise.resolve();
-        await Promise.resolve();
-
-        jest.setSystemTime(3_000); // 3s into the donation track when the encoder dies
-        const onExit = encoder.start.mock.calls[0][0] as (code: number | null) => void;
-        onExit(1);
-
-        // next()/previous() must still reject during the reconnecting window — a donation track
-        // is exactly as non-skippable while reconnecting as while actually playing.
-        await expect(controller.next()).rejects.toThrow('cannot skip a donation-requested track');
-
-        audioRelay.switchTrack.mockClear();
-        await jest.advanceTimersByTimeAsync(5000);
-
-        // Resumes the donation track at its captured offset — NOT queue.current() ('a') from 0,
-        // which is what a naive re-derive would have fed instead.
-        expect(audioRelay.switchTrack).toHaveBeenCalledWith(donation.audioPath, 3);
-      } finally {
-        jest.useRealTimers();
-      }
-    });
   });
 
   it('pause() switches the audio relay to silence and renders a frozen timer text, then resume() seeks the audio relay back', async () => {
@@ -436,32 +402,6 @@ describe('StreamController', () => {
     expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 12.345);
     expect(controller.status().state).toBe('streaming');
 
-    nowSpy.mockRestore();
-  });
-
-  it('pause()/resume() while a donation track is playing act on the donation track itself, not the track it interrupted', async () => {
-    const { deps, queue, audioRelay } = buildDeps();
-    const nowSpy = jest.spyOn(Date, 'now');
-    nowSpy.mockReturnValue(0);
-    const controller = new StreamController(deps);
-    await controller.start(); // interrupts 'a' — queue.current() stays 'a' the whole time below
-
-    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
-    queue.shiftDonation.mockReturnValueOnce(donation);
-    controller.insertEphemeralTrack(donation);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    nowSpy.mockReturnValue(4_000);
-    controller.pause();
-    audioRelay.switchTrack.mockClear();
-
-    nowSpy.mockReturnValue(9_000);
-    await controller.resume();
-
-    // Resumed the DONATION track at 4s — not queue.current() ('a'), which pause()/resume() would
-    // have incorrectly used before nowPlayingTrack was introduced.
-    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation.audioPath, 4);
     nowSpy.mockRestore();
   });
 
@@ -562,153 +502,142 @@ describe('StreamController', () => {
     expect(() => controller.playByName('missing')).toThrow(ApiError);
   });
 
-  it('insertEphemeralTrack() enqueues onto the donation queue and interrupts whatever is playing immediately', async () => {
-    const { deps, queue, audioRelay } = buildDeps();
-    const controller = new StreamController(deps);
-    await controller.start();
-    audioRelay.switchTrack.mockClear();
-    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null };
-    queue.shiftDonation.mockReturnValueOnce(ephemeralTrack);
+  describe('enqueueTrack (donation requests queue next, never interrupt)', () => {
+    const donation = (onFinished = jest.fn()): Track => ({
+      name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished,
+    });
 
-    controller.insertEphemeralTrack(ephemeralTrack);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(queue.enqueueDonation).toHaveBeenCalledWith(ephemeralTrack);
-    expect(audioRelay.switchTrack).toHaveBeenCalledWith(ephemeralTrack.audioPath, 0);
-  });
-
-  it('a second donation arriving while the first one is already playing just queues behind it, without re-interrupting', async () => {
-    const { deps, queue, audioRelay } = buildDeps();
-    const controller = new StreamController(deps);
-    await controller.start();
-    const donation1: Track = { name: 'donation 1', audioPath: '/tmp/d1.mp3', coverPath: null };
-    const donation2: Track = { name: 'donation 2', audioPath: '/tmp/d2.mp3', coverPath: null };
-    queue.shiftDonation.mockReturnValueOnce(donation1);
-
-    controller.insertEphemeralTrack(donation1);
-    await Promise.resolve();
-    await Promise.resolve();
-    audioRelay.switchTrack.mockClear();
-    queue.hasDonationPending.mockReturnValue(true);
-
-    controller.insertEphemeralTrack(donation2);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(queue.enqueueDonation).toHaveBeenCalledWith(donation2);
-    // Still playing donation1 — the second arrival must not switch anything itself.
-    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
-  });
-
-  it('resumes the interrupted track at its captured elapsed position once the donation queue drains', async () => {
-    jest.useFakeTimers();
-    try {
-      jest.setSystemTime(0);
-      const { deps, queue, audioRelay, children } = buildDeps();
+    it('inserts next without switching what is playing', async () => {
+      const { deps, queue, audioRelay } = buildDeps();
       const controller = new StreamController(deps);
-      await controller.start(); // now playing tracks[0] ('a')
-      jest.setSystemTime(12_345);
-      const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
-      queue.shiftDonation.mockReturnValueOnce(donation).mockReturnValueOnce(undefined);
-      queue.hasDonationPending.mockReturnValue(false);
+      await controller.start();
+      audioRelay.switchTrack.mockClear();
+      const d = donation();
 
-      controller.insertEphemeralTrack(donation);
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation.audioPath, 0);
+      controller.enqueueTrack(d);
 
-      // The donation track finishes naturally.
-      children[children.length - 1].emitClose();
-      await Promise.resolve();
-      await Promise.resolve();
+      expect(queue.insertNext).toHaveBeenCalledWith(d);
+      expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+      expect(controller.status().state).toBe('streaming');
+    });
 
-      // 12.345s had elapsed on tracks[0] ('a') at the moment it was interrupted.
-      expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', 12.345);
-    } finally {
-      jest.useRealTimers();
-    }
+    it('while paused it only queues — the stream stays paused', async () => {
+      const { deps, audioRelay } = buildDeps();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.pause();
+      audioRelay.switchTrack.mockClear();
+
+      controller.enqueueTrack(donation());
+
+      expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+      expect(controller.status().state).toBe('paused');
+    });
+
+    it('while idle it only queues', () => {
+      const { deps, queue, audioRelay } = buildDeps();
+      const controller = new StreamController(deps);
+      const d = donation();
+      controller.enqueueTrack(d);
+      expect(queue.insertNext).toHaveBeenCalledWith(d);
+      expect(audioRelay.switchTrack).not.toHaveBeenCalled();
+    });
+
+    it('notifies onStatusChanged', () => {
+      const { deps } = buildDeps();
+      deps.onStatusChanged = jest.fn();
+      const controller = new StreamController(deps);
+      controller.enqueueTrack(donation());
+      expect(deps.onStatusChanged).toHaveBeenCalled();
+    });
+
+    it('playByName goes through the same insert (one insert path)', async () => {
+      const { deps, queue } = buildDeps();
+      const controller = new StreamController(deps);
+      const spy = jest.spyOn(controller, 'enqueueTrack');
+      controller.playByName('b');
+      expect(spy).toHaveBeenCalledWith({ name: 'b', audioPath: '/music/b.mp3', coverPath: null });
+      expect(queue.insertNext).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it('plays multiple queued donation tracks back to back, in FIFO order, before resuming the interrupted track', async () => {
-    const { deps, queue, audioRelay, children } = buildDeps();
-    const controller = new StreamController(deps);
-    await controller.start();
-    const donation1: Track = { name: 'donation 1', audioPath: '/tmp/d1.mp3', coverPath: null };
-    const donation2: Track = { name: 'donation 2', audioPath: '/tmp/d2.mp3', coverPath: null };
-    queue.shiftDonation.mockReturnValueOnce(donation1);
-    queue.hasDonationPending.mockReturnValue(false);
+  describe('releasing a skipped ephemeral track', () => {
+    it('next() off a playing ephemeral track fires its _onFinished exactly once', async () => {
+      const { deps, queue } = buildDeps();
+      const onFinished = jest.fn();
+      const d: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.current.mockReturnValue(d);
 
-    controller.insertEphemeralTrack(donation1);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation1.audioPath, 0);
+      await controller.next();
 
-    // donation2 arrives while donation1 is still playing — just queues behind it.
-    queue.hasDonationPending.mockReturnValue(true);
-    controller.insertEphemeralTrack(donation2);
+      expect(onFinished).toHaveBeenCalledTimes(1);
+      expect(d._onFinished).toBeUndefined();
+    });
 
-    // donation1 finishes naturally — donation2 must play next, NOT the interrupted track yet.
-    queue.shiftDonation.mockReturnValueOnce(donation2);
-    children[children.length - 1].emitClose();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith(donation2.audioPath, 0);
+    it('previous() off a playing ephemeral track fires its _onFinished exactly once', async () => {
+      const { deps, queue } = buildDeps();
+      const onFinished = jest.fn();
+      const d: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.current.mockReturnValue(d);
+      queue.previous.mockReturnValueOnce(track('a'));
 
-    // donation2 finishes naturally, and now the donation queue is empty — resumes the original.
-    queue.hasDonationPending.mockReturnValue(false);
-    children[children.length - 1].emitClose();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(audioRelay.switchTrack).toHaveBeenLastCalledWith('/music/a.mp3', expect.any(Number));
+      await controller.previous();
+
+      expect(onFinished).toHaveBeenCalledTimes(1);
+    });
+
+    it('previous() that stays on the same track (empty history) releases nothing', async () => {
+      const { deps, queue } = buildDeps();
+      const onFinished = jest.fn();
+      const d: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.current.mockReturnValue(d);
+      queue.previous.mockReturnValueOnce(d);
+
+      await controller.previous();
+
+      expect(onFinished).not.toHaveBeenCalled();
+    });
+
+    it('a throwing _onFinished on skip is logged, not thrown', async () => {
+      const { deps, queue } = buildDeps();
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const d: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null, ephemeral: true, _onFinished: () => { throw new Error('boom'); } };
+        const controller = new StreamController(deps);
+        await controller.start();
+        queue.current.mockReturnValue(d);
+        await expect(controller.next()).resolves.toBeUndefined();
+        expect(errorSpy).toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
   });
 
-  it('a donation arriving while paused wakes the stream and plays it right away', async () => {
-    const { deps, queue, audioRelay } = buildDeps();
-    const controller = new StreamController(deps);
-    await controller.start();
-    controller.pause();
-    audioRelay.switchTrack.mockClear();
-    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
-    queue.shiftDonation.mockReturnValueOnce(donation);
-
-    controller.insertEphemeralTrack(donation);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(audioRelay.switchTrack).toHaveBeenCalledWith(donation.audioPath, 0);
-  });
-
-  it('a donation arriving while idle just queues — nothing plays until a stream is actually started', () => {
-    const { deps, queue, audioRelay } = buildDeps();
-    const controller = new StreamController(deps);
-    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
-
-    controller.insertEphemeralTrack(donation);
-
-    expect(queue.enqueueDonation).toHaveBeenCalledWith(donation);
-    expect(audioRelay.switchTrack).not.toHaveBeenCalled();
-  });
-
-  it('next()/previous() reject while a donation track is playing — a donation track cannot be skipped', async () => {
-    const { deps, queue } = buildDeps();
-    const controller = new StreamController(deps);
-    await controller.start();
-    const donation: Track = { name: 'donation', audioPath: '/tmp/d.mp3', coverPath: null };
-    queue.shiftDonation.mockReturnValueOnce(donation);
-
-    controller.insertEphemeralTrack(donation);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    await expect(controller.next()).rejects.toThrow('cannot skip a donation-requested track');
-    await expect(controller.previous()).rejects.toThrow('cannot skip a donation-requested track');
+  describe('status().currentTrack', () => {
+    it('is null before start and after stop, the current track name while streaming/paused', async () => {
+      const { deps } = buildDeps();
+      const controller = new StreamController(deps);
+      expect(controller.status().currentTrack).toBeNull();
+      await controller.start();
+      expect(controller.status().currentTrack).toBe('a');
+      controller.pause();
+      expect(controller.status().currentTrack).toBe('a');
+      controller.stop();
+      expect(controller.status().currentTrack).toBeNull();
+    });
   });
 
   it('calls a track\'s _onFinished exactly once, right when its own decode process closes', async () => {
     const { deps, queue, children } = buildDeps();
     const onFinished = jest.fn();
-    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
     const controller = new StreamController(deps);
     await controller.start(); // feeds 'a' -> children[0]
 
@@ -725,10 +654,10 @@ describe('StreamController', () => {
     expect(onFinished).toHaveBeenCalledTimes(1);
   });
 
-  it('does not fire _onFinished a second time when previous() re-feeds the same ephemeral track (regression: PlaylistQueue.next() pushes the finished track into history, and previous() can pop it back out and re-feed it through a fresh decode child)', async () => {
+  it('a re-fed track whose hook already fired never fires it again (defense in depth)', async () => {
     const { deps, queue, children } = buildDeps();
     const onFinished = jest.fn();
-    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+    const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
     const controller = new StreamController(deps);
     await controller.start(); // feeds 'a' -> children[0]
 
@@ -759,7 +688,7 @@ describe('StreamController', () => {
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const onFinished = jest.fn(() => { throw new Error('boom'); });
-      const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, _onFinished: onFinished };
+      const ephemeralTrack: Track = { name: 'donation track', audioPath: '/tmp/donation.mp3', coverPath: null, ephemeral: true, _onFinished: onFinished };
       const controller = new StreamController(deps);
       await controller.start(); // feeds 'a' -> children[0]
 
@@ -904,5 +833,228 @@ describe('StreamController', () => {
     expect(onStatusChanged).toHaveBeenCalledTimes(6);
     controller.stop();
     expect(onStatusChanged).toHaveBeenCalledTimes(7);
+  });
+
+  describe('playlist window burst layer', () => {
+    const INSERTED_ROWS = [{ key: 'b:0', text: '▶ a', isCurrent: true }, { key: 'i:0', text: '  d', isCurrent: false }, { key: 'b:1', text: '  b', isCurrent: false }];
+    function withFeeder() {
+      const ctx = buildDeps();
+      const feeder = { attach: jest.fn(), showRows: jest.fn().mockResolvedValue(undefined), animate: jest.fn().mockResolvedValue(undefined), goIdle: jest.fn(), close: jest.fn() };
+      ctx.deps.createPlaylistWindowFeeder = jest.fn().mockReturnValue(feeder);
+      ctx.deps.buildOverlay = jest.fn((t: Track, _rows: unknown, opts?: { omitLivePlaylist?: boolean }) =>
+        Promise.resolve({ ...overlayFor(t), variant: opts?.omitLivePlaylist ? 'A' : 'B' }));
+      return { ...ctx, feeder };
+    }
+    const settle = async () => { for (let i = 0; i < 30; i++) { jest.advanceTimersByTime(100); await Promise.resolve(); await Promise.resolve(); } };
+
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('attaches the feeder to pipe:7 and bakes the snapshot rows on start', async () => {
+      const { deps, feeder, encoderChild } = withFeeder();
+      await new StreamController(deps).start();
+      expect(feeder.attach).toHaveBeenCalledWith(encoderChild.playlistWindowPipe);
+      expect(deps.buildOverlay).toHaveBeenCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('enqueueTrack runs a burst: A is baked (and becomes currentOverlay), then B with the new rows', async () => {
+      const { deps, queue, canvasFeeder, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      expect(feeder.showRows).toHaveBeenCalledWith(BASE_ROWS);
+      expect(feeder.animate).toHaveBeenCalled();
+      const variants = canvasFeeder.render.mock.calls.map((c: any[]) => c[0].variant);
+      expect(variants).toContain('A');
+      expect(variants[variants.length - 1]).toBe('B');
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), INSERTED_ROWS, { omitLivePlaylist: false });
+      expect(feeder.goIdle).toHaveBeenCalled();
+    });
+
+    it("the timer's once-a-second re-render uses variant A while the burst is in progress", async () => {
+      const { deps, queue, canvasFeeder, feeder } = withFeeder();
+      deps.buildOverlay.mockImplementation((t: Track, _r: unknown, opts?: any) => Promise.resolve({ ...overlayFor(t), variant: opts?.omitLivePlaylist ? 'A' : 'B', timer: { x: 0, y: 0, fontSize: 10, color: '#fff', style: { fontFamily: 'DejaVu Sans', bold: false, italic: false } } }));
+      let releaseAnimate!: () => void;
+      feeder.animate.mockImplementation(() => new Promise<void>((r) => { releaseAnimate = r; }));
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle(); // now parked inside animate(), canvas is A
+      canvasFeeder.render.mockClear();
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      expect(canvasFeeder.render.mock.calls.every((c: any[]) => c[0].variant === 'A')).toBe(true);
+      releaseAnimate();
+      await settle();
+    });
+
+    it('next() during a burst aborts it (feeder idle) and the new track bakes normally (C2)', async () => {
+      const { deps, queue, canvasFeeder, feeder } = withFeeder();
+      feeder.animate.mockImplementation(() => new Promise<void>(() => {}));
+      const controller = new StreamController(deps);
+      await controller.start();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      feeder.goIdle.mockClear();
+      await controller.next();
+      expect(feeder.goIdle).toHaveBeenCalled();
+      const last = canvasFeeder.render.mock.calls[canvasFeeder.render.mock.calls.length - 1][0];
+      expect(last.variant).toBe('B');
+    });
+
+    it('a track enqueued while a track change awaits its overlay is caught up once the feed lands', async () => {
+      const { deps, queue, feeder, library } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      const b = library.list()[1];
+      let resolveOverlay!: () => void;
+      deps.buildOverlay.mockImplementationOnce((t: Track) => new Promise((r) => { resolveOverlay = () => r({ ...overlayFor(t), variant: 'B' }); }));
+      const pending = controller.next(); // rows (BASE_ROWS) captured, now awaiting the overlay
+      queue.current.mockReturnValue(b);
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null }); // skipped: b isn't on screen yet
+      expect(feeder.showRows).not.toHaveBeenCalled();
+      resolveOverlay();
+      await pending;
+      await settle();
+      expect(feeder.animate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(b, INSERTED_ROWS, { omitLivePlaylist: false });
+    });
+
+    it('paused -> next() -> a donation arrives: no bake/burst until resume (the screen must not show the next track early)', async () => {
+      const { deps, queue, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.pause();
+      queue.current.mockReturnValue(track('b')); // next() moved the queue while paused; nothing was fed
+      await controller.next();
+      deps.buildOverlay.mockClear();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      await settle();
+      expect(deps.buildOverlay).not.toHaveBeenCalled();
+      expect(feeder.showRows).not.toHaveBeenCalled();
+    });
+
+    it('enqueueTrack while idle/reconnecting runs no burst (C7)', () => {
+      const { deps, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      expect(feeder.showRows).not.toHaveBeenCalled();
+    });
+
+    it('stop() closes the feeder', async () => {
+      const { deps, feeder } = withFeeder();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.stop();
+      expect(feeder.close).toHaveBeenCalled();
+    });
+
+    it('without a playlist element (no factory) enqueueTrack only queues', async () => {
+      const { deps, queue } = buildDeps();
+      const controller = new StreamController(deps);
+      await controller.start();
+      deps.buildOverlay.mockClear();
+      queue.windowSnapshot.mockReturnValue(INSERTED_ROWS);
+      controller.enqueueTrack({ name: 'd', audioPath: '/tmp/d.mp3', coverPath: null });
+      expect(deps.buildOverlay).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('current-track marquee', () => {
+    function withMarquee() {
+      const ctx = buildDeps();
+      const marqueeFeeder = { attach: jest.fn(), activate: jest.fn().mockResolvedValue(undefined), deactivate: jest.fn(), close: jest.fn() };
+      ctx.deps.createMarqueeFeeder = jest.fn().mockReturnValue(marqueeFeeder);
+      ctx.deps.resolveMarqueeRow = jest.fn();
+      return { ...ctx, marqueeFeeder };
+    }
+
+    it('attaches the marquee feeder to pipe:8 on start', async () => {
+      const { deps, marqueeFeeder, encoderChild } = withMarquee();
+      await new StreamController(deps).start();
+      expect(marqueeFeeder.attach).toHaveBeenCalledWith(encoderChild.marqueePipe);
+    });
+
+    it('when resolveMarqueeRow returns a rect, activate()s the feeder with the NAME ONLY and bakes with the marker as currentRowOverrideText', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      const rect = { x: 0, y: 0, width: 100, height: 20 };
+      // BASE_ROWS' current row is '▶ a' — markerText is the caller-measured '▶ ' prefix, nameText
+      // is the rest; activate() must never receive the marker (it draws only the scrolling name).
+      deps.resolveMarqueeRow.mockResolvedValue({ rect, nameText: 'a', textWidth: 500, markerText: '▶ ' });
+      await new StreamController(deps).start();
+      expect(marqueeFeeder.activate).toHaveBeenCalledWith('a', rect, 500);
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS, { currentRowOverrideText: '▶ ' });
+    });
+
+    it('when resolveMarqueeRow returns null, deactivate()s the feeder and bakes normally (no opts)', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      deps.resolveMarqueeRow.mockResolvedValue(null);
+      await new StreamController(deps).start();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('without resolveMarqueeRow configured, buildOverlay is called exactly as before (no opts arg at all)', async () => {
+      const { deps } = buildDeps(); // no createMarqueeFeeder/resolveMarqueeRow set
+      await new StreamController(deps).start();
+      expect(deps.buildOverlay).toHaveBeenCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('a track change that arrives while resolveMarqueeRow is still resolving does not activate a stale marquee', async () => {
+      const { deps, queue, marqueeFeeder, library } = withMarquee();
+      let resolveFirst!: (v: any) => void;
+      deps.resolveMarqueeRow.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));
+      const controller = new StreamController(deps);
+      const starting = controller.start(); // begins resolving marquee for track 'a'
+      queue.current.mockReturnValue(library.list()[1]);
+      deps.resolveMarqueeRow.mockResolvedValue(null);
+      await controller.next(); // supersedes the in-flight start() before it resolves
+      resolveFirst({ rect: { x: 0, y: 0, width: 1, height: 1 }, nameText: 'x', textWidth: 999, markerText: '▶ ' });
+      await starting;
+      expect(marqueeFeeder.activate).not.toHaveBeenCalled();
+    });
+
+    it('windowRows with no isCurrent row: deactivates the feeder and never throws (defensive — PlaylistQueue.windowSnapshot() always includes one today)', async () => {
+      const { deps, queue, marqueeFeeder } = withMarquee();
+      queue.windowSnapshot.mockReturnValue([{ key: 'b:0', text: '  a', isCurrent: false }]);
+      await expect(new StreamController(deps).start()).resolves.toBeUndefined();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.resolveMarqueeRow).not.toHaveBeenCalled();
+    });
+
+    it('resolveMarqueeRow rejecting degrades to plain truncated text (deactivates feeder, no currentRowOverrideText, does not throw)', async () => {
+      // A real failure mode: measureRowHeight's probe can throw for some template styles (see its
+      // own doc comment). This must never fail the whole track feed.
+      const { deps, marqueeFeeder } = withMarquee();
+      deps.resolveMarqueeRow.mockRejectedValue(new Error('measureRowHeight: expected 2 ink bands, found 1'));
+      await expect(new StreamController(deps).start()).resolves.toBeUndefined();
+      expect(marqueeFeeder.activate).not.toHaveBeenCalled();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('marqueeFeeder.activate() rejecting also degrades to plain truncated text, not a broken stream', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      const rect = { x: 0, y: 0, width: 100, height: 20 };
+      deps.resolveMarqueeRow.mockResolvedValue({ rect, nameText: 'a', textWidth: 500, markerText: '▶ ' });
+      marqueeFeeder.activate.mockRejectedValueOnce(new Error('render strip timed out'));
+      await expect(new StreamController(deps).start()).resolves.toBeUndefined();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('teardown closes the marquee feeder', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      const controller = new StreamController(deps);
+      await controller.start();
+      controller.stop();
+      expect(marqueeFeeder.close).toHaveBeenCalled();
+    });
   });
 });

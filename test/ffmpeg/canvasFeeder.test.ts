@@ -331,6 +331,142 @@ describe('CanvasFeeder', () => {
     });
   });
 
+  describe('concurrent render() calls (a timer tick racing a burst re-bake)', () => {
+    it('never lets two write+spawn cycles overlap: the second call\'s file write happens only after the first\'s ffmpeg has already been spawned', async () => {
+      const first = fakeChild(['frame-first']);
+      const second = fakeChild(['frame-second']);
+      const spawner: Spawner = jest.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+      const writeFileSync = jest.fn();
+      const { feeder } = buildFeeder({ spawner, writeFileSync });
+      feeder.attach(new PassThrough());
+
+      const p1 = feeder.render(overlay, null);
+      // The second call arrives while the first is still in flight (its ffmpeg hasn't closed
+      // yet) — it must NOT spawn or write its own file until the first one is fully done.
+      const p2 = feeder.render(overlay, null);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(spawner).toHaveBeenCalledTimes(1);
+      expect(writeFileSync).toHaveBeenCalledTimes(1);
+
+      first.emitClose(0);
+      await p1;
+      expect(spawner).toHaveBeenCalledTimes(2); // only now does the second call's write+spawn happen
+      second.emitClose(0);
+      await p2;
+    });
+
+    it('three calls queued behind a slow render ALL run, strictly in arrival order, and the LAST one is what ends up on the pipe', async () => {
+      // An earlier version of this fix discarded a queued call's finished result whenever a
+      // newer call had been ISSUED (not finished) in the meantime — real review caught that this
+      // throws away a render's own valid, just-completed work for no reason, and under any real
+      // host load could discard every render in a burst and freeze the canvas for the session.
+      // Plain FIFO order already guarantees the LAST call to actually finish is the most recently
+      // issued one — nothing needs to be skipped.
+      const first = fakeChild(['frame-first']);
+      const second = fakeChild(['frame-second']);
+      const third = fakeChild(['frame-third']);
+      const spawner: Spawner = jest.fn().mockReturnValueOnce(first).mockReturnValueOnce(second).mockReturnValueOnce(third);
+      const { feeder } = buildFeeder({ spawner });
+      const chunks: Buffer[] = [];
+      const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+      feeder.attach(videoPipe);
+
+      const p1 = feeder.render(overlay, null); // e.g. a timer tick, already in flight
+      const p2 = feeder.render(overlay, '0:01 / 1:00'); // queued behind it
+      const p3 = feeder.render(overlay, '0:02 / 1:00'); // queued behind that
+
+      first.emitClose(0);
+      await p1;
+      second.emitClose(0);
+      await p2;
+      chunks.length = 0;
+      third.emitClose(0);
+      await p3;
+
+      expect(spawner).toHaveBeenCalledTimes(3); // all three genuinely ran, none skipped
+      expect(chunks.length).toBe(1);
+      expect(chunks[0].toString()).toBe('frame-third');
+    });
+
+    it('a rejecting queued render does not stall the ones behind it', async () => {
+      const failing = fakeChild();
+      const ok = fakeChild(['frame-ok']);
+      const spawner: Spawner = jest.fn().mockReturnValueOnce(failing).mockReturnValueOnce(ok);
+      const { feeder } = buildFeeder({ spawner });
+      feeder.attach(new PassThrough());
+
+      const pFailing = feeder.render(overlay, null);
+      const pOk = feeder.render(overlay, null);
+
+      failing.emitClose(1); // non-zero exit -> render() rejects
+      await expect(pFailing).rejects.toThrow('canvas frame render failed with exit code 1');
+      ok.emitClose(0);
+      await expect(pOk).resolves.toBeUndefined();
+      expect(spawner).toHaveBeenCalledTimes(2);
+    });
+
+    it('render() after close() is a clean no-op: no write, no spawn', async () => {
+      const spawner: Spawner = jest.fn();
+      const writeFileSync = jest.fn();
+      const { feeder } = buildFeeder({ spawner, writeFileSync });
+      feeder.attach(new PassThrough());
+
+      feeder.close();
+      await feeder.render(overlay, null);
+
+      expect(writeFileSync).not.toHaveBeenCalled();
+      expect(spawner).not.toHaveBeenCalled();
+    });
+
+    it('a hung one-shot render times out and releases the queue for the next call, instead of freezing the canvas forever', async () => {
+      jest.useFakeTimers();
+      try {
+        const hung = fakeChild(); // never calls emitClose()
+        const next = fakeChild(['frame-next']);
+        const spawner: Spawner = jest.fn().mockReturnValueOnce(hung).mockReturnValueOnce(next);
+        const { feeder } = buildFeeder({ spawner });
+        const chunks: Buffer[] = [];
+        const videoPipe = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk); cb(); } });
+        feeder.attach(videoPipe);
+
+        const pHung = feeder.render(overlay, null);
+        const pNext = feeder.render(overlay, null);
+        const hungRejected = pHung.catch((err: Error) => err.message);
+
+        await jest.advanceTimersByTimeAsync(5000);
+        expect(await hungRejected).toContain('timed out');
+        expect(hung.kill).toHaveBeenCalledWith('SIGKILL');
+
+        next.emitClose(0);
+        await pNext;
+        expect(chunks.some((c) => c.toString() === 'frame-next')).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('close() while renders are queued behind an in-flight one wakes every queued caller instead of hanging', async () => {
+      const inFlight = fakeChild();
+      const spawner: Spawner = jest.fn().mockReturnValue(inFlight);
+      const { feeder } = buildFeeder({ spawner });
+      feeder.attach(new PassThrough());
+
+      const p1 = feeder.render(overlay, null);
+      const p2 = feeder.render(overlay, null);
+      const p3 = feeder.render(overlay, null);
+      await Promise.resolve();
+
+      feeder.close();
+      inFlight.emitClose(0);
+
+      await expect(Promise.race([
+        Promise.all([p1, p2, p3]),
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error('timed out — a queued render() never resolved')), 500)),
+      ])).resolves.toEqual([undefined, undefined, undefined]);
+    });
+  });
+
   it('skips a heartbeat write when the video pipe reports backpressure, instead of buffering unboundedly', async () => {
     jest.useFakeTimers();
     try {

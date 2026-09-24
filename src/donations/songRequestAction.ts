@@ -2,10 +2,10 @@ import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Track } from '../playlist/types';
-import { MediaSearchClient } from './mediaSearchClient';
+import { MediaSearchClient } from '../media/mediaSearchClient';
 
 export interface StreamInserter {
-  insertEphemeralTrack(userId: string, track: Track): void;
+  enqueueTrack(userId: string, track: Track): void;
 }
 
 export interface SongRequestDeps {
@@ -55,6 +55,7 @@ export async function executeSongRequest(deps: SongRequestDeps, query: string): 
     name: `🎁 Заказ: ${query}`,
     audioPath: filePath,
     coverPath: null,
+    ephemeral: true,
   };
   track._onFinished = () => {
     fs.unlink(filePath).catch((err) => {
@@ -63,7 +64,7 @@ export async function executeSongRequest(deps: SongRequestDeps, query: string): 
   };
 
   try {
-    deps.streamInserter.insertEphemeralTrack(deps.targetUserId, track);
+    deps.streamInserter.enqueueTrack(deps.targetUserId, track);
   } catch (err) {
     console.error('song request failed: no active local stream to insert into', err);
     await fs.unlink(filePath).catch((unlinkErr) => {

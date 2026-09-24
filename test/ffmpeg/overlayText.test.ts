@@ -1,7 +1,4 @@
-import { formatDuration, buildPlaylistWindowLines, buildEphemeralPlaylistWindowLines } from '../../src/ffmpeg/overlayText';
-import { Track } from '../../src/playlist/types';
-
-const track = (name: string): Track => ({ name, audioPath: `/music/${name}.mp3`, coverPath: null });
+import { formatDuration } from '../../src/ffmpeg/overlayText';
 
 describe('formatDuration', () => {
   it('formats sub-hour durations as M:SS', () => {
@@ -22,45 +19,5 @@ describe('formatDuration', () => {
   // real ffmpeg rejects, dropping every frame of a timer-bearing stream.
   it('leaves colons unescaped — filter-string escaping happens at the filter boundary only', () => {
     expect(formatDuration(65)).not.toContain('\\');
-  });
-});
-
-describe('buildPlaylistWindowLines', () => {
-  const tracks = [track('a'), track('b'), track('c'), track('d'), track('e')];
-
-  it('marks the current track and windows around it', () => {
-    const lines = buildPlaylistWindowLines(tracks, 2, 1, 1);
-    expect(lines).toEqual(['  b', '▶ c', '  d']);
-  });
-
-  it('clamps the window at the start and end of the list', () => {
-    expect(buildPlaylistWindowLines(tracks, 0, 2, 1)).toEqual(['▶ a', '  b']);
-    expect(buildPlaylistWindowLines(tracks, 4, 1, 2)).toEqual(['  d', '▶ e']);
-  });
-
-  it('returns an empty array for an empty playlist', () => {
-    expect(buildPlaylistWindowLines([], -1, 2, 7)).toEqual([]);
-  });
-});
-
-describe('buildEphemeralPlaylistWindowLines', () => {
-  const tracks = [track('a'), track('b'), track('c'), track('d'), track('e')];
-
-  it('marks the donation track and windows before/after the base anchor', () => {
-    const lines = buildEphemeralPlaylistWindowLines(tracks, 2, '🎁 Заказ: Blur - Song 2', 1, 1);
-    expect(lines).toEqual(['  c', '▶ 🎁 Заказ: Blur - Song 2', '  d']);
-  });
-
-  it('clamps the window at the start and end of the base playlist', () => {
-    expect(buildEphemeralPlaylistWindowLines(tracks, 0, '🎁 donation', 2, 1)).toEqual(['  a', '▶ 🎁 donation', '  b']);
-    expect(buildEphemeralPlaylistWindowLines(tracks, 4, '🎁 donation', 1, 2)).toEqual(['  e', '▶ 🎁 donation']);
-  });
-
-  it('falls back to just the donation track when the base anchor is unknown', () => {
-    expect(buildEphemeralPlaylistWindowLines(tracks, -1, '🎁 donation', 2, 7)).toEqual(['▶ 🎁 donation']);
-  });
-
-  it('falls back to just the donation track for an empty base playlist', () => {
-    expect(buildEphemeralPlaylistWindowLines([], 0, '🎁 donation', 2, 7)).toEqual(['▶ 🎁 donation']);
   });
 });

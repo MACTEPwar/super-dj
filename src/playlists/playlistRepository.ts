@@ -7,6 +7,7 @@ export interface PlaylistTrackView {
   audioPath: string;
   coverPath: string | null;
   overlayOverride: TrackOverlayOverride | null;
+  durationSeconds: number | null;
 }
 
 export class PlaylistRepository {
@@ -36,6 +37,7 @@ export class PlaylistRepository {
       audioPath: row.track.audioPath,
       coverPath: row.track.coverPath,
       overlayOverride: row.track.overlayOverride as TrackOverlayOverride | null,
+      durationSeconds: row.track.durationSeconds,
     }));
   }
 

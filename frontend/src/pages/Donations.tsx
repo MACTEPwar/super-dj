@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { interactionRulesApi, InteractionRule, InteractionRuleInput } from '../api/interactionRules';
+import { interactionRulesApi, ActionType, InteractionRule, InteractionRuleInput } from '../api/interactionRules';
+import { requestPageApi, requestPageUrl } from '../api/requestPage';
 import { ApiError } from '../api/client';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Drawer } from '../components/Drawer';
@@ -10,21 +11,24 @@ import { usePageTitle } from '../hooks/usePageTitle';
 
 const ACTION_TYPE_LABELS: Record<InteractionRule['actionType'], string> = {
   songRequest: 'donations.actionSongRequest',
+  libraryTrackRequest: 'donations.actionLibraryTrackRequest',
 };
 
 interface RuleFormState {
+  actionType: ActionType;
   minAmount: string;
   commandKeyword: string;
   enabled: boolean;
 }
 
-const EMPTY_FORM: RuleFormState = { minAmount: '', commandKeyword: 'song', enabled: true };
+const EMPTY_FORM: RuleFormState = { actionType: 'songRequest', minAmount: '', commandKeyword: 'song', enabled: true };
 
-function RuleForm({ initial, onSubmit, isPending, error }: {
+function RuleForm({ initial, onSubmit, isPending, error, isEdit }: {
   initial: RuleFormState;
   onSubmit: (input: InteractionRuleInput) => void;
   isPending: boolean;
   error: string | null;
+  isEdit: boolean;
 }) {
   const { t } = useTranslation();
   const [form, setForm] = useState(initial);
@@ -42,15 +46,26 @@ function RuleForm({ initial, onSubmit, isPending, error }: {
       return;
     }
     setValidationError(null);
-    onSubmit({ actionType: 'songRequest', enabled: form.enabled, minAmount: amount, commandKeyword: form.commandKeyword });
+    onSubmit({ actionType: form.actionType, enabled: form.enabled, minAmount: amount, commandKeyword: form.commandKeyword });
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
         <label className="block text-sm font-medium">{t('donations.form.actionType')}</label>
-        <select disabled className="mt-1 w-full rounded border p-2">
-          <option>{t('donations.actionSongRequest')}</option>
+        <select
+          value={form.actionType}
+          disabled={isEdit}
+          onChange={(e) => {
+            const actionType = e.target.value as ActionType;
+            const defaults: Record<ActionType, string> = { songRequest: 'song', libraryTrackRequest: 'track' };
+            const untouched = form.commandKeyword === defaults[form.actionType];
+            setForm({ ...form, actionType, commandKeyword: untouched ? defaults[actionType] : form.commandKeyword });
+          }}
+          className="mt-1 w-full rounded border p-2"
+        >
+          <option value="songRequest">{t('donations.actionSongRequest')}</option>
+          <option value="libraryTrackRequest">{t('donations.actionLibraryTrackRequest')}</option>
         </select>
       </div>
       <div>
@@ -93,7 +108,9 @@ function RuleForm({ initial, onSubmit, isPending, error }: {
 function RuleTestPanel({ rule }: { rule: InteractionRule }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState(
-    () => `!${rule.commandKeyword}:${t('donations.test.defaultQueryPlaceholder')}`,
+    () => rule.actionType === 'libraryTrackRequest'
+      ? `!${rule.commandKeyword}:${t('donations.test.pasteCommandHint')}`
+      : `!${rule.commandKeyword}:${t('donations.test.defaultQueryPlaceholder')}`,
   );
 
   const testMutation = useMutation({
@@ -133,6 +150,48 @@ function RuleTestPanel({ rule }: { rule: InteractionRule }) {
         {testMutation.isPending ? t('donations.test.running') : t('donations.test.run')}
       </button>
     </div>
+  );
+}
+
+function SharePageCard({ rules }: { rules: InteractionRule[] }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [confirmRotate, setConfirmRotate] = useState(false);
+  const linkQuery = useQuery({ queryKey: ['request-page'], queryFn: requestPageApi.get });
+  const onDone = () => queryClient.invalidateQueries({ queryKey: ['request-page'] });
+  const rotate = useMutation({ mutationFn: requestPageApi.rotate, onSuccess: () => { setConfirmRotate(false); onDone(); } });
+  const disable = useMutation({ mutationFn: requestPageApi.disable, onSuccess: onDone });
+  const token = linkQuery.data?.token ?? null;
+  const hasEnabledRule = rules.some((r) => r.actionType === 'libraryTrackRequest' && r.enabled);
+
+  return (
+    <section className="space-y-2 rounded-lg border p-3">
+      <h2 className="font-medium">{t('donations.sharePage.title')}</h2>
+      <p className="text-sm text-gray-500">{t('donations.sharePage.description')}</p>
+      {token ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <code className="break-all rounded bg-gray-50 px-2 py-1 text-sm">{requestPageUrl(token)}</code>
+          <button className="text-sm underline" onClick={() => navigator.clipboard?.writeText(requestPageUrl(token)).then(() => toast.success(t('donations.sharePage.copied')))}>{t('donations.sharePage.copy')}</button>
+          <button className="text-sm underline" onClick={() => setConfirmRotate(true)}>{t('donations.sharePage.rotate')}</button>
+          <button className="text-sm text-red-600" onClick={() => disable.mutate()}>{t('donations.sharePage.disable')}</button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-500">{t('donations.sharePage.none')}</span>
+          <button className="rounded bg-black px-3 py-1 text-sm text-white" onClick={() => rotate.mutate()}>{t('donations.sharePage.create')}</button>
+        </div>
+      )}
+      {!hasEnabledRule && <p className="text-xs text-amber-700">{t('donations.sharePage.noRuleHint')}</p>}
+      <ConfirmDialog
+        open={confirmRotate}
+        onOpenChange={setConfirmRotate}
+        title={t('donations.sharePage.rotateConfirmTitle')}
+        description={t('donations.sharePage.rotateConfirmDescription')}
+        confirmLabel={t('donations.sharePage.rotate')}
+        isPending={rotate.isPending}
+        onConfirm={() => rotate.mutate()}
+      />
+    </section>
   );
 }
 
@@ -185,6 +244,8 @@ export default function Donations() {
       </div>
       <p className="text-sm text-gray-500">{t('donations.subtitle')}</p>
 
+      <SharePageCard rules={rulesQuery.data ?? []} />
+
       {rulesQuery.isLoading ? (
         <p className="text-sm text-gray-500">{t('donations.loading')}</p>
       ) : (
@@ -223,10 +284,11 @@ export default function Donations() {
         {drawerState && (
           <RuleForm
             initial={drawerState.mode === 'edit'
-              ? { minAmount: String(drawerState.rule.minAmount), commandKeyword: drawerState.rule.commandKeyword, enabled: drawerState.rule.enabled }
+              ? { actionType: drawerState.rule.actionType, minAmount: String(drawerState.rule.minAmount), commandKeyword: drawerState.rule.commandKeyword, enabled: drawerState.rule.enabled }
               : EMPTY_FORM}
             isPending={createMutation.isPending || updateMutation.isPending}
             error={formError}
+            isEdit={drawerState.mode === 'edit'}
             onSubmit={(input) => (drawerState.mode === 'edit'
               ? updateMutation.mutate({ id: drawerState.rule.id, input })
               : createMutation.mutate(input))}

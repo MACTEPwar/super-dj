@@ -9,6 +9,8 @@ import { wrapAsync } from '../api/errorHandler';
 import { requireAuth, AuthenticatedRequest } from '../auth/authMiddleware';
 import { AuthService } from '../auth/authService';
 import { isValidColorValue } from '../templates/templateTypes';
+import { TrackPreviewService } from './trackPreviewService';
+import { MediaSearchError } from '../media/mediaSearchClient';
 
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.flac', '.m4a'];
 const COVER_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
@@ -45,6 +47,7 @@ export function createTrackRouter(
   authService: AuthService,
   uploadService: TrackUploadService,
   trackRepository: TrackRepository,
+  trackPreviewService: TrackPreviewService,
 ): Router {
   const router = Router();
   const auth = requireAuth(authService);
@@ -71,6 +74,50 @@ export function createTrackRouter(
     const userId = (req as AuthenticatedRequest).user!.id;
     const summary = await uploadService.upload(userId, name, audioFile, coverFile);
     res.status(200).json(summary);
+  }));
+
+  router.post('/search-preview', auth, wrapAsync(async (req, res) => {
+    const query = req.body?.query;
+    if (typeof query !== 'string' || query.trim().length === 0) {
+      throw new ApiError(400, 'body.query must be a non-empty string');
+    }
+    const userId = (req as AuthenticatedRequest).user!.id;
+    try {
+      const result = await trackPreviewService.search(userId, query);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof MediaSearchError) throw new ApiError(502, err.message);
+      throw err;
+    }
+  }));
+
+  router.get('/preview/:previewId', auth, wrapAsync(async (req, res) => {
+    const userId = (req as AuthenticatedRequest).user!.id;
+    const filePath = await trackPreviewService.getPreviewPath(userId, req.params.previewId);
+    res.set('Cache-Control', 'no-store');
+    res.sendFile(filePath);
+  }));
+
+  router.post('/from-preview/:previewId', auth, upload.fields([{ name: 'cover', maxCount: 1 }]), wrapAsync(async (req, res) => {
+    const files = req.files as { cover?: Express.Multer.File[] } | undefined;
+    const coverFile = files?.cover?.[0];
+    if (coverFile) {
+      coverFile.originalname = fixMulterFilenameEncoding(coverFile.originalname);
+      if (!COVER_EXTENSIONS.includes(path.extname(coverFile.originalname).toLowerCase())) {
+        throw new ApiError(400, 'unsupported cover format');
+      }
+      if (coverFile.size > MAX_COVER_BYTES) throw new ApiError(400, 'cover file too large');
+    }
+    const name = typeof req.body?.name === 'string' && req.body.name.length > 0 ? req.body.name : undefined;
+    const userId = (req as AuthenticatedRequest).user!.id;
+    const summary = await trackPreviewService.confirm(userId, req.params.previewId, name, coverFile);
+    res.status(200).json(summary);
+  }));
+
+  router.delete('/preview/:previewId', auth, wrapAsync(async (req, res) => {
+    const userId = (req as AuthenticatedRequest).user!.id;
+    await trackPreviewService.discard(userId, req.params.previewId);
+    res.status(200).json({});
   }));
 
   router.get('/', auth, wrapAsync(async (req, res) => {

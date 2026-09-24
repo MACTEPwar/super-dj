@@ -14,6 +14,7 @@ import Stream from './pages/Stream';
 import Templates from './pages/Templates';
 import TemplateEditor from './pages/TemplateEditor';
 import Donations from './pages/Donations';
+import RequestPage from './pages/RequestPage';
 
 const queryClient = new QueryClient();
 
@@ -26,6 +27,7 @@ export default function App() {
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/r/:token" element={<RequestPage />} />
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
                 <Route path="/" element={<Navigate to="/library" replace />} />
