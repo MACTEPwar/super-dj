@@ -299,12 +299,20 @@ export interface MarqueeStripFrameRequest {
   text: string;
   stripWidth: number;
   rowHeight: number;
+  // How much blank space to leave BEFORE the text starts, within the strip — the row's own
+  // width, so a crop window sliding across the strip shows a full row-width of blank before the
+  // text is first revealed (a clean "gliding in from the right" start) and, symmetrically, a
+  // full row-width of blank after it (the strip is sized to exactly fit `paddingLeft + text +
+  // paddingLeft` — see MarqueeFeeder.activate()). Without this, the text starts at the strip's
+  // own left edge, so the visible loop pops the name in and out at full width instead of easing
+  // through a blank gap on both sides.
+  paddingLeft: number;
 }
 
-// A single row's FULL text (no ellipsis, no wrap constraint) rendered into a fixed-size strip —
-// the one-shot Satori/resvg render MarqueeFeeder uses to build the source bitmap it crops per
-// frame for the current track's marquee (see src/ffmpeg/marqueeFeeder.ts and the design spec's
-// "Chosen approach: pre-rendered text strip + per-frame crop"). Called ONCE per marquee
+// A single row's FULL text (no ellipsis, no wrap constraint) rendered into a fixed-size, padded
+// strip — the one-shot Satori/resvg render MarqueeFeeder uses to build the source bitmap it crops
+// per frame for the current track's marquee (see src/ffmpeg/marqueeFeeder.ts and the design
+// spec's "Chosen approach: pre-rendered text strip + per-frame crop"). Called ONCE per marquee
 // activation, never per frame. The caller sizes stripWidth generously around the text's own
 // measured width (measureTextWidth) plus the row's own width on both sides — this render's own
 // width doesn't need to be pixel-exact, any extra blank space is harmless.
@@ -312,7 +320,7 @@ export async function renderMarqueeStripPixels(
   req: MarqueeStripFrameRequest,
   loadFont: (family: string, bold: boolean, italic: boolean) => Promise<Buffer> = defaultLoadFont,
 ): Promise<{ pixels: Uint8Array; width: number; height: number }> {
-  const { element, text, stripWidth, rowHeight } = req;
+  const { element, text, stripWidth, rowHeight, paddingLeft } = req;
   const variants = collectFontVariants([element]);
   const fonts = await Promise.all(variants.map(async (v) => ({
     name: v.family, data: await loadFont(v.family, v.bold, v.italic),
@@ -323,7 +331,7 @@ export async function renderMarqueeStripPixels(
     props: {
       style: {
         width: stripWidth, height: rowHeight, display: 'flex', position: 'relative',
-        whiteSpace: 'nowrap', fontSize: element.fontSize,
+        whiteSpace: 'nowrap', fontSize: element.fontSize, paddingLeft,
         ...textStyleToCss(element.style, element.color),
       },
       children: text,

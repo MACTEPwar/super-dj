@@ -981,13 +981,15 @@ describe('StreamController', () => {
       expect(marqueeFeeder.attach).toHaveBeenCalledWith(encoderChild.marqueePipe);
     });
 
-    it('when resolveMarqueeRow returns a rect, activate()s the feeder and bakes with currentRowOverrideText', async () => {
+    it('when resolveMarqueeRow returns a rect, activate()s the feeder with the NAME ONLY and bakes with the marker as currentRowOverrideText', async () => {
       const { deps, marqueeFeeder } = withMarquee();
       const rect = { x: 0, y: 0, width: 100, height: 20 };
-      deps.resolveMarqueeRow.mockResolvedValue({ rect, textWidth: 500 });
+      // BASE_ROWS' current row is '▶ a' — markerText is the caller-measured '▶ ' prefix, nameText
+      // is the rest; activate() must never receive the marker (it draws only the scrolling name).
+      deps.resolveMarqueeRow.mockResolvedValue({ rect, nameText: 'a', textWidth: 500, markerText: '▶ ' });
       await new StreamController(deps).start();
-      expect(marqueeFeeder.activate).toHaveBeenCalledWith('▶ a', rect, 500);
-      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS, { currentRowOverrideText: '▶' });
+      expect(marqueeFeeder.activate).toHaveBeenCalledWith('a', rect, 500);
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS, { currentRowOverrideText: '▶ ' });
     });
 
     it('when resolveMarqueeRow returns null, deactivate()s the feeder and bakes normally (no opts)', async () => {
@@ -1013,7 +1015,7 @@ describe('StreamController', () => {
       queue.current.mockReturnValue(library.list()[1]);
       deps.resolveMarqueeRow.mockResolvedValue(null);
       await controller.next(); // supersedes the in-flight start() before it resolves
-      resolveFirst({ rect: { x: 0, y: 0, width: 1, height: 1 }, textWidth: 999 });
+      resolveFirst({ rect: { x: 0, y: 0, width: 1, height: 1 }, nameText: 'x', textWidth: 999, markerText: '▶ ' });
       await starting;
       expect(marqueeFeeder.activate).not.toHaveBeenCalled();
     });
@@ -1024,6 +1026,27 @@ describe('StreamController', () => {
       await expect(new StreamController(deps).start()).resolves.toBeUndefined();
       expect(marqueeFeeder.deactivate).toHaveBeenCalled();
       expect(deps.resolveMarqueeRow).not.toHaveBeenCalled();
+    });
+
+    it('resolveMarqueeRow rejecting degrades to plain truncated text (deactivates feeder, no currentRowOverrideText, does not throw)', async () => {
+      // A real failure mode: measureRowHeight's probe can throw for some template styles (see its
+      // own doc comment). This must never fail the whole track feed.
+      const { deps, marqueeFeeder } = withMarquee();
+      deps.resolveMarqueeRow.mockRejectedValue(new Error('measureRowHeight: expected 2 ink bands, found 1'));
+      await expect(new StreamController(deps).start()).resolves.toBeUndefined();
+      expect(marqueeFeeder.activate).not.toHaveBeenCalled();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS);
+    });
+
+    it('marqueeFeeder.activate() rejecting also degrades to plain truncated text, not a broken stream', async () => {
+      const { deps, marqueeFeeder } = withMarquee();
+      const rect = { x: 0, y: 0, width: 100, height: 20 };
+      deps.resolveMarqueeRow.mockResolvedValue({ rect, nameText: 'a', textWidth: 500, markerText: '▶ ' });
+      marqueeFeeder.activate.mockRejectedValueOnce(new Error('render strip timed out'));
+      await expect(new StreamController(deps).start()).resolves.toBeUndefined();
+      expect(marqueeFeeder.deactivate).toHaveBeenCalled();
+      expect(deps.buildOverlay).toHaveBeenLastCalledWith(expect.anything(), BASE_ROWS);
     });
 
     it('teardown closes the marquee feeder', async () => {

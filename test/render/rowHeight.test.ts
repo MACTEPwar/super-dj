@@ -68,3 +68,16 @@ it('a very small fontSize still yields two distinct ink bands, not a merged one'
   expect(height).toBeGreaterThan(0);
   expect(height).toBeLessThan(20);
 });
+
+it('a playlist element styled with a shadow does not throw (blur bleeds ink across the probe rows if not stripped)', async () => {
+  // Reproduced against a real render: the template editor's own default shadow (blur 4) merges
+  // the 2-row probe's ink bands into 1 unless the probe element strips shadow/stroke first — row
+  // pitch is a font-metric property, independent of paint effects. Regression for that fix.
+  const withShadow = {
+    ...el(20),
+    style: { ...el(20).style, shadow: { color: '#000000', blur: 4, offsetX: 2, offsetY: 2 } },
+  };
+  const height = await measureRowHeight(withShadow, testLoadFont);
+  expect(height).toBeGreaterThan(0);
+  expect(height).toBeLessThan(40);
+});

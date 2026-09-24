@@ -16,7 +16,7 @@ export interface MarqueeFeederOptions {
   element: PlaylistElement;
   region: PlaylistWindowRegion;
   fps: number;
-  renderStrip?: (element: PlaylistElement, text: string, stripWidth: number, rowHeight: number) => Promise<Buffer>;
+  renderStrip?: (element: PlaylistElement, text: string, stripWidth: number, rowHeight: number, paddingLeft: number) => Promise<Buffer>;
   nowMs?: () => number;
 }
 
@@ -67,18 +67,27 @@ export class MarqueeFeeder {
     this.pacer.writeDueFrames();
   }
 
-  // estimatedTextWidth: the caller's own measureTextWidth() result for `text` — sizes the strip
-  // generously; doesn't need to be pixel-exact (see renderMarqueeStripPixels's doc comment).
+  // text: the row's NAME ONLY — the caller (StreamController) strips the "▶ " marker before
+  // calling this, and bakes the marker itself as the static row override, so the marker is
+  // never covered by the scrolling name (see streamScene.ts's resolveMarqueeRow). estimatedTextWidth:
+  // the caller's own measureTextWidth() result for `text` — sizes the strip generously; doesn't
+  // need to be pixel-exact (see renderMarqueeStripPixels's doc comment).
   async activate(text: string, rect: MarqueeRowRect, estimatedTextWidth: number): Promise<void> {
     const generation = ++this.generation;
     const evenRect: MarqueeRowRect = {
       x: floorEven(rect.x), y: floorEven(rect.y),
       width: floorEven(rect.width), height: floorEven(rect.height),
     };
+    // A full row-width of blank BEFORE the text, so the crop window sliding across the strip
+    // shows a full blank row before the text is first revealed (and, symmetrically, a full
+    // blank row after it — the strip's own width already reserves that trailing space). Without
+    // this the text starts at the strip's own edge and the loop pops the name in and out at full
+    // width instead of gliding through a blank gap on both sides.
+    const paddingLeft = evenRect.width;
     const stripWidth = floorEven(2 * evenRect.width + Math.ceil(estimatedTextWidth) + 2);
     const renderStrip = this.options.renderStrip
-      ?? ((el, t, w, h) => renderMarqueeStripFrame({ element: el, text: t, stripWidth: w, rowHeight: h }));
-    const stripRgba = await renderStrip(this.options.element, text, stripWidth, evenRect.height);
+      ?? ((el, t, w, h, p) => renderMarqueeStripFrame({ element: el, text: t, stripWidth: w, rowHeight: h, paddingLeft: p }));
+    const stripRgba = await renderStrip(this.options.element, text, stripWidth, evenRect.height, paddingLeft);
     if (this.closed || generation !== this.generation) return;
     this.active = { stripRgba, stripWidth, rect: evenRect, activatedAtMs: this.nowMs() };
   }

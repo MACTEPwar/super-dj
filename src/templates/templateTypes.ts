@@ -41,12 +41,16 @@ export interface TextStyle {
   italic: boolean;
   stroke?: { color: string; width: number };
   shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
-  // Single-line truncation ('nowrap' + 'hidden' + '…') — makes sense for title/text (single-
-  // line by design) but not playlist (multi-line, wrapping is intentional). TextStyle is shared
-  // across all three element types rather than split per-type, so this is left enabled at the
-  // type/validation level for playlist too; see sceneRenderer.ts's textStyleToCss for why, and
-  // TemplateEditor.tsx, which is where this is actually kept out of a playlist author's hands
-  // (the properties-panel checkbox only renders for title/text).
+  // Single-line truncation ('nowrap' + 'hidden' + '…') — every playlist row is ALSO forced to a
+  // single line, unconditionally, by playlistWindowNode's own per-row style (sceneRenderer.ts) —
+  // not through this field, which only ever applies to the CONTAINER a playlist element's rows
+  // sit in, not each row individually. TextStyle is shared across all three element types rather
+  // than split per-type, so this field is left enabled at the type/validation level for playlist
+  // too; see sceneRenderer.ts's textStyleToCss for why, and TemplateEditor.tsx, which is where
+  // this is actually kept out of a playlist author's hands (the properties-panel checkbox only
+  // renders for title/text) — a playlist element with this set directly via the API would
+  // additionally single-line-truncate the WHOLE WINDOW's own container against el.width, which
+  // is a confusing, accepted gap, not a crash.
   overflow?: 'ellipsis';
 }
 

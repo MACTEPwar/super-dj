@@ -21,12 +21,27 @@ function fakeStrip(stripWidth: number, height: number): Buffer {
   return buf;
 }
 
+// A REALISTIC strip: transparent everywhere except an opaque "text" band of `textWidth` pixels
+// starting at `paddingLeft` — mirroring what renderMarqueeStripPixels actually produces (blank
+// leading pad, then text, then blank trailing pad). Used by the motion test below, which needs to
+// tell "blank pad" apart from "opaque text" as the crop slides, not just "opaque everywhere".
+function fakePaddedStrip(stripWidth: number, height: number, paddingLeft: number, textWidth: number): Buffer {
+  const buf = Buffer.alloc(stripWidth * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = paddingLeft; x < Math.min(paddingLeft + textWidth, stripWidth); x += 1) {
+      const i = (y * stripWidth + x) * 4;
+      buf[i] = 200; buf[i + 1] = 0; buf[i + 2] = 0; buf[i + 3] = 255;
+    }
+  }
+  return buf;
+}
+
 function setup() {
   jest.useFakeTimers();
   const clock = { ms: 0 };
   const renderCalls: any[] = [];
-  const renderStrip = jest.fn(async (element: any, text: string, stripWidth: number, rowHeight: number) => {
-    renderCalls.push({ element, text, stripWidth, rowHeight });
+  const renderStrip = jest.fn(async (element: any, text: string, stripWidth: number, rowHeight: number, paddingLeft: number) => {
+    renderCalls.push({ element, text, stripWidth, rowHeight, paddingLeft });
     return fakeStrip(stripWidth, rowHeight);
   });
   const feeder = new MarqueeFeeder({ element: ELEMENT, region: REGION, fps: 30, renderStrip, nowMs: () => clock.ms });
@@ -67,6 +82,8 @@ describe('MarqueeFeeder', () => {
     // stripWidth = floorEven(2*20 + ceil(100) + 2) = floorEven(142) = 142
     expect(renderCalls[0].stripWidth).toBe(142);
     expect(renderCalls[0].rowHeight).toBe(10);
+    // paddingLeft = evenRect.width (the row's own width) — see activate()'s doc comment.
+    expect(renderCalls[0].paddingLeft).toBe(20);
 
     const last = pipe.writes[pipe.writes.length - 1];
     // Row rect is the whole region here (0,0 offset, 20x10) — some pixel inside it must now be
@@ -75,26 +92,48 @@ describe('MarqueeFeeder', () => {
     feeder.close();
   });
 
-  it('the visible crop moves over time (motion), and wraps back to fully-blank at the loop boundary', async () => {
-    const { feeder, pipe, advance, clock } = setup();
+  it('the visible crop slides over time: blank leading pad -> opaque text -> blank trailing pad -> wraps back to opaque text', async () => {
+    const { feeder, pipe, advance } = setup();
+    // A realistic strip (blank/text/blank), not opaque-everywhere: only this shape can distinguish
+    // "still in the pad" from "found the text" from "genuinely wrapped back to the text", which is
+    // what this test exists to prove. rect.width=20 => paddingLeft=20 (evenRect.width);
+    // estimatedTextWidth=40 => stripWidth = floorEven(2*20+40+2) = 82; textWidth (fake, actual
+    // opaque band) = 40 => textPlusBox = stripWidth - rect.width = 62, loop period = 62/80s = 775ms.
+    // Pixel checked is (5,5) within the rect, i.e. strip x = cropX+5: blank while cropX+5 < 20
+    // (cropX < 15) or cropX+5 >= 60 (cropX >= 55); opaque while cropX in [15,55).
+    const renderStrip = jest.fn(async (_el: any, _t: string, stripWidth: number, rowHeight: number, paddingLeft: number) =>
+      fakePaddedStrip(stripWidth, rowHeight, paddingLeft, 40));
+    (feeder as any).options.renderStrip = renderStrip;
     feeder.attach(pipe);
     // Node truncates a fractional setInterval delay to an integer ms (Math.trunc), so at fps=30
     // the tick actually fires every 33ms, not the nominal 33.33ms the pacer's own due-frame count
     // is based on — one real idle tick (>=33ms) must land before activate() so there is an
-    // existing transparent write to compare "still hasn't moved yet" against; fakeStrip() is
-    // opaque everywhere, so there's no in-strip "leading blank" pixel to crop into.
+    // existing transparent write to compare "still hasn't moved yet" against.
     await advance(40);
-    await feeder.activate('x', RECT, 40); // small strip: stripWidth = floorEven(2*20+40+2) = 102, textPlusBox = 82
-    // Just activated, well under one more tick period (33ms) later: still the pre-activation
-    // idle write, unmoved and transparent.
-    await advance(10);
-    const atStart = pipe.writes[pipe.writes.length - 1];
-    expect(alphaAt(atStart, REGION.width, REGION.height, 5, 5)).toBe(0);
-    // Well into the loop (but not past it: 82px / 80px/s ≈ 1.025s), the crop has moved onto the
-    // opaque text region.
-    await advance(500);
-    const mid = pipe.writes[pipe.writes.length - 1];
-    expect(alphaAt(mid, REGION.width, REGION.height, 5, 5)).toBe(255);
+    await feeder.activate('x', RECT, 40);
+
+    // ~60ms elapsed: cropX ≈ 4.8, still inside the leading pad [0,15) → blank.
+    await advance(60);
+    const leadingPad = pipe.writes[pipe.writes.length - 1];
+    expect(alphaAt(leadingPad, REGION.width, REGION.height, 5, 5)).toBe(0);
+
+    // ~400ms elapsed: cropX ≈ 32, inside the text band [15,55) → opaque.
+    await advance(340);
+    const text1 = pipe.writes[pipe.writes.length - 1];
+    expect(alphaAt(text1, REGION.width, REGION.height, 5, 5)).toBe(255);
+
+    // ~730ms elapsed: cropX ≈ 58.4, inside the trailing pad [55,62) → blank again.
+    await advance(330);
+    const trailingPad = pipe.writes[pipe.writes.length - 1];
+    expect(alphaAt(trailingPad, REGION.width, REGION.height, 5, 5)).toBe(0);
+
+    // ~1000ms elapsed: past the 775ms loop boundary, cropX ≈ (1000/1000*80) % 62 ≈ 18.8, back in
+    // the SECOND loop's text band [15,55) → opaque again, proving a genuine wrap rather than a
+    // freeze at the trailing pad.
+    await advance(270);
+    const text2 = pipe.writes[pipe.writes.length - 1];
+    expect(alphaAt(text2, REGION.width, REGION.height, 5, 5)).toBe(255);
+
     feeder.close();
   });
 

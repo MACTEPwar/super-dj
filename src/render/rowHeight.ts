@@ -48,7 +48,16 @@ export async function measureRowHeight(
   const probeWidth = Math.max(40, Math.ceil(element.fontSize * 3));
   const probeHeight = Math.ceil(element.fontSize * 6);
   const region = { x: 0, y: 0, width: probeWidth, height: probeHeight, originX: 0, originY: 0 };
-  const probeElement: PlaylistElement = { ...element, x: 0, y: 0, width: probeWidth };
+  // Row pitch (line-height) is a font-metric property — it does not depend on paint effects like
+  // shadow/stroke. Stripped from the probe deliberately: a shadow's blur bleeds ink across the
+  // gap between the two probe rows (verified against a real render — blur >= 4, the template
+  // editor's own default shadow, merges what should be 2 distinct ink bands into 1), which made
+  // this throw for any playlist element styled with a shadow, even though its real row height is
+  // perfectly well-defined.
+  const probeElement: PlaylistElement = {
+    ...element, x: 0, y: 0, width: probeWidth,
+    style: { ...element.style, shadow: undefined, stroke: undefined },
+  };
   const rows = settledRows([
     { key: 'a', text: 'Ag', isCurrent: false },
     { key: 'b', text: 'Ag', isCurrent: false },

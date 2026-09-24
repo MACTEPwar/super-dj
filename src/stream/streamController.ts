@@ -54,7 +54,7 @@ export interface StreamControllerDeps {
   // Present only when the template has an on-canvas playlist element — see buildStreamScene().
   createPlaylistWindowFeeder: (() => PlaylistWindowFeederLike) | undefined;
   createMarqueeFeeder: (() => MarqueeFeederLike) | undefined;
-  resolveMarqueeRow: ((currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; textWidth: number } | null>) | undefined;
+  resolveMarqueeRow: ((currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; nameText: string; textWidth: number; markerText: string } | null>) | undefined;
   buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean; currentRowOverrideText?: string }) => Promise<NowPlayingOverlay>;
   // Absent means "never retry" — an unexpected exit goes straight to 'error', matching this
   // controller's pre-reconnect behavior. Injected (rather than hardcoded here) so the caller
@@ -214,13 +214,31 @@ export class StreamController {
       const rowIndex = rows.findIndex((r) => r.isCurrent);
       const currentRow = rowIndex >= 0 ? rows[rowIndex] : undefined;
       if (currentRow) {
-        const resolved = await this.deps.resolveMarqueeRow(currentRow.text, rowIndex);
-        if (generation !== this.sessionGeneration) return;
-        if (resolved) {
-          await this.marqueeFeeder?.activate(currentRow.text, resolved.rect, resolved.textWidth);
+        // Never let a marquee failure fail the whole track feed — before the marquee existed,
+        // buildOverlay's own render failures already degraded to a blank overlay rather than
+        // rejecting (see its try/catch), and this must degrade the same way: to plain,
+        // already-ellipsis-truncated static text, not a broken stream. A real failure mode this
+        // guards: measureRowHeight's probe can throw for some template styles (see its own doc
+        // comment), and a strip render can time out — either would otherwise reject
+        // feedCurrentTrack entirely, breaking start()/next()/previous() and stalling auto-advance.
+        try {
+          const resolved = await this.deps.resolveMarqueeRow(currentRow.text, rowIndex);
           if (generation !== this.sessionGeneration) return;
-          this.marqueeOverrideText = '▶';
-        } else {
+          // Only bake the blank-marker override when there's actually a feeder that will draw
+          // the scrolling name over it — resolveMarqueeRow/createMarqueeFeeder are two separate
+          // optional deps (always set together by streamScene.ts's own livePlaylist gate, but
+          // nothing in the type system enforces that pairing), and hiding the name with nothing
+          // drawing it would be strictly worse than the plain truncated text this falls back to.
+          if (resolved && this.marqueeFeeder) {
+            await this.marqueeFeeder.activate(resolved.nameText, resolved.rect, resolved.textWidth);
+            if (generation !== this.sessionGeneration) return;
+            this.marqueeOverrideText = resolved.markerText;
+          } else {
+            this.marqueeFeeder?.deactivate();
+            this.marqueeOverrideText = undefined;
+          }
+        } catch (err) {
+          console.error('marquee resolution failed, falling back to plain truncated text', err);
           this.marqueeFeeder?.deactivate();
           this.marqueeOverrideText = undefined;
         }
@@ -245,7 +263,7 @@ export class StreamController {
     this.playlistAnimator?.abort();
     this.overlayGeneration += 1;
     this.currentOverlay = overlay;
-    this.bakedRows = rows;
+    this.bakedRows = this.displayRows(rows);
     this.bakedTrack = track;
     this.trackStartedAt = Date.now();
     this.trackStartOffsetSeconds = startOffsetSeconds;
@@ -266,12 +284,24 @@ export class StreamController {
     // (bakedTrack was still the previous track then), so `rows` may predate it. Catch the window
     // up; a plain no-op ('none' plan, no bake) when nothing was queued in the meantime.
     if (this.playlistAnimator && generation === this.sessionGeneration && this.state === 'streaming') {
-      this.playlistAnimator.queueChanged(this.windowRows());
+      this.playlistAnimator.queueChanged(this.displayRows(this.windowRows()));
     }
   }
 
   private windowRows(): WindowRow[] {
     return this.deps.queue.windowSnapshot(PLAYLIST_WINDOW_BEFORE, PLAYLIST_WINDOW_AFTER);
+  }
+
+  // Rows as actually DISPLAYED. pipe:7 (PlaylistWindowFeeder) renders WindowRow[] directly with
+  // no override mechanism of its own — unlike the baked-canvas render (buildOverlay), which
+  // replaces the isCurrent row's text independently via its own currentRowOverrideText opt —
+  // so anything handed to the animator/feeder must already reflect the marquee override, or the
+  // burst layer would draw the current row's FULL name underneath pipe:8's own scrolling marker,
+  // doubling it and covering the marquee's clean blank-marker baseline for the whole burst.
+  private displayRows(rows: WindowRow[]): WindowRow[] {
+    return this.marqueeOverrideText !== undefined
+      ? rows.map((r) => (r.isCurrent ? { ...r, text: this.marqueeOverrideText! } : r))
+      : rows;
   }
 
   // The animator's hook back into the canvas: builds the current track's overlay from `rows`
@@ -291,7 +321,7 @@ export class StreamController {
     if (generation !== this.overlayGeneration || !this.canvasFeeder) return false;
     if (this.state !== 'streaming' && this.state !== 'paused') return false;
     this.currentOverlay = overlay;
-    if (!opts.omitLivePlaylist) this.bakedRows = rows;
+    if (!opts.omitLivePlaylist) this.bakedRows = this.displayRows(rows);
     const elapsed = this.state === 'paused' ? this.pausedElapsedSeconds : this.elapsedTrackSeconds();
     await this.canvasFeeder.render(overlay, this.timerText(elapsed));
     return true;
@@ -538,7 +568,7 @@ export class StreamController {
     // feedCurrentTrack() simply bakes the new snapshot.
     if (this.playlistAnimator && (this.state === 'streaming' || this.state === 'paused')
       && this.deps.queue.current() === this.bakedTrack) {
-      this.playlistAnimator.queueChanged(this.windowRows());
+      this.playlistAnimator.queueChanged(this.displayRows(this.windowRows()));
     }
     this.deps.onStatusChanged?.();
   }

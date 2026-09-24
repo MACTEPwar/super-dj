@@ -26,7 +26,7 @@ function buildEncoder(spawner: PipeSpawner) {
   return new PersistentEncoder({
     spawner, width: 1280, height: 720, fps: 30, heartbeatFps: 5,
     rtmpUrl: 'rtmp://x', streamKey: 'k', backgroundPath: '/assets/background.png',
-    playlistWindow: undefined,
+    playlistWindow: undefined, marquee: undefined,
   });
 }
 

@@ -14,7 +14,7 @@ export interface PersistentEncoderParams {
   gifOverlays?: GifOverlayConfig[];
   canvasPlacement?: CanvasPlacement;
   playlistWindow: PlaylistWindowLayerConfig | undefined;
-  marquee?: MarqueeLayerConfig;
+  marquee: MarqueeLayerConfig | undefined;
 }
 
 // Spawned once in StreamController.start() and never restarted for the life of the session —

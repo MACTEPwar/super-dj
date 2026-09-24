@@ -83,17 +83,28 @@ export interface StreamScene {
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: (target: RtmpTarget) => PersistentEncoder;
-  createPulseVisualizer?: () => PulseVisualizer;
+  // These four are deliberately `T | undefined` rather than `field?:` — LocalStreamManager's own
+  // forwarding of this object's fields into StreamControllerDeps had the identical `field?:` shape
+  // once, and silently dropping two of them (a real bug found live on the demo stand — see
+  // CLAUDE.md's marquee section) compiled clean and stalled the encoder in production. A required-
+  // but-nullable key forces every future reader of THIS object (there is currently only one:
+  // localStreamManager.ts) to make an explicit decision about each field, closing the same bug
+  // class one layer up from where it was actually fixed.
+  createPulseVisualizer: (() => PulseVisualizer) | undefined;
   // Present only when the template has an on-canvas playlist element (pipe:7 exists exactly then).
-  createPlaylistWindowFeeder?: () => PlaylistWindowFeeder;
+  createPlaylistWindowFeeder: (() => PlaylistWindowFeeder) | undefined;
   // Present only when the template has an on-canvas playlist element — same gate as
   // createPlaylistWindowFeeder.
-  createMarqueeFeeder?: () => MarqueeFeeder;
+  createMarqueeFeeder: (() => MarqueeFeeder) | undefined;
   // Given the current row's own rendered text (already prefixed "▶ ...") and its index within the
-  // window, decides whether it overflows the playlist element's width and, if so, its exact rect
-  // plus the measured text width (MarqueeFeeder.activate's own sizing hint). Returns null when it
-  // fits. Absent when the template has no playlist element.
-  resolveMarqueeRow?: (currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; textWidth: number } | null>;
+  // window, decides whether the NAME portion (marker stripped) overflows the space left after the
+  // marker and, if so, the exact rect for just the name (starting right after the marker, so the
+  // marker itself never scrolls and is never covered), the name text alone (what
+  // MarqueeFeeder.activate() should render — NOT the marker), the measured name width, and the
+  // marker text itself (what the caller should use as the baked row's override, so the marker
+  // stays visibly baked while only the name scrolls live). Returns null when the name fits, or
+  // when there's no room for it at all. Absent when the template has no playlist element.
+  resolveMarqueeRow: ((currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; nameText: string; textWidth: number; markerText: string } | null>) | undefined;
 }
 
 // Applies a track's overlayOverride.color to every title/text element's own color — playlist/
@@ -260,16 +271,39 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
       }
     : null;
 
+  // PlaylistQueue.windowSnapshot() always prefixes the current row with exactly this 2-character
+  // marker (queue.ts: `▶ ${name}`, not itself an exported constant there — matching that file's
+  // own convention of not extracting one). Pinned here as a named length, not a silent
+  // `.slice(0, 2)`, so the coupling is visible if that prefix ever changes.
+  const CURRENT_ROW_MARKER_LENGTH = 2; // '▶' + ' '
+
   const resolveMarqueeRow = livePlaylist
-    ? async (currentRowText: string, rowIndex: number): Promise<{ rect: MarqueeRowRect; textWidth: number } | null> => {
+    ? async (
+        currentRowText: string,
+        rowIndex: number,
+      ): Promise<{ rect: MarqueeRowRect; nameText: string; textWidth: number; markerText: string } | null> => {
         const el = livePlaylist.element;
-        const textWidth = await measureTextWidth(currentRowText, el.style.fontFamily, el.style.bold, el.style.italic, el.fontSize);
-        if (textWidth <= el.width) return null;
+        const markerText = currentRowText.slice(0, CURRENT_ROW_MARKER_LENGTH);
+        const nameText = currentRowText.slice(CURRENT_ROW_MARKER_LENGTH);
+        const markerWidth = await measureTextWidth(markerText, el.style.fontFamily, el.style.bold, el.style.italic, el.fontSize);
+        // No room for any scrolling text at all — fall back to the plain, already-ellipsis-
+        // truncated full row (no marquee), rather than a marquee rect with zero or negative width.
+        if (markerWidth >= el.width) return null;
+        const nameWidth = await measureTextWidth(nameText, el.style.fontFamily, el.style.bold, el.style.italic, el.fontSize);
+        if (nameWidth <= el.width - markerWidth) return null;
         const rowHeight = await measureRowHeight(el);
-        return {
-          rect: { x: el.x, y: el.y + rowIndex * rowHeight, width: el.width, height: rowHeight },
-          textWidth,
-        };
+        const rect: MarqueeRowRect = { x: el.x + markerWidth, y: el.y + rowIndex * rowHeight, width: el.width - markerWidth, height: rowHeight };
+        // Defense in depth: computePlaylistWindowRegion clamps pipe:8's own region to the canvas,
+        // but a rowIndex far enough down (a playlist element near the canvas bottom) could still
+        // push this rect outside that region. blitYuva420p has no bounds check of its own — an
+        // out-of-range y here would write into the wrong plane offsets and corrupt the frame
+        // rather than fail cleanly, so skip the marquee entirely rather than risk that.
+        const region = livePlaylist.region;
+        const fitsRegion = rect.x >= region.x && rect.y >= region.y
+          && rect.x + rect.width <= region.x + region.width
+          && rect.y + rect.height <= region.y + region.height;
+        if (!fitsRegion) return null;
+        return { rect, nameText, textWidth: nameWidth, markerText };
       }
     : undefined;
 

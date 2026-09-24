@@ -282,8 +282,10 @@ describe('buildStreamScene — current-track marquee', () => {
     (getImageFrameCount as jest.Mock).mockResolvedValue(1);
   });
 
-  it('resolveMarqueeRow returns null at exactly the element width (the <= boundary, not flapping)', async () => {
-    (measureTextWidth as jest.Mock).mockResolvedValue(400); // exactly playlistEl's own width, 400
+  it('resolveMarqueeRow returns null when the name exactly fills the remaining width (the <= boundary, not flapping)', async () => {
+    // '▶ ' (the marker) measures 20 first, then 'a' (the name) measures exactly the remaining
+    // width, 400-20=380 — not an overflow.
+    (measureTextWidth as jest.Mock).mockResolvedValueOnce(20).mockResolvedValueOnce(380);
     const { deps, templateRepository } = buildDeps();
     templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
     const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
@@ -292,25 +294,47 @@ describe('buildStreamScene — current-track marquee', () => {
     expect(measureRowHeight).not.toHaveBeenCalled();
   });
 
-  it('resolveMarqueeRow activates one unit past the element width (the > boundary)', async () => {
-    (measureTextWidth as jest.Mock).mockResolvedValue(401); // one unit past playlistEl's width, 400
+  it('resolveMarqueeRow activates one unit past the remaining width (the > boundary)', async () => {
+    (measureTextWidth as jest.Mock).mockResolvedValueOnce(20).mockResolvedValueOnce(381); // one past 400-20=380
     (measureRowHeight as jest.Mock).mockResolvedValue(26);
     const { deps, templateRepository } = buildDeps();
     templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
     const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
     const result = await scene.resolveMarqueeRow!('▶ a', 0);
     expect(result).not.toBeNull();
-    expect(result!.textWidth).toBe(401);
+    expect(result!.textWidth).toBe(381);
+    expect(result!.nameText).toBe('a');
+    expect(result!.markerText).toBe('▶ ');
   });
 
-  it('resolveMarqueeRow returns a rect + textWidth when the measured text width overflows', async () => {
-    (measureTextWidth as jest.Mock).mockResolvedValue(500); // wider than playlistEl's width, 400
+  it('resolveMarqueeRow returns null when the marker alone already fills the element (no room for any scroll)', async () => {
+    (measureTextWidth as jest.Mock).mockResolvedValueOnce(400); // marker alone == the whole element width
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
+    const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
+    const result = await scene.resolveMarqueeRow!('▶ a', 0);
+    expect(result).toBeNull();
+    // Only the marker was ever measured — the name's own width is irrelevant once there's no room.
+    expect(measureTextWidth).toHaveBeenCalledTimes(1);
+    expect(measureRowHeight).not.toHaveBeenCalled();
+  });
+
+  it('resolveMarqueeRow returns a marker-shifted rect + nameText + textWidth + markerText when the name overflows', async () => {
+    (measureTextWidth as jest.Mock).mockResolvedValueOnce(20).mockResolvedValueOnce(500); // marker 20, name 500 (overflow)
     (measureRowHeight as jest.Mock).mockResolvedValue(26);
     const { deps, templateRepository } = buildDeps();
     templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
     const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
     const result = await scene.resolveMarqueeRow!('▶ a much longer name', 2);
-    expect(result).toEqual({ rect: { x: 10, y: 10 + 2 * 26, width: 400, height: 26 }, textWidth: 500 });
+    // rect.x/width are shifted/shrunk by the marker's own measured width (20) — the marker itself
+    // is drawn as the static row override, never covered by the scrolling name (see
+    // streamController.ts's displayRows()).
+    expect(result).toEqual({
+      rect: { x: 10 + 20, y: 10 + 2 * 26, width: 400 - 20, height: 26 },
+      nameText: 'a much longer name',
+      textWidth: 500,
+      markerText: '▶ ',
+    });
   });
 
   it('createMarqueeFeeder is present exactly when createPlaylistWindowFeeder is', async () => {
