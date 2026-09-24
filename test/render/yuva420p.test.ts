@@ -55,17 +55,6 @@ describe('blitYuva420p', () => {
     expect(dest[20 + 1 * 2 + 1]).toBe(128); // V
   });
 
-  it('handles asymmetric offset where x != y', () => {
-    const dest = transparentYuva420p(4, 4);
-    const px = (r: number, g: number, b: number, a: number) => Uint8Array.from([r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a]);
-    const src = rgbaToYuva420p(px(255, 0, 0, 200), 2, 2); // Red with alpha=200
-
-    blitYuva420p(dest, 4, 4, src, 2, 2, 1, 2); // x=1 (odd... wait, must be even!)
-
-    // Actually, x and y MUST be even, so let's use x=2, y=1... but y must also be even!
-    // Let me use x=2, y=0 instead.
-  });
-
   it('handles asymmetric offset x != y (x=2, y=0)', () => {
     const dest = transparentYuva420p(4, 4);
     const px = (r: number, g: number, b: number, a: number) => Uint8Array.from([r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a]);
@@ -105,6 +94,15 @@ describe('blitYuva420p', () => {
     const aOff = 24 + 6 + 6;
     expect(dest[aOff + 2 * 6 + 2]).toBe(150); // (2, 2)
     expect(dest[aOff + 2 * 6 + 1]).toBe(0);  // (1, 2) adjacent, unchanged
+
+    // U/V planes: exercises odd chroma stride (destCw=3, not a power of two).
+    // dest is 6x4 -> chroma is 3x2. The blit's chroma (1x1 for src 2x2) is placed at chroma
+    // position (1, 1) of dest's 3x2 chroma plane (offset = baseOff + 1*destCw + 1 = baseOff + 4).
+    // Green (0, 255, 0) with BT.601 gives U ≈ 54, V ≈ 34.
+    expect(dest[24 + 1 * 3 + 1]).toBe(54); // U plane
+    expect(dest[30 + 1 * 3 + 1]).toBe(34); // V plane
+    expect(dest[24 + 0 * 3 + 0]).toBe(128); // U (0,0) unchanged
+    expect(dest[30 + 0 * 3 + 0]).toBe(128); // V (0,0) unchanged
   });
 
   it('handles placement at (0,0)', () => {
