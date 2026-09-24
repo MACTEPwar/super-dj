@@ -170,6 +170,8 @@ export class LocalStreamManager extends EventEmitter {
         }),
         createPulseVisualizer: scene.createPulseVisualizer,
         createPlaylistWindowFeeder: scene.createPlaylistWindowFeeder,
+        createMarqueeFeeder: scene.createMarqueeFeeder,
+        resolveMarqueeRow: scene.resolveMarqueeRow,
         // No isRetryableDestination veto: there is no destination at THIS layer any more — the
         // encoder pushes into a container-network MediaMTX that essentially never drops for network
         // reasons, so reconnect here fires only on a genuine ffmpeg crash/OOM. Destination-side

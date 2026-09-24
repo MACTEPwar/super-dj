@@ -22,7 +22,7 @@ function relaySession(userId: string, token = TOKEN): LocalRelaySession {
 }
 
 function fakeScene() {
-  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {} };
+  const encoderChild = { videoPipe: {}, audioPipe: {}, pulsePipe: {}, aboveCanvasPipe: {}, playlistWindowPipe: {}, marqueePipe: {} };
   const encoder = { start: jest.fn().mockReturnValue(encoderChild), stop: jest.fn() };
   const canvasFeeder = { attach: jest.fn(), render: jest.fn().mockResolvedValue(undefined), close: jest.fn() };
   const audioRelay = {
@@ -45,6 +45,8 @@ function fakeScene() {
     createPersistentEncoder,
     createPulseVisualizer: undefined,
     createPlaylistWindowFeeder: undefined,
+    createMarqueeFeeder: undefined,
+    resolveMarqueeRow: undefined,
   };
   return { scene, encoder, canvasFeeder, audioRelay, createPersistentEncoder };
 }
@@ -115,6 +117,33 @@ describe('LocalStreamManager.start', () => {
     await manager.start('user-1', 'playlist-1');
     expect(authRegistry.register).toHaveBeenCalledWith(expect.objectContaining({ path: `live/${TOKEN}` }));
     expect(authRegistry.register.mock.invocationCallOrder[0]).toBeLessThan(encoder.start.mock.invocationCallOrder[0]);
+  });
+
+  // Regression test: found live on the demo stand (real-binary verification of the marquee
+  // feature) that createMarqueeFeeder/resolveMarqueeRow were silently dropped between
+  // buildStreamScene()'s returned StreamScene and the real StreamController this manager
+  // constructs — both are optional fields, so omitting them from the `new StreamController({...})`
+  // call site is valid TypeScript with no compile error, and every other test in this file sets
+  // createPlaylistWindowFeeder/createMarqueeFeeder to undefined, so nothing exercised the
+  // "scene actually HAS one, does it really reach a real StreamController" path. This is that
+  // path: a real StreamController is constructed here (not mocked), so if these deps are dropped
+  // at the call site, spawnPipeline()'s own `if (this.deps.createMarqueeFeeder)` guard is what
+  // would silently skip attaching the feeder — exactly the bug that stalled the persistent
+  // encoder forever in production (pipe:8 declared to ffmpeg but never fed).
+  it('constructs the playlist-window AND marquee feeders when the scene provides them, proving both reach the real StreamController', async () => {
+    const { manager, scene } = buildManager();
+    const playlistWindowFeeder = { attach: jest.fn(), showRows: jest.fn().mockResolvedValue(undefined), animate: jest.fn().mockResolvedValue(undefined), goIdle: jest.fn(), close: jest.fn() };
+    const marqueeFeeder = { attach: jest.fn(), activate: jest.fn().mockResolvedValue(undefined), deactivate: jest.fn(), close: jest.fn() };
+    (scene as { createPlaylistWindowFeeder?: unknown }).createPlaylistWindowFeeder = jest.fn().mockReturnValue(playlistWindowFeeder);
+    (scene as { createMarqueeFeeder?: unknown }).createMarqueeFeeder = jest.fn().mockReturnValue(marqueeFeeder);
+    (scene as { resolveMarqueeRow?: unknown }).resolveMarqueeRow = jest.fn().mockResolvedValue(null);
+
+    await manager.start('user-1', 'playlist-1');
+
+    expect(scene.createPlaylistWindowFeeder).toHaveBeenCalled();
+    expect(playlistWindowFeeder.attach).toHaveBeenCalled();
+    expect(scene.createMarqueeFeeder).toHaveBeenCalled();
+    expect(marqueeFeeder.attach).toHaveBeenCalled();
   });
 
   it('rejects with 409 when this user already has an active stream', async () => {
