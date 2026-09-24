@@ -1,10 +1,14 @@
 jest.mock('../../src/ffmpeg/duration', () => ({ getAudioDurationSeconds: jest.fn().mockResolvedValue(100) }));
 jest.mock('../../src/ffmpeg/imageFrameCount', () => ({ getImageFrameCount: jest.fn().mockResolvedValue(1) }));
 jest.mock('../../src/render/renderOverlay', () => ({ renderTemplatePng: jest.fn().mockResolvedValue(Buffer.from('fake-png')) }));
+jest.mock('../../src/render/textWidth', () => ({ measureTextWidth: jest.fn() }));
+jest.mock('../../src/render/rowHeight', () => ({ measureRowHeight: jest.fn() }));
 
 import { buildStreamScene, StreamSceneDeps } from '../../src/stream/streamScene';
 import { renderTemplatePng } from '../../src/render/renderOverlay';
 import { getImageFrameCount } from '../../src/ffmpeg/imageFrameCount';
+import { measureTextWidth } from '../../src/render/textWidth';
+import { measureRowHeight } from '../../src/render/rowHeight';
 import { BLANK_OVERLAY_PNG } from '../../src/render/blankOverlay';
 import { DEFAULT_TEMPLATE_ELEMENTS } from '../../src/templates/templateTypes';
 
@@ -263,5 +267,83 @@ describe('buildStreamScene — playlist window burst layer (pipe:7)', () => {
     const { scene, args } = await encoderArgs(deps, { ...params, templateId: 'tpl-1' });
     expect(scene.createPlaylistWindowFeeder).toBeUndefined();
     expect(args).not.toContain('pipe:7');
+  });
+});
+
+describe('buildStreamScene — current-track marquee', () => {
+  const style = { fontFamily: 'DejaVu Sans', bold: false, italic: false };
+  const playlistEl = (x: number, y: number) => ({ type: 'playlist', x, y, width: 400, fontSize: 20, color: { mode: 'solid', color: '#ffffff' }, style });
+  const titleEl = { type: 'title', x: 0, y: 0, width: 100, fontSize: 20, color: { mode: 'solid', color: '#ffffff' }, style };
+  const ROWS = [{ key: 'b:0', text: '▶ a', isCurrent: true }, { key: 'b:1', text: '  b', isCurrent: false }];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (renderTemplatePng as jest.Mock).mockResolvedValue(Buffer.from('fake-png'));
+    (getImageFrameCount as jest.Mock).mockResolvedValue(1);
+  });
+
+  it('resolveMarqueeRow returns null at exactly the element width (the <= boundary, not flapping)', async () => {
+    (measureTextWidth as jest.Mock).mockResolvedValue(400); // exactly playlistEl's own width, 400
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
+    const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
+    const result = await scene.resolveMarqueeRow!('▶ a', 0);
+    expect(result).toBeNull();
+    expect(measureRowHeight).not.toHaveBeenCalled();
+  });
+
+  it('resolveMarqueeRow activates one unit past the element width (the > boundary)', async () => {
+    (measureTextWidth as jest.Mock).mockResolvedValue(401); // one unit past playlistEl's width, 400
+    (measureRowHeight as jest.Mock).mockResolvedValue(26);
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
+    const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
+    const result = await scene.resolveMarqueeRow!('▶ a', 0);
+    expect(result).not.toBeNull();
+    expect(result!.textWidth).toBe(401);
+  });
+
+  it('resolveMarqueeRow returns a rect + textWidth when the measured text width overflows', async () => {
+    (measureTextWidth as jest.Mock).mockResolvedValue(500); // wider than playlistEl's width, 400
+    (measureRowHeight as jest.Mock).mockResolvedValue(26);
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
+    const scene = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
+    const result = await scene.resolveMarqueeRow!('▶ a much longer name', 2);
+    expect(result).toEqual({ rect: { x: 10, y: 10 + 2 * 26, width: 400, height: 26 }, textWidth: 500 });
+  });
+
+  it('createMarqueeFeeder is present exactly when createPlaylistWindowFeeder is', async () => {
+    const { deps, templateRepository } = buildDeps();
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-1', userId: 'user-1', elements: [playlistEl(10, 10)] });
+    const withPlaylist = await buildStreamScene(deps, { ...params, templateId: 'tpl-1' });
+    expect(withPlaylist.createMarqueeFeeder).toBeDefined();
+    expect(withPlaylist.resolveMarqueeRow).toBeDefined();
+
+    templateRepository.findById.mockResolvedValue({ id: 'tpl-2', userId: 'user-1', elements: [titleEl] });
+    const withoutPlaylist = await buildStreamScene(deps, { ...params, templateId: 'tpl-2' });
+    expect(withoutPlaylist.createMarqueeFeeder).toBeUndefined();
+    expect(withoutPlaylist.createPlaylistWindowFeeder).toBeUndefined();
+    expect(withoutPlaylist.resolveMarqueeRow).toBeUndefined();
+  });
+
+  it("buildOverlay with currentRowOverrideText replaces only the isCurrent row's text before rendering", async () => {
+    const { deps } = buildDeps();
+    const scene = await buildStreamScene(deps, params);
+    const rows = [
+      { key: 'b:0', text: '  before', isCurrent: false },
+      { key: 'b:1', text: '▶ the real long name', isCurrent: true },
+    ];
+    await scene.buildOverlay(scene.tracks[0], rows, { currentRowOverrideText: '▶' });
+    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
+    expect(call.playlistLines).toEqual(['  before', '▶']);
+  });
+
+  it('buildOverlay without currentRowOverrideText renders the real row text, unchanged', async () => {
+    const { deps } = buildDeps();
+    const scene = await buildStreamScene(deps, params);
+    await scene.buildOverlay(scene.tracks[0], ROWS);
+    const call = (renderTemplatePng as jest.Mock).mock.calls[0][0];
+    expect(call.playlistLines).toEqual(['▶ a', '  b']);
   });
 });

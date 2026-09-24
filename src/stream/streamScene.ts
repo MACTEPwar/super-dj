@@ -23,6 +23,9 @@ import {
 } from '../templates/templateTypes';
 import { renderTemplatePng } from '../render/renderOverlay';
 import { BLANK_OVERLAY_PNG } from '../render/blankOverlay';
+import { measureTextWidth } from '../render/textWidth';
+import { measureRowHeight } from '../render/rowHeight';
+import { MarqueeFeeder, MarqueeRowRect } from '../ffmpeg/marqueeFeeder';
 import { LibraryLike } from './streamController';
 
 // Also declared (as '1280x720'/'30fps'-shaped strings) in src/destinations/youtubeApiClient.ts's
@@ -76,13 +79,21 @@ export interface StreamScene {
   // windowRows is PlaylistQueue.windowSnapshot() — the playlist element's lines. omitLivePlaylist
   // renders "variant A": the first playlist element left out, while the pipe:7 burst layer draws
   // it instead (see PlaylistWindowAnimator).
-  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean }) => Promise<NowPlayingOverlay>;
+  buildOverlay: (track: Track, windowRows: WindowRow[], opts?: { omitLivePlaylist?: boolean; currentRowOverrideText?: string }) => Promise<NowPlayingOverlay>;
   createCanvasFeeder: () => CanvasFeeder;
   createAudioRelay: () => AudioRelay;
   createPersistentEncoder: (target: RtmpTarget) => PersistentEncoder;
   createPulseVisualizer?: () => PulseVisualizer;
   // Present only when the template has an on-canvas playlist element (pipe:7 exists exactly then).
   createPlaylistWindowFeeder?: () => PlaylistWindowFeeder;
+  // Present only when the template has an on-canvas playlist element — same gate as
+  // createPlaylistWindowFeeder.
+  createMarqueeFeeder?: () => MarqueeFeeder;
+  // Given the current row's own rendered text (already prefixed "▶ ...") and its index within the
+  // window, decides whether it overflows the playlist element's width and, if so, its exact rect
+  // plus the measured text width (MarqueeFeeder.activate's own sizing hint). Returns null when it
+  // fits. Absent when the template has no playlist element.
+  resolveMarqueeRow?: (currentRowText: string, rowIndex: number) => Promise<{ rect: MarqueeRowRect; textWidth: number } | null>;
 }
 
 // Applies a track's overlayOverride.color to every title/text element's own color — playlist/
@@ -249,14 +260,30 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
       }
     : null;
 
+  const resolveMarqueeRow = livePlaylist
+    ? async (currentRowText: string, rowIndex: number): Promise<{ rect: MarqueeRowRect; textWidth: number } | null> => {
+        const el = livePlaylist.element;
+        const textWidth = await measureTextWidth(currentRowText, el.style.fontFamily, el.style.bold, el.style.italic, el.fontSize);
+        if (textWidth <= el.width) return null;
+        const rowHeight = await measureRowHeight(el);
+        return {
+          rect: { x: el.x, y: el.y + rowIndex * rowHeight, width: el.width, height: rowHeight },
+          textWidth,
+        };
+      }
+    : undefined;
+
   const buildOverlay = async (
     track: Track,
     windowRows: WindowRow[],
-    opts: { omitLivePlaylist?: boolean } = {},
+    opts: { omitLivePlaylist?: boolean; currentRowOverrideText?: string } = {},
   ): Promise<NowPlayingOverlay> => {
     // The rows come from PlaylistQueue.windowSnapshot() — queued (inserted) tracks included, and
     // an inserted current track anchored where the base playlist will pick back up.
-    const playlistLines = windowRowLines(windowRows);
+    const effectiveRows = opts.currentRowOverrideText !== undefined
+      ? windowRows.map((r) => (r.isCurrent ? { ...r, text: opts.currentRowOverrideText! } : r))
+      : windowRows;
+    const playlistLines = windowRowLines(effectiveRows);
     const durationSeconds = await getAudioDurationSeconds(track.audioPath);
 
     const renderLayer = (elements: TemplateElement[], layer: 'below' | 'above') => {
@@ -355,10 +382,17 @@ export async function buildStreamScene(deps: StreamSceneDeps, params: BuildStrea
             fps: PLAYLIST_WINDOW_FPS, layer: livePlaylist.layer,
           }
         : undefined,
+      marquee: livePlaylist
+        ? { x: livePlaylist.region.x, y: livePlaylist.region.y, width: livePlaylist.region.width, height: livePlaylist.region.height, fps: PLAYLIST_WINDOW_FPS }
+        : undefined,
     }),
     createPlaylistWindowFeeder: livePlaylist
       ? () => new PlaylistWindowFeeder({ element: livePlaylist.element, region: livePlaylist.region, fps: PLAYLIST_WINDOW_FPS })
       : undefined,
+    createMarqueeFeeder: livePlaylist
+      ? () => new MarqueeFeeder({ element: livePlaylist.element, region: livePlaylist.region, fps: PLAYLIST_WINDOW_FPS })
+      : undefined,
+    resolveMarqueeRow,
     createPulseVisualizer: equalizerElement
       ? () => new PulseVisualizer({
           width: Math.round(equalizerElement.width),
